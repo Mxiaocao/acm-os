@@ -2,7 +2,14 @@
 name = "acm-os-infrastructure"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 acm-os-application = { path = "../acm-os-application" }
 acm-os-domain = { path = "../acm-os-domain" }
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

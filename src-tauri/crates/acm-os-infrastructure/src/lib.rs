@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
 
-#[derive(Debug, Default)]
-pub struct Infrastructure;
+mod persistence;
+
+pub use persistence::{start_database, DatabaseRuntime};

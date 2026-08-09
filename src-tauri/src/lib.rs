@@ -1,11 +1,28 @@
 mod ipc;
 
+use acm_os_application::{StartupRecoveryReason, StartupStatusQuery};
+use acm_os_infrastructure::DatabaseRuntime;
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _infrastructure = acm_os_infrastructure::Infrastructure::default();
-
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ipc::foundation_status])
+        .setup(|app| {
+            let database = match app.path().app_local_data_dir() {
+                Ok(app_private_data) => tauri::async_runtime::block_on(
+                    acm_os_infrastructure::start_database(&app_private_data),
+                ),
+                Err(_) => DatabaseRuntime::recovery(StartupRecoveryReason::AppDataUnavailable),
+            };
+            let startup_query = StartupStatusQuery::new(database.status().clone());
+            app.manage(database);
+            app.manage(startup_query);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            ipc::foundation_status,
+            ipc::startup_status
+        ])
         .run(tauri::generate_context!())
         .expect("error while running ACM-OS");
 }

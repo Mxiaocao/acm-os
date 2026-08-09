@@ -19,6 +19,10 @@ const validRustPackages = () => [
     dependencies: [
       { name: "acm-os-application", kind: null, path: "local/application" },
       { name: "acm-os-domain", kind: null, path: "local/domain" },
+      { name: "sqlx", kind: null },
+      { name: "tokio", kind: null },
+      { name: "tempfile", kind: "dev" },
+      { name: "tokio", kind: "dev" },
     ],
   },
   {
@@ -27,6 +31,7 @@ const validRustPackages = () => [
       { name: "acm-os-application", kind: null, path: "local/application" },
       { name: "acm-os-infrastructure", kind: null, path: "local/infrastructure" },
       { name: "serde", kind: null },
+      { name: "serde_json", kind: "dev" },
       { name: "tauri", kind: null },
       { name: "tauri-build", kind: "build" },
     ],
@@ -49,7 +54,7 @@ const validFrontendPackage = () => ({
   },
 });
 
-test("accepts the frozen B0.1 dependency graph", () => {
+test("accepts the current explicitly allowed dependency graph", () => {
   assert.deepEqual(rustDependencyViolations(validRustPackages()), []);
   assert.deepEqual(frontendDependencyViolations(validFrontendPackage()), []);
 });
