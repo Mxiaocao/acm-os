@@ -1,6 +1,6 @@
 # ACM-OS
 
-ACM-OS is in incremental BUILD. The current repository corresponds to M0 through B0.2.
+ACM-OS is in incremental BUILD. The current repository corresponds to M0 through B0.3.
 
 ## B0.1 checks
 
@@ -28,4 +28,8 @@ B0.2 stores the SQLite database in Tauri App Local Data, runs forward-only embed
 
 Frontend and desktop builds require the Node and Rust/Tauri prerequisites described by the current official Tauri documentation.
 
-No workspace configuration, Vault, Contest, Review, Today, or other B0.3+ behavior belongs in B0.2.
+## B0.3 workspace configuration
+
+B0.3 adds the initial Active Vault, Problem Notes Root, and Knowledge Root configuration. All three paths must already exist as directories. The two roots must be strict descendants of the resolved Vault and may not be equal or contain one another. Validation is owned by Application, filesystem resolution and SQLite persistence are owned by Infrastructure, and React uses typed IPC only.
+
+The initial configuration is create-only. Replacing an Active Vault remains blocked until the later Validate → Preview → Confirm → Commit flow exists. B0.3 does not scan Markdown, adopt existing notes, create problem files, or add B0.4 workspace shells.

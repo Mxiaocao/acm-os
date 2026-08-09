@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use acm_os_application::{StartupGateStatus, StartupRecoveryReason};
+use acm_os_application::{
+    StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
+    WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
+};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -34,6 +37,79 @@ impl DatabaseRuntime {
 
     pub fn status(&self) -> &StartupGateStatus {
         &self.status
+    }
+
+    fn pool(&self) -> Result<&SqlitePool, WorkspacePersistenceError> {
+        self._pool
+            .as_ref()
+            .ok_or(WorkspacePersistenceError::Unavailable)
+    }
+}
+
+impl WorkspaceConfigurationPort for DatabaseRuntime {
+    async fn resolve_directory(
+        &self,
+        path: &str,
+    ) -> Result<String, WorkspacePathResolutionError> {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let resolved = std::fs::canonicalize(path)
+                .map_err(|_| WorkspacePathResolutionError::Unavailable)?;
+            if !resolved.is_dir() {
+                return Err(WorkspacePathResolutionError::NotDirectory);
+            }
+            resolved
+                .to_str()
+                .map(str::to_owned)
+                .ok_or(WorkspacePathResolutionError::Unavailable)
+        })
+        .await
+        .map_err(|_| WorkspacePathResolutionError::Unavailable)?
+    }
+
+    async fn load_workspace_configuration(
+        &self,
+    ) -> Result<Option<WorkspaceConfiguration>, WorkspacePersistenceError> {
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT active_vault_path, problem_root_path, knowledge_root_path \
+             FROM workspace_settings WHERE singleton = 1",
+        )
+        .fetch_optional(self.pool()?)
+        .await
+        .map_err(|_| WorkspacePersistenceError::Unavailable)?;
+
+        row.map(|(active_vault_path, problem_root_path, knowledge_root_path)| {
+            WorkspaceConfiguration::from_resolved(
+                active_vault_path,
+                problem_root_path,
+                knowledge_root_path,
+            )
+            .map_err(|_| WorkspacePersistenceError::Unavailable)
+        })
+        .transpose()
+    }
+
+    async fn insert_workspace_configuration(
+        &self,
+        configuration: &WorkspaceConfiguration,
+    ) -> Result<(), WorkspacePersistenceError> {
+        sqlx::query(
+            "INSERT INTO workspace_settings (\
+                singleton, active_vault_path, problem_root_path, knowledge_root_path\
+             ) VALUES (1, ?1, ?2, ?3)",
+        )
+        .bind(configuration.active_vault_path())
+        .bind(configuration.problem_root_path())
+        .bind(configuration.knowledge_root_path())
+        .execute(self.pool()?)
+        .await
+        .map(|_| ())
+        .map_err(|error| match error {
+            sqlx::Error::Database(database_error) if database_error.is_unique_violation() => {
+                WorkspacePersistenceError::AlreadyConfigured
+            }
+            _ => WorkspacePersistenceError::Unavailable,
+        })
     }
 }
 
@@ -241,14 +317,14 @@ async fn validate_schema_contract(
         };
     }
 
-    if schema_version != 1 {
+    if !matches!(schema_version, 1 | 2) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
         });
     }
 
-    let expected_objects = vec![
+    let mut expected_objects = vec![
         (
             "table".to_owned(),
             "_sqlx_migrations".to_owned(),
@@ -260,6 +336,13 @@ async fn validate_schema_contract(
             "app_metadata".to_owned(),
         ),
     ];
+    if schema_version >= 2 {
+        expected_objects.push((
+            "table".to_owned(),
+            "workspace_settings".to_owned(),
+            "workspace_settings".to_owned(),
+        ));
+    }
     if objects != expected_objects {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
@@ -295,6 +378,10 @@ async fn validate_schema_contract(
         || metadata[0].2.is_empty()
     {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    if schema_version >= 2 {
+        validate_workspace_settings_contract(pool).await?;
     }
 
     Ok(())
@@ -403,6 +490,102 @@ async fn validate_app_metadata_columns(
     }
 }
 
+async fn validate_workspace_settings_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    let actual: Vec<SqliteColumnContract> =
+        sqlx::query_as("PRAGMA table_xinfo('workspace_settings')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    let expected = vec![
+        (0, "singleton".to_owned(), "INTEGER".to_owned(), 0, None, 1, 0),
+        (
+            1,
+            "active_vault_path".to_owned(),
+            "TEXT".to_owned(),
+            1,
+            None,
+            0,
+            0,
+        ),
+        (
+            2,
+            "problem_root_path".to_owned(),
+            "TEXT".to_owned(),
+            1,
+            None,
+            0,
+            0,
+        ),
+        (
+            3,
+            "knowledge_root_path".to_owned(),
+            "TEXT".to_owned(),
+            1,
+            None,
+            0,
+            0,
+        ),
+        (
+            4,
+            "updated_at_utc".to_owned(),
+            "TEXT".to_owned(),
+            1,
+            Some("strftime('%Y-%m-%dT%H:%M:%fZ', 'now')".to_owned()),
+            0,
+            0,
+        ),
+    ];
+    if actual != expected {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace_settings'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+    .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+    const EXPECTED_WORKSPACE_SETTINGS_SQL: &str = "\
+        CREATE TABLE workspace_settings (\
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+            active_vault_path TEXT NOT NULL CHECK (length(active_vault_path) > 0),\
+            problem_root_path TEXT NOT NULL CHECK (length(problem_root_path) > 0),\
+            knowledge_root_path TEXT NOT NULL CHECK (length(knowledge_root_path) > 0),\
+            updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+        )";
+    if normalize_schema_sql(&table_sql) != normalize_schema_sql(EXPECTED_WORKSPACE_SETTINGS_SQL) {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT singleton, active_vault_path, problem_root_path, knowledge_root_path, \
+                updated_at_utc FROM workspace_settings",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if rows.len() > 1
+        || rows.first().is_some_and(|row| {
+            row.0 != 1
+                || row.1.is_empty()
+                || row.2.is_empty()
+                || row.3.is_empty()
+                || row.4.is_empty()
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    if let Some(row) = rows.first() {
+        WorkspaceConfiguration::from_resolved(row.1.clone(), row.2.clone(), row.3.clone())
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    }
+
+    Ok(())
+}
+
 async fn verify_integrity(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
     let results: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_all(pool)
@@ -487,7 +670,11 @@ async fn verify_and_publish_backup(
 mod tests {
     use std::fs;
 
-    use acm_os_application::{StartupGateStatus, StartupRecoveryReason};
+    use acm_os_application::{
+        configure_workspace, query_workspace_configuration, StartupGateStatus,
+        StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
+        WorkspaceConfigurationStatus, WorkspacePathField,
+    };
     use sqlx::Executor;
     use tempfile::TempDir;
 
@@ -508,6 +695,41 @@ mod tests {
         .expect("create migration ledger");
     }
 
+    async fn create_version_one_database(pool: &SqlitePool) {
+        create_empty_migration_ledger(pool).await;
+        pool.execute(
+            "CREATE TABLE app_metadata (\
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                schema_generation INTEGER NOT NULL CHECK (schema_generation > 0), \
+                created_at_utc TEXT NOT NULL \
+                    DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+            )",
+        )
+        .await
+        .expect("create version one metadata");
+        pool.execute(
+            "INSERT INTO app_metadata (singleton, schema_generation) VALUES (1, 1)",
+        )
+        .await
+        .expect("insert version one metadata");
+
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 1)
+            .expect("version one migration");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+                (version, description, success, checksum, execution_time) \
+             VALUES (?1, ?2, 1, ?3, 0)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(pool)
+        .await
+        .expect("record version one migration");
+    }
+
     #[tokio::test]
     async fn new_database_migrates_and_passes_integrity() {
         let directory = TempDir::new().expect("temporary app data");
@@ -515,14 +737,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 1 }
+            &StartupGateStatus::Ready { schema_version: 2 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 1);
+        assert_eq!(ledger_count, 2);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -729,7 +951,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 2), \
+                        CHECK (schema_generation < 3), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -833,7 +1055,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 1 }
+            &StartupGateStatus::Ready { schema_version: 2 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -850,6 +1072,54 @@ mod tests {
         .await
         .expect("inspect version zero backup");
         assert_eq!(application_tables, 0);
+    }
+
+    #[tokio::test]
+    async fn version_one_database_is_backed_up_then_migrated_to_version_two() {
+        let directory = TempDir::new().expect("temporary app data");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("version one database");
+        create_version_one_database(&pool).await;
+        pool.close().await;
+
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::Ready { schema_version: 2 }
+        );
+        let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
+        let workspace_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
+                .fetch_one(runtime_pool)
+                .await
+                .expect("empty workspace settings");
+        assert_eq!(workspace_rows, 0);
+
+        let backup_directory = directory.path().join("backups").join("pre-migration");
+        let backups: Vec<PathBuf> = fs::read_dir(backup_directory)
+            .expect("pre-migration backup directory")
+            .map(|entry| entry.expect("backup entry").path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup_pool = connect_read_only(&backups[0])
+            .await
+            .expect("version one backup");
+        assert_eq!(
+            inspect_schema_version(&backup_pool)
+                .await
+                .expect("backup schema version"),
+            1
+        );
+        let workspace_table_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name = 'workspace_settings')",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("inspect version one backup");
+        assert_eq!(workspace_table_exists, 0);
     }
 
     #[tokio::test]
@@ -886,12 +1156,264 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_configuration_persists_across_restart() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let vault = TempDir::new().expect("temporary vault");
+        let problem_root = vault.path().join("Problems");
+        let knowledge_root = vault.path().join("Knowledge");
+        fs::create_dir(&problem_root).expect("problem root");
+        fs::create_dir(&knowledge_root).expect("knowledge root");
+
+        let runtime = start_database(app_data.path()).await;
+        assert_eq!(
+            query_workspace_configuration(&runtime)
+                .await
+                .expect("initial workspace status"),
+            WorkspaceConfigurationStatus::Unconfigured
+        );
+        let saved = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().to_string_lossy().into_owned(),
+                problem_root_path: problem_root.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("configure workspace");
+        let expected_vault = fs::canonicalize(vault.path())
+            .expect("canonical vault")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(saved.active_vault_path(), expected_vault);
+        drop(runtime);
+
+        let restarted = start_database(app_data.path()).await;
+        assert_eq!(
+            query_workspace_configuration(&restarted)
+                .await
+                .expect("persisted workspace status"),
+            WorkspaceConfigurationStatus::Configured(saved)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_roots_must_be_inside_vault_and_non_overlapping() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let vault = TempDir::new().expect("temporary vault");
+        let outside = TempDir::new().expect("outside directory");
+        let problem_root = vault.path().join("Problems");
+        let nested_knowledge_root = problem_root.join("Knowledge");
+        fs::create_dir(&problem_root).expect("problem root");
+        fs::create_dir(&nested_knowledge_root).expect("nested knowledge root");
+        let runtime = start_database(app_data.path()).await;
+
+        let outside_error = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().to_string_lossy().into_owned(),
+                problem_root_path: problem_root.to_string_lossy().into_owned(),
+                knowledge_root_path: outside.path().to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect_err("outside root must be rejected");
+        assert_eq!(
+            outside_error,
+            WorkspaceConfigurationError::RootOutsideVault {
+                field: WorkspacePathField::KnowledgeRoot,
+            }
+        );
+
+        let overlap_error = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().to_string_lossy().into_owned(),
+                problem_root_path: problem_root.to_string_lossy().into_owned(),
+                knowledge_root_path: nested_knowledge_root.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect_err("nested roots must be rejected");
+        assert_eq!(overlap_error, WorkspaceConfigurationError::RootsOverlap);
+        assert_eq!(
+            query_workspace_configuration(&runtime)
+                .await
+                .expect("workspace remains unconfigured"),
+            WorkspaceConfigurationStatus::Unconfigured
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_paths_must_exist_and_be_directories() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let vault = TempDir::new().expect("temporary vault");
+        let problem_file = vault.path().join("problem-file");
+        let knowledge_root = vault.path().join("Knowledge");
+        fs::write(&problem_file, b"not a directory").expect("problem file");
+        fs::create_dir(&knowledge_root).expect("knowledge root");
+        let runtime = start_database(app_data.path()).await;
+
+        let error = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().to_string_lossy().into_owned(),
+                problem_root_path: problem_file.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect_err("file root must be rejected");
+        assert_eq!(
+            error,
+            WorkspaceConfigurationError::PathNotDirectory {
+                field: WorkspacePathField::ProblemRoot,
+            }
+        );
+
+        let required_error = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: "   ".to_owned(),
+                problem_root_path: problem_file.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect_err("blank vault path must be rejected");
+        assert_eq!(
+            required_error,
+            WorkspaceConfigurationError::PathRequired {
+                field: WorkspacePathField::ActiveVault,
+            }
+        );
+
+        let unavailable_error = configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().join("missing").to_string_lossy().into_owned(),
+                problem_root_path: problem_file.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect_err("missing vault path must be rejected");
+        assert_eq!(
+            unavailable_error,
+            WorkspaceConfigurationError::PathUnavailable {
+                field: WorkspacePathField::ActiveVault,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_workspace_configuration_cannot_be_silently_replaced() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let vault = TempDir::new().expect("temporary vault");
+        let problem_root = vault.path().join("Problems");
+        let knowledge_root = vault.path().join("Knowledge");
+        fs::create_dir(&problem_root).expect("problem root");
+        fs::create_dir(&knowledge_root).expect("knowledge root");
+        let runtime = start_database(app_data.path()).await;
+        let draft = WorkspaceConfigurationDraft {
+            active_vault_path: vault.path().to_string_lossy().into_owned(),
+            problem_root_path: problem_root.to_string_lossy().into_owned(),
+            knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+        };
+
+        configure_workspace(&runtime, draft.clone())
+            .await
+            .expect("initial configuration");
+        assert_eq!(
+            configure_workspace(&runtime, draft)
+                .await
+                .expect_err("replacement requires a future preview/confirm flow"),
+            WorkspaceConfigurationError::AlreadyConfigured
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_initial_configuration_persists_exactly_one_winner() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let first_vault = TempDir::new().expect("first temporary vault");
+        let second_vault = TempDir::new().expect("second temporary vault");
+        let make_draft = |vault: &TempDir| {
+            let problem_root = vault.path().join("Problems");
+            let knowledge_root = vault.path().join("Knowledge");
+            fs::create_dir(&problem_root).expect("problem root");
+            fs::create_dir(&knowledge_root).expect("knowledge root");
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.path().to_string_lossy().into_owned(),
+                problem_root_path: problem_root.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+            }
+        };
+        let first_draft = make_draft(&first_vault);
+        let second_draft = make_draft(&second_vault);
+        let runtime = start_database(app_data.path()).await;
+
+        let (first, second) = tokio::join!(
+            configure_workspace(&runtime, first_draft),
+            configure_workspace(&runtime, second_draft),
+        );
+        let winner = match (&first, &second) {
+            (Ok(winner), Err(WorkspaceConfigurationError::AlreadyConfigured))
+            | (Err(WorkspaceConfigurationError::AlreadyConfigured), Ok(winner)) => winner,
+            outcomes => panic!("expected one winner and one duplicate rejection: {outcomes:?}"),
+        };
+        assert_eq!(
+            query_workspace_configuration(&runtime)
+                .await
+                .expect("persisted concurrent winner"),
+            WorkspaceConfigurationStatus::Configured(winner.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_workspace_relationship_requires_recovery() {
+        let app_data = TempDir::new().expect("temporary app data");
+        let vault = TempDir::new().expect("temporary vault");
+        let problem_root = vault.path().join("Problems");
+        let knowledge_root = vault.path().join("Knowledge");
+        fs::create_dir(&problem_root).expect("problem root");
+        fs::create_dir(&knowledge_root).expect("knowledge root");
+        {
+            let runtime = start_database(app_data.path()).await;
+            configure_workspace(
+                &runtime,
+                WorkspaceConfigurationDraft {
+                    active_vault_path: vault.path().to_string_lossy().into_owned(),
+                    problem_root_path: problem_root.to_string_lossy().into_owned(),
+                    knowledge_root_path: knowledge_root.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .expect("configure workspace");
+            let pool = runtime._pool.as_ref().expect("ready database pool");
+            pool.execute(
+                "UPDATE workspace_settings SET knowledge_root_path = active_vault_path \
+                 WHERE singleton = 1",
+            )
+            .await
+            .expect("corrupt persisted relationship");
+        }
+
+        let restarted = start_database(app_data.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn ready_runtime_holds_startup_lock_until_drop() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 1 }
+            &StartupGateStatus::Ready { schema_version: 2 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

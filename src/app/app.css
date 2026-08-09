@@ -44,3 +44,89 @@ h1 {
   border-radius: 12px;
   background: #fffafb;
 }
+
+.workspace-card h2 {
+  margin-top: 0;
+}
+
+.workspace-form {
+  display: grid;
+  gap: 16px;
+}
+
+.workspace-form label {
+  display: grid;
+  gap: 6px;
+  font-weight: 650;
+}
+
+.workspace-form input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid #927c85;
+  border-radius: 6px;
+  background: white;
+  color: inherit;
+}
+
+.workspace-form input:focus-visible,
+.workspace-form button:focus-visible {
+  outline: 3px solid #7c5163;
+  outline-offset: 2px;
+}
+
+.workspace-form button {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid #684353;
+  border-radius: 6px;
+  background: #684353;
+  color: white;
+  cursor: pointer;
+}
+
+.workspace-form button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.workspace-summary {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.4fr) minmax(0, 1fr);
+  gap: 10px 16px;
+}
+
+.workspace-summary dt {
+  font-weight: 700;
+}
+
+.workspace-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.error-message {
+  color: #8b1e2d;
+}
+
+.field-error {
+  color: #8b1e2d;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.workspace-form input[aria-invalid="true"] {
+  border-color: #8b1e2d;
+}
+
+@media (max-width: 560px) {
+  .app-shell {
+    width: min(100% - 24px, 720px);
+    margin: 32px auto;
+  }
+
+  .workspace-summary {
+    grid-template-columns: 1fr;
+  }
+}
