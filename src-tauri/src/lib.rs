@@ -22,6 +22,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::foundation_status,
             ipc::startup_status,
+            ipc::app_shell_status,
             ipc::workspace_status,
             ipc::configure_workspace
         ])

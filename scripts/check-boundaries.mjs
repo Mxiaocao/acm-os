@@ -38,6 +38,8 @@ const EXPECTED_FRONTEND_DEPENDENCIES = {
     "@types/react",
     "@types/react-dom",
     "@vitejs/plugin-react",
+    "jsdom",
+    "tsx",
     "typescript",
     "vite",
   ],

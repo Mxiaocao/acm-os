@@ -22,6 +22,31 @@ pub enum StartupGateStatus {
     RecoveryRequired { reason: StartupRecoveryReason },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupDestination {
+    Recovery { reason: StartupRecoveryReason },
+    Setup,
+    Normal,
+}
+
+pub fn select_startup_destination(
+    startup: &StartupGateStatus,
+    workspace: Option<&WorkspaceConfigurationStatus>,
+) -> StartupDestination {
+    match startup {
+        StartupGateStatus::RecoveryRequired { reason } => StartupDestination::Recovery {
+            reason: reason.clone(),
+        },
+        StartupGateStatus::Ready { .. } => match workspace {
+            Some(WorkspaceConfigurationStatus::Unconfigured) => StartupDestination::Setup,
+            Some(WorkspaceConfigurationStatus::Configured(_)) => StartupDestination::Normal,
+            None => StartupDestination::Recovery {
+                reason: StartupRecoveryReason::DatabaseUnavailable,
+            },
+        },
+    }
+}
+
 pub struct StartupStatusQuery {
     status: StartupGateStatus,
 }
@@ -375,6 +400,61 @@ mod tests {
             error,
             WorkspaceConfigurationError::PathUnavailable {
                 field: WorkspacePathField::KnowledgeRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_destination_blocks_recovery_before_workspace_routing() {
+        let destination = select_startup_destination(
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            },
+            Some(&WorkspaceConfigurationStatus::Unconfigured),
+        );
+        assert_eq!(
+            destination,
+            StartupDestination::Recovery {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_destination_routes_workspace_states() {
+        assert_eq!(
+            select_startup_destination(
+                &StartupGateStatus::Ready { schema_version: 2 },
+                Some(&WorkspaceConfigurationStatus::Unconfigured),
+            ),
+            StartupDestination::Setup
+        );
+        let configured = WorkspaceConfigurationStatus::Configured(
+            WorkspaceConfiguration::from_resolved(
+                test_path("C:\\Vault", "/Vault"),
+                test_path("C:\\Vault\\Problems", "/Vault/Problems"),
+                test_path("C:\\Vault\\Knowledge", "/Vault/Knowledge"),
+            )
+            .expect("configured workspace"),
+        );
+        assert_eq!(
+            select_startup_destination(
+                &StartupGateStatus::Ready { schema_version: 2 },
+                Some(&configured),
+            ),
+            StartupDestination::Normal
+        );
+    }
+
+    #[test]
+    fn missing_workspace_query_result_fails_closed() {
+        assert_eq!(
+            select_startup_destination(
+                &StartupGateStatus::Ready { schema_version: 2 },
+                None,
+            ),
+            StartupDestination::Recovery {
+                reason: StartupRecoveryReason::DatabaseUnavailable,
             }
         );
     }

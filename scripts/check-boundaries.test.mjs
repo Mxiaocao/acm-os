@@ -49,6 +49,8 @@ const validFrontendPackage = () => ({
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
+    jsdom: "^30.0.1",
+    tsx: "^4.23.11",
     typescript: "~6.0.3",
     vite: "^8.0.16",
   },

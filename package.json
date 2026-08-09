@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:shells": "node --test scripts/startup-shells.test.mjs",
+    "test:dom-shells": "node --test scripts/dom-shells.test.mjs",
     "tauri": "tauri",
     "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs"
   },
@@ -19,6 +21,8 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^30.0.1",
+    "tsx": "^4.23.11",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
   }

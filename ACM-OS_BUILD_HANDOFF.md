@@ -1,356 +1,399 @@
 # ACM-OS BUILD Handoff
 
+> 更新时间：2026-08-09 23:17（Asia/Shanghai）
+>
+> 用途：供切换账号后的 Codex 在同一 Windows 本地仓库继续完成 B0.4。
+>
+> 注意：本文件是历史交接记录，不是验证通过证明；接手者必须以当前文件和实际命令结果为准。
+
 ## 1. Authority
 
-The project authority order remains:
+权威顺序始终为：
 
 `SPEC > DESIGN > PLAN > IMPLEMENTATION`
 
-Frozen sources:
+接手后必须完整阅读：
 
-- `ACM-OS_SPEC_v1.md` — Product Source of Truth
-- `ACM-OS_DESIGN_v1.md` — Design Source of Truth
-- `ACM-OS_PLAN_v1.md` — Implementation Plan Source of Truth
+- `ACM-OS_SPEC_v1.md` — 唯一产品事实来源；
+- `ACM-OS_DESIGN_v1.md` — 已冻结设计与架构边界；
+- `ACM-OS_PLAN_v1.md` — 已冻结实施顺序与验收策略；
+- `ACM-OS_BUILD_HANDOFF.md` — 仅作为交接上下文。
 
-No frozen product rule, architecture boundary, authority model, lifecycle, Review rule, Today rule, Markdown rule, transaction boundary, test strategy, or Milestone order may be silently changed during BUILD.
+不得重新设计或静默修改已经冻结的产品行为、Authority、状态机、Review、Today、Markdown、事务边界、测试策略或 Milestone 顺序。若发现真实冲突，标记 `SPEC-CONFLICT` 并停止。
 
-## 2. Current BUILD position
+## 2. Repository snapshot
 
-Current Milestone: `M0 — Executable Foundation + Workspace Ready Gate`
+真实项目目录：
 
-Current Slice: `B0.1 — Repository / Workspace Scaffold`
+`E:\项目开发\acm-os`
 
-Current status: `PARTIAL / BLOCKED / NOT DONE`
-
-Do not enter B0.2 until B0.1 has full build evidence.
-
-This is not a `SPEC-CONFLICT`.
-
-## 3. What the previous BUILD Chat actually did
-
-The previous BUILD Chat had no existing ACM-OS repository available in its sandbox. `/mnt/data` only contained the uploaded frozen documents.
-
-It created a new sandbox repository at:
-
-`/mnt/data/acm-os`
-
-and ran:
-
-`git init -b main`
-
-Observed Git state at the end:
-
-- branch: `main`
-- commits: `0`
-- all project files untracked
-- no commit, tag, push, reset, clean, or force operation performed
-
-It created a B0.1 scaffold aligned with the frozen Modular Monolith architecture:
+Git 状态：
 
 ```text
-React + TypeScript + Vite
-        ↓
-typed Tauri IPC
-        ↓
-Application
-        ↓
-Domain
-
-Tauri Composition Root
-        ↓
-Infrastructure
+Branch: main
+HEAD:   f140316 build: complete B0.3 workspace configuration
 ```
 
-Rust workspace shape created:
+已有完成提交：
 
 ```text
-src-tauri/
-├─ src/                         # thin Tauri shell
-└─ crates/
-   ├─ acm-os-domain/
-   ├─ acm-os-application/
-   └─ acm-os-infrastructure/
+f140316 build: complete B0.3 workspace configuration
+ece09f8 build: complete B0.2 SQLite startup gate
+d00a915 build: complete B0.1 repository scaffold
 ```
 
-A minimal `foundation_status` path was added only to verify B0.1 wiring:
+当前 B0.4 工作未提交。没有执行 commit、tag、push、reset、clean，也没有创建远程仓库。
 
-`React → @tauri-apps/api invoke → Tauri command DTO → Application → Domain`
-
-It does not contain real product business logic.
-
-## 4. Actual change surface reported
-
-The previous BUILD Chat reported:
-
-- `26 files`
-- `462 lines`
-
-Main additions:
+## 3. Current BUILD position
 
 ```text
-.gitignore
+Milestone: M0 — Executable Foundation + Workspace Ready Gate
+Slice:     B0.4 — Startup shells
+Status:    IMPLEMENTED / REVIEW BLOCKED / NOT DONE
+```
+
+B0.4 冻结目标：
+
+```text
+Recovery / Setup / Normal / Review layout boundary
+```
+
+当前不要进入 B0.5，也不要实现 M1+ 的 Contest、Problem、Knowledge、Review 执行、Today 规划、Vault/Markdown 等业务能力。
+
+## 4. Current working tree
+
+已修改的跟踪文件：
+
+```text
 README.md
 package.json
-tsconfig.json
-vite.config.ts
-index.html
-
-src/
-├─ main.tsx
-├─ app/
-│  ├─ App.tsx
-│  └─ app.css
-└─ ipc/
-   └─ foundation.ts
-
-src-tauri/
-├─ Cargo.toml
-├─ build.rs
-├─ tauri.conf.json
-├─ capabilities/default.json
-├─ src/
-│  ├─ main.rs
-│  ├─ lib.rs
-│  └─ ipc.rs
-└─ crates/
-   ├─ acm-os-domain/
-   ├─ acm-os-application/
-   └─ acm-os-infrastructure/
-
-scripts/
-└─ check-boundaries.mjs
-
-docs/
-└─ architecture-boundaries.md
+src-tauri/crates/acm-os-application/src/lib.rs
+src-tauri/src/ipc.rs
+src-tauri/src/lib.rs
+src/app/App.tsx
+src/app/app.css
+ACM-OS_BUILD_HANDOFF.md
 ```
 
-It explicitly did not create:
-
-- SQLite schema
-- migrations
-- Vault access
-- Codeforces adapter
-- Review engine
-- Today planner
-- workspace settings
-
-Therefore there is no evidence that it entered B0.2+.
-
-## 5. Verification evidence already obtained
-
-### PASS — Architecture boundary gate
-
-Executed:
-
-`npm run check:boundaries`
-
-Observed result:
-
-`boundary check passed`
-
-The check reportedly blocks:
-
-- Domain → Tauri
-- Domain → SQLx
-- Domain → reqwest
-- Domain → notify
-- Application → Tauri
-- Application → SQLx
-- Application → reqwest
-- Application → notify
-
-It also checks expected dependency direction:
-
-- Application → Domain
-- Infrastructure → Application
-- Tauri Shell → Application + Infrastructure
-
-and checks that Frontend does not gain direct DB / FS authority through packages such as:
-
-- `better-sqlite3`
-- `sql.js`
-- `@tauri-apps/plugin-fs`
-
-A negative test was also performed in a temporary copy by intentionally adding `tauri = "2"` to Domain. The boundary check then failed with:
-
-`boundary check failed: domain must not depend on tauri`
-
-After removing the deliberate violation, the real scaffold again passed.
-
-### PASS — Basic static checks
-
-Executed:
-
-`node --check scripts/check-boundaries.mjs`
-
-Passed.
-
-The following JSON files were also parsed successfully:
-
-- `package.json`
-- `src-tauri/tauri.conf.json`
-- `src-tauri/capabilities/default.json`
-
-Observed result:
-
-`json parse passed`
-
-### PASS — Diff review
-
-In a separate temporary Git review copy, the previous BUILD Chat ran:
-
-`git diff --cached --check`
-
-No whitespace/error output was reported.
-
-## 6. Unresolved blockers
-
-### BLOCKER A — npm dependency resolution
-
-Executed:
-
-`npm install --package-lock-only --ignore-scripts`
-
-Observed failure:
+未跟踪文件：
 
 ```text
-npm ERR! 404
-'@tauri-apps/api@^2' is not in this registry
+scripts/startup-shells.test.mjs
+src/app/routing.ts
+src/app/shells.tsx
+src/ipc/app-shell.ts
 ```
 
-The request was going through the sandbox internal registry:
+重要：普通 `git diff` 不显示未跟踪文件。审阅时必须同时读取上面四个未跟踪文件，不能因为 `git diff` 没显示它们就声称没有变更。
 
-`packages.applied-caas-gateway1.internal.api.openai.org`
+`package-lock.json` 与 `src-tauri/Cargo.lock` 当前均未修改。
 
-Therefore:
+## 5. B0.4 implementation present in the working tree
 
-- `package-lock.json` was not generated
-- `node_modules` was not generated
+### Application startup decision
 
-No lockfile was fabricated.
+`acm-os-application` 新增：
 
-### BLOCKER B — Frontend build
+- `StartupDestination::{Recovery, Setup, Normal}`；
+- `select_startup_destination`；
+- Recovery 优先于 workspace 路由；
+- Ready + Unconfigured → Setup；
+- Ready + Configured → Normal；
+- workspace 查询结果缺失 → fail-closed Recovery(`DatabaseUnavailable`)。
 
-Executed:
+### Thin Tauri IPC
 
-`npm run build`
+新增异步命令：
 
-It failed because dependencies were unavailable, including React, `@tauri-apps/api/core`, and Vite.
+`app_shell_status`
 
-This is not accepted as a PASS.
-
-### BLOCKER C — Rust toolchain unavailable
-
-Executed:
-
-`cargo --version`
-
-`rustc --version`
-
-Observed:
-
-- `cargo: command not found`
-- `rustc: command not found`
-
-Therefore the following were not run and must not be claimed as verified:
-
-- `cargo check --workspace`
-- Tauri build/check
-
-The previous sandbox was also Linux, while the frozen MVP blocking platform is Windows 10/11 x64.
-
-## 7. B0.1 current verdict
-
-```text
-Structure implementation:             PASS
-Architecture boundary verification:   PASS
-Diff review:                           PASS
-Dependency resolution:                BLOCKED
-Frontend compile:                      BLOCKED
-Rust workspace compile:                BLOCKED
-Tauri executable verification:         BLOCKED
-
-Overall: PARTIAL / NOT DONE
-```
-
-B0.1 must not be marked Done merely because the scaffold looks structurally correct.
-
-## 8. Evidence still required before B0.1 can close
-
-In an environment with a usable npm registry and Rust/Tauri toolchain, verify at minimum:
-
-```text
-npm install
-npm run check:boundaries
-npm run build
-
-cd src-tauri
-cargo check --workspace
-```
-
-Then perform the appropriate actual Tauri build/check for the target environment and prove that the following wiring compiles together:
+调用链为：
 
 ```text
 React
-→ typed IPC
-→ thin Tauri shell
-→ Application
-→ Domain
+→ typed app-shell IPC
+→ thin Tauri command
+→ Application startup/workspace decisions
+→ Infrastructure persistence port
 ```
 
-Inspect the generated:
+React 没有获得 SQLite 或 filesystem Authority。
 
-- `package-lock.json`
-- `Cargo.lock`
+### React shells and routing
 
-and confirm actual resolved versions rather than guessed versions.
+已实现：
 
-## 9. Git checkpoint state
+- Loading shell；
+- Recovery shell，隐藏普通导航；
+- Setup shell，沿用 B0.3 workspace 配置命令；
+- Normal shell；
+- `/` 在 Normal 状态规范化为 `/today`；
+- 一级导航：Today、Contests、我的题库、Knowledge；
+- 工具导航：Settings；
+- `/review/:attemptId` 使用独立全屏 Focus shell，隐藏普通导航；
+- 未知路由显示 Not Found；
+- Today 与其他产品页面在 M0 保持空壳，不包含 B0.5/M1+ 业务逻辑。
 
-No commit should be assumed to exist.
+### Accessibility mechanical fix from the final review
 
-Previous recommendation after B0.1 is fully verified:
+最终短复审自动把以下正文提升到 `1rem`：
 
-`chore: scaffold ACM-OS workspace boundaries`
+- `.safe-note`；
+- `.system-caption`；
+- `.field-error`。
 
-Do not create the Milestone tag `acm-os-m0-foundation` until the entire M0 Definition of Done is complete.
+该 CSS 小修之后已重新运行 frontend build，但尚未重新生成包含该小修的 Tauri exe。
 
-## 10. Critical handoff warning
+## 6. Verification evidence obtained for the current source tree
 
-The scaffold above was created in the previous Chat's sandbox at `/mnt/data/acm-os`.
+### PASS — Shell route tests
 
-That sandbox path is not proof that the same files exist in the user's real local ACM-OS repository or in the new Work environment.
+执行：
 
-Before doing anything, the new Work must inspect the actual accessible repository/filesystem and distinguish:
+```text
+node --test scripts/startup-shells.test.mjs
+```
 
-1. real user repository state;
-2. uploaded scaffold ZIP/files, if provided;
-3. previous Chat's reported sandbox state.
+结果：`4 passed / 0 failed`。
 
-Do not recreate, overwrite, or merge files blindly.
+覆盖纯路由解析：Normal 路由、Review 路由、非法/嵌套/畸形 Review 路由、Setup/Recovery URL 不伪装普通页面。
 
-If the scaffold ZIP is supplied, inspect it before deciding whether to copy/import it into the actual repository.
+### PASS — Architecture boundary gate
 
-If an actual repository already exists, its `git status`, current branch, files, manifests, and diff are the source of truth for current implementation state.
+执行等价命令：
 
-## 11. Exact next action for the new BUILD Work
+```text
+node --test scripts/check-boundaries.test.mjs
+node scripts/check-boundaries.mjs
+```
 
-Do not start B0.2.
+结果：`5 passed / 0 failed`，并输出 `boundary check passed`。
 
-First:
+### PASS — Frontend compilation
 
-1. Read `ACM-OS_SPEC_v1.md`, `ACM-OS_DESIGN_v1.md`, and `ACM-OS_PLAN_v1.md` completely.
-2. Read this handoff.
-3. Inspect the actual repository / uploaded scaffold available in the new environment.
-4. Run and report `git status` and `git branch --show-current` if a Git repository exists.
-5. Compare the actual files against the B0.1 handoff claims.
-6. If the B0.1 scaffold is present, continue only the missing B0.1 verification work.
-7. If the scaffold is not present but the ZIP is provided, inspect the ZIP and establish the safest way to place it into the intended repository without overwriting unrelated user work.
-8. Resolve or explicitly report the Node/Rust/Tauri environment blockers.
-9. Run the missing B0.1 compile/build checks.
-10. Review the actual diff/status.
-11. Only after all B0.1 Done evidence passes may B0.2 begin.
+由于 `node` 不在 PATH，使用 Codex App 自带 Node 的绝对路径执行 TypeScript 与 Vite：
 
-The correct immediate goal is:
+```text
+C:\Users\Mxiaocao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe
+```
 
-`Finish and verify B0.1 — not redesign it, not restart it, and not advance to B0.2 prematurely.`
+结果：
+
+```text
+TypeScript: PASS
+Vite:       PASS
+Modules:    23 transformed
+JS bundle:  201.80 kB (63.36 kB gzip)
+CSS bundle: 5.23 kB (1.83 kB gzip)
+```
+
+### PASS — Rust workspace tests
+
+由于 `cargo` 不在 PATH，使用：
+
+```text
+C:\Users\Mxiaocao\.cargo\bin\cargo.exe test --workspace --locked
+```
+
+结果共 `35 passed / 0 failed`：
+
+```text
+Tauri IPC:       6
+Application:     5
+Infrastructure: 24
+```
+
+### PASS — Rust workspace check
+
+执行：
+
+```text
+C:\Users\Mxiaocao\.cargo\bin\cargo.exe check --workspace --locked
+```
+
+结果：PASS。
+
+### PASS — Diff whitespace check
+
+执行：
+
+`git diff --check`
+
+结果：PASS，无 whitespace error。
+
+### Earlier PASS — Tauri build and minimal launch
+
+在最终 CSS 字号小修之前，B0.4 源码曾真实完成：
+
+```text
+Tauri debug build: PASS
+Executable: E:\项目开发\acm-os\src-tauri\target\debug\acm-os.exe
+Size: 16,760,320 bytes
+Launch: PASS
+Observed window title: ACM-OS
+Observed process: responding, non-zero window handle
+```
+
+该进程在验证后已正常关闭。
+
+这证明当时的 React → typed IPC → Tauri → Application → Domain/Infrastructure 能够真实连接并启动，但不能代替最终修复后的重新构建与启动验证。
+
+## 7. Final short review verdict
+
+最终短复审结论：
+
+`NOT READY TO COMMIT`
+
+安全、性能和 typed IPC 契约专项审阅没有发现阻断问题。独立红队发现并确认了冻结路由契约问题。当前必须处理以下事项。
+
+### BLOCKER 1 — Review route 未落实 UUIDv7 Stable Internal ID
+
+文件：`src/app/routing.ts`
+
+当前 `/review/:attemptId` 接受任意非空且不含 `/` 的字符串，测试还把 `attempt-123` 固化为合法 ID。
+
+冻结依据：
+
+- `ACM-OS_PLAN_v1.md` 4.2：核心对象（含 Review Attempt）使用内部稳定 UUIDv7；
+- `ACM-OS_PLAN_v1.md` 8.2：对象 route 使用 Stable Internal ID；
+- `/review/:attemptId` 绑定 Attempt ID，而不是标题或路径。
+
+接手修复要求：
+
+- 在路由边界验证规范 UUIDv7；
+- 拒绝非 UUID、非 v7、非法 variant、百分号编码别名和带 `/` 的值；
+- 把测试中的 `attempt-123` 替换为合法 UUIDv7 fixture；
+- 增加拒绝错误 UUID version/variant/encoded alias 的测试；
+- 不实现真实 Review 查询或 M4 行为。
+
+### BLOCKER 2 — SPA route transition 缺少焦点迁移与页面播报
+
+文件：`src/app/App.tsx`、`src/app/shells.tsx`
+
+当前 sidebar link、Return to Today、Go to Today 和浏览器 back/forward 只更新 pathname。键盘/屏幕阅读器焦点可能留在旧控件，或控件卸载后落回 body，新页面标题不会被可靠播报。
+
+接手修复要求：
+
+- 为 routed main 或页面主标题建立稳定 focus target；
+- pathname/shell 切换后把焦点移到新内容；
+- 更新 `document.title` 或提供可靠的 polite route announcement；
+- 为持久 sidebar 提供 skip-to-content；
+- 验证退出 Review Focus 后焦点落到 Today 内容，而不是已卸载按钮。
+
+### REVIEW GAP 3 — Shell tests 只覆盖 parser
+
+文件：`scripts/startup-shells.test.mjs`
+
+当前测试不能证明 React 实际隐藏/显示正确 shell，也没有覆盖：
+
+- app shell IPC rejection → Recovery；
+- Recovery / Setup 不出现普通导航；
+- Normal shell 导航；
+- Setup 成功后进入 Normal/Today；
+- Review Focus 隔离；
+- Return to Today；
+- push/replace/popstate；
+- loading/error rendering。
+
+接手者应添加最小 DOM 级测试。若需要新增测试依赖，必须使用真实依赖解析并让 `package-lock.json` 正常更新，不得手写 lockfile。
+
+### REVIEW GAP 4 — Foundation failure 永久显示 checking
+
+文件：`src/app/App.tsx`、`src/app/shells.tsx`
+
+`getFoundationStatus()` 失败时错误被丢弃，`foundation` 继续保持 `null`，Setup/Normal 永久显示 `checking`。
+
+应区分：
+
+```text
+checking / ready / unavailable
+```
+
+这是诊断状态修复，不应改变 Startup Gate、Recovery Authority 或业务逻辑。
+
+## 8. Reviewed findings intentionally not treated as blockers
+
+以下审阅建议已分析，但当前不应据此扩大 B0.4：
+
+- 旧 `startup_status` / `workspace_status` IPC 暂不删除。它们来自已经完成的 B0.2/B0.3 合同，删除不是完成 B0.4 的必要条件；
+- 五个普通路由的小规模 metadata 重复暂不重构。当前规模有限，重构收益不足以扩大 Slice；
+- workspace query failure 映射为 Recovery `database_unavailable` 是当前 fail-closed 策略，Application 的错误面目前只有 `PersistenceUnavailable`。不要把它误判为可以正常继续启动；
+- 首次 app-shell invoke 失败后要求重启应用符合当前 B0.4 “无自动修复”的保守边界。若要增加 retry/recheck，必须先确认不会越过冻结设计与当前 Slice。
+
+## 9. Local toolchain caveats
+
+当前 Codex App shell 中：
+
+- `node` 不在 PATH；
+- `npm` 不在 PATH；
+- `cargo` 不在 PATH；
+- Node 与 Cargo 的绝对路径可用；
+- `rustfmt` 先前检查为未安装，不要在未经用户允许的情况下做系统级安装。
+
+Tauri 当前配置的 `beforeBuildCommand` 是：
+
+`npm run build`
+
+因此最终短复审中直接调用 Tauri CLI 时，因 `npm` 不在 PATH 而失败。不要把这个环境失败伪装成代码构建失败，也不要用假 npm、假 cargo 或禁用检查来制造 PASS。
+
+接手者应先重新检查自己的账号/Local 环境工具链。若 npm 可用，优先运行原始项目命令；若仍不可用，应使用官方、安全、可审计的最小方案，系统级安装前先征得用户同意。
+
+外部 Codex CLI 的额外模型审阅曾因“可能把未提交源码交给外部目的地”被权限审查拒绝；没有绕过该限制。内部本地专项审阅与独立红队已经完成。
+
+## 10. Exact next actions
+
+接手账号应按以下顺序执行：
+
+1. 确认 `Get-Location` 精确为 `E:\项目开发\acm-os`；
+2. 完整阅读四份权威文档；
+3. 运行 `git status`、`git branch --show-current`、`git log -3 --oneline`；
+4. 读取全部 B0.4 diff，并单独读取四个未跟踪文件；
+5. 修复 UUIDv7 Review route 边界及 focused tests；
+6. 修复 SPA 路由焦点、标题/播报和 skip link；
+7. 把 Foundation 状态建模为 checking / ready / unavailable；
+8. 增加最小 DOM shell 状态矩阵测试；
+9. 运行 focused verification；
+10. 运行 boundary、frontend build、Rust tests/check；
+11. 使用真实 npm/cargo 环境重新执行 Tauri debug no-bundle build；
+12. 确认可执行文件是修复后的新产物，并完成最小窗口启动验证；
+13. 运行 `git diff --check`、完整 diff review、`git status`；
+14. 确认两份 lockfile 的真实状态；
+15. 只有最终短复审无阻断项时，才可把 B0.4 判定为 Done 并请求用户允许提交。
+
+建议验证命令（接手者需根据实际 PATH 调整，但不得伪造工具）：
+
+```powershell
+npm run test:shells
+npm run check:boundaries
+npm run build
+
+Set-Location src-tauri
+cargo test --workspace --locked
+cargo check --workspace --locked
+Set-Location ..
+
+npm run tauri build -- --debug --no-bundle
+git diff --check
+git diff
+git status
+git branch --show-current
+```
+
+## 11. Completion and Git constraints
+
+B0.4 当前尚未满足 Done，原因是 UUIDv7 route 契约和 SPA accessibility 仍有阻断项，而且最终修复后的 Tauri exe 尚未重新构建和启动验证。
+
+当前禁止：
+
+- 进入 B0.5；
+- commit；
+- tag；
+- push；
+- 创建远程仓库；
+- 宣称 B0.4 已完成。
+
+当且仅当所有阻断项修复、focused/broader verification、Windows Tauri build、最新 exe 启动验证和最终 diff review 都通过后，建议的提交信息为：
+
+`build: complete B0.4 startup shells`
+
+M0 稳定 tag 只能在 B0.5 完成并满足整个 M0 Definition of Done 后创建。

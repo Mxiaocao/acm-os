@@ -32,6 +32,72 @@ pub fn startup_status(
     startup_status_dto(startup.execute())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppShellStatusDto {
+    state: &'static str,
+    recovery_reason: Option<&'static str>,
+    supported_schema_version: Option<i64>,
+    found_schema_version: Option<i64>,
+    workspace: Option<WorkspaceStatusDto>,
+}
+
+#[tauri::command]
+pub async fn app_shell_status(
+    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<AppShellStatusDto, ()> {
+    let workspace = match startup.execute() {
+        acm_os_application::StartupGateStatus::Ready { .. } => {
+            acm_os_application::query_workspace_configuration(database.inner())
+                .await
+                .ok()
+        }
+        acm_os_application::StartupGateStatus::RecoveryRequired { .. } => None,
+    };
+    let destination =
+        acm_os_application::select_startup_destination(startup.execute(), workspace.as_ref());
+    Ok(app_shell_status_dto(destination, workspace))
+}
+
+fn app_shell_status_dto(
+    destination: acm_os_application::StartupDestination,
+    workspace: Option<acm_os_application::WorkspaceConfigurationStatus>,
+) -> AppShellStatusDto {
+    match destination {
+        acm_os_application::StartupDestination::Recovery { reason } => {
+            let (supported_schema_version, found_schema_version) = match &reason {
+                acm_os_application::StartupRecoveryReason::UnsupportedSchema {
+                    found,
+                    supported,
+                } => (Some(*supported), Some(*found)),
+                _ => (None, None),
+            };
+            AppShellStatusDto {
+                state: "recovery",
+                recovery_reason: Some(reason.code()),
+                supported_schema_version,
+                found_schema_version,
+                workspace: None,
+            }
+        }
+        acm_os_application::StartupDestination::Setup => AppShellStatusDto {
+            state: "setup",
+            recovery_reason: None,
+            supported_schema_version: None,
+            found_schema_version: None,
+            workspace: workspace.map(workspace_status_dto),
+        },
+        acm_os_application::StartupDestination::Normal => AppShellStatusDto {
+            state: "normal",
+            recovery_reason: None,
+            supported_schema_version: None,
+            found_schema_version: None,
+            workspace: workspace.map(workspace_status_dto),
+        },
+    }
+}
+
 fn startup_status_dto(status: &acm_os_application::StartupGateStatus) -> StartupStatusDto {
     use acm_os_application::{StartupGateStatus, StartupRecoveryReason};
 
@@ -150,12 +216,14 @@ fn workspace_error_dto(
 #[cfg(test)]
 mod tests {
     use acm_os_application::{
-        StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
+        StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
         WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
     };
     use serde_json::json;
 
-    use super::{startup_status_dto, workspace_error_dto, workspace_status_dto};
+    use super::{
+        app_shell_status_dto, startup_status_dto, workspace_error_dto, workspace_status_dto,
+    };
 
     #[test]
     fn serializes_ready_startup_contract() {
@@ -245,6 +313,81 @@ mod tests {
             json!({
                 "code": "root_outside_vault",
                 "field": "knowledge_root"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_startup_shell_contracts() {
+        let setup = app_shell_status_dto(
+            StartupDestination::Setup,
+            Some(WorkspaceConfigurationStatus::Unconfigured),
+        );
+        assert_eq!(
+            serde_json::to_value(setup).expect("serialize setup shell"),
+            json!({
+                "state": "setup",
+                "recoveryReason": null,
+                "supportedSchemaVersion": null,
+                "foundSchemaVersion": null,
+                "workspace": {
+                    "state": "unconfigured",
+                    "activeVaultPath": null,
+                    "problemRootPath": null,
+                    "knowledgeRootPath": null
+                }
+            })
+        );
+
+        let recovery = app_shell_status_dto(
+            StartupDestination::Recovery {
+                reason: StartupRecoveryReason::UnsupportedSchema {
+                    found: 3,
+                    supported: 2,
+                },
+            },
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(recovery).expect("serialize recovery shell"),
+            json!({
+                "state": "recovery",
+                "recoveryReason": "unsupported_schema",
+                "supportedSchemaVersion": 2,
+                "foundSchemaVersion": 3,
+                "workspace": null
+            })
+        );
+
+        let (vault, problem_root, knowledge_root) = if cfg!(windows) {
+            ("C:\\Vault", "C:\\Vault\\Problems", "C:\\Vault\\Knowledge")
+        } else {
+            ("/Vault", "/Vault/Problems", "/Vault/Knowledge")
+        };
+        let normal = app_shell_status_dto(
+            StartupDestination::Normal,
+            Some(WorkspaceConfigurationStatus::Configured(
+                WorkspaceConfiguration::from_resolved(
+                    vault.to_owned(),
+                    problem_root.to_owned(),
+                    knowledge_root.to_owned(),
+                )
+                .expect("normal workspace"),
+            )),
+        );
+        assert_eq!(
+            serde_json::to_value(normal).expect("serialize normal shell"),
+            json!({
+                "state": "normal",
+                "recoveryReason": null,
+                "supportedSchemaVersion": null,
+                "foundSchemaVersion": null,
+                "workspace": {
+                    "state": "configured",
+                    "activeVaultPath": vault,
+                    "problemRootPath": problem_root,
+                    "knowledgeRootPath": knowledge_root
+                }
             })
         );
     }
