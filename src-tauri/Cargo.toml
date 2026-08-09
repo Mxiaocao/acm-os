@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  ".",
+  "crates/acm-os-domain",
+  "crates/acm-os-application",
+  "crates/acm-os-infrastructure",
+]
+resolver = "2"
+
+[package]
+name = "acm-os"
+version = "0.1.0"
+description = "ACM-OS desktop application"
+authors = ["ACM-OS contributors"]
+edition = "2021"
+
+[lib]
+name = "acm_os_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+acm-os-application = { path = "crates/acm-os-application" }
+acm-os-infrastructure = { path = "crates/acm-os-infrastructure" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }

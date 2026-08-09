@@ -1,0 +1,8 @@
+[package]
+name = "acm-os-infrastructure"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+acm-os-application = { path = "../acm-os-application" }
+acm-os-domain = { path = "../acm-os-domain" }
