@@ -28,6 +28,7 @@ pub fn run() {
             ipc::import_codeforces_contest,
             ipc::lightweight_problems,
             ipc::lightweight_problem_detail,
+            ipc::create_personal_note,
             ipc::statement_assets,
             ipc::workspace_status,
             ipc::configure_workspace

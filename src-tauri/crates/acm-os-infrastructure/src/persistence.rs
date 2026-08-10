@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -7,9 +8,12 @@ use acm_os_application::{
     ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
     ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
     LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
-    StartupGateStatus, StartupRecoveryReason, StatementSnapshotDraft, WorkspaceConfiguration,
+    PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError, PersonalNotePort,
+    ProblemIdentityType, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
+    StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -114,6 +118,273 @@ impl WorkspaceConfigurationPort for DatabaseRuntime {
             _ => WorkspacePersistenceError::Unavailable,
         })
     }
+}
+
+impl PersonalNotePort for DatabaseRuntime {
+    async fn personal_note_creation_context(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+        let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT p.identity_type, fb.vault_relative_path, \
+                        fb.content_digest, fb.windows_file_key \
+                 FROM problems p \
+                 LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 WHERE p.platform = 'codeforces' \
+                   AND p.external_contest_key = ?1 \
+                   AND p.external_problem_key = ?2",
+            )
+            .bind(problem.contest().contest_id() as i64)
+            .bind(problem.index())
+            .fetch_optional(self.personal_note_pool()?)
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        let (identity_type, relative_path, digest, file_key) =
+            row.ok_or(PersonalNoteError::ProblemNotFound)?;
+        let existing_binding = match (relative_path, digest) {
+            (Some(vault_relative_path), Some(content_digest)) => Some(PersonalNoteBinding {
+                vault_relative_path,
+                content_digest,
+                windows_file_key: file_key,
+            }),
+            (None, None) => None,
+            _ => return Err(PersonalNoteError::PersistenceUnavailable),
+        };
+        if (identity_type == "personal") != existing_binding.is_some() {
+            return Err(PersonalNoteError::PersistenceUnavailable);
+        }
+        if identity_type != "lightweight" && identity_type != "personal" {
+            return Err(PersonalNoteError::PersistenceUnavailable);
+        }
+        Ok(PersonalNoteCreationContext {
+            problem: problem.clone(),
+            existing_binding,
+        })
+    }
+
+    async fn create_personal_note_file(
+        &self,
+        context: &PersonalNoteCreationContext,
+        markdown: &[u8],
+    ) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
+        let (active_vault, problem_root): (String, String) = sqlx::query_as(
+            "SELECT active_vault_path, problem_root_path \
+             FROM workspace_settings WHERE singleton = 1",
+        )
+        .fetch_optional(self.personal_note_pool()?)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?
+        .ok_or(PersonalNoteError::WorkspaceUnavailable)?;
+        let problem = context.problem.clone();
+        let markdown = markdown.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            create_personal_note_file_on_disk(&active_vault, &problem_root, &problem, &markdown)
+        })
+        .await
+        .map_err(|_| PersonalNoteError::FileWriteFailed)?
+    }
+
+    async fn commit_personal_note_binding(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        file: &CreatedPersonalNoteFile,
+    ) -> Result<PersonalNoteBinding, PersonalNoteError> {
+        let mut transaction = self
+            .personal_note_pool()?
+            .begin()
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT id, identity_type FROM problems \
+             WHERE platform = 'codeforces' \
+               AND external_contest_key = ?1 AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        let (problem_id, identity_type) = row.ok_or(PersonalNoteError::ProblemNotFound)?;
+
+        if identity_type == "personal" {
+            let binding: Option<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT vault_relative_path, content_digest, windows_file_key \
+                 FROM file_bindings WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+            return binding
+                .map(|(vault_relative_path, content_digest, windows_file_key)| {
+                    PersonalNoteBinding {
+                        vault_relative_path,
+                        content_digest,
+                        windows_file_key,
+                    }
+                })
+                .ok_or(PersonalNoteError::PersistenceUnavailable);
+        }
+        if identity_type != "lightweight" {
+            return Err(PersonalNoteError::PersistenceUnavailable);
+        }
+
+        sqlx::query(
+            "INSERT INTO file_bindings (problem_id, vault_relative_path, windows_file_key, content_digest) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(problem_id)
+        .bind(&file.vault_relative_path)
+        .bind(&file.windows_file_key)
+        .bind(&file.content_digest)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        sqlx::query("UPDATE problems SET identity_type = 'personal' WHERE id = ?1")
+            .bind(problem_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        Ok(file.clone().into())
+    }
+
+    async fn discard_created_personal_note(
+        &self,
+        file: &CreatedPersonalNoteFile,
+    ) -> Result<(), PersonalNoteError> {
+        let active_vault: String = sqlx::query_scalar(
+            "SELECT active_vault_path FROM workspace_settings WHERE singleton = 1",
+        )
+        .fetch_optional(self.personal_note_pool()?)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?
+        .ok_or(PersonalNoteError::WorkspaceUnavailable)?;
+        let file = file.clone();
+        tokio::task::spawn_blocking(move || discard_created_note_on_disk(&active_vault, &file))
+            .await
+            .map_err(|_| PersonalNoteError::CompensationFailed)?
+    }
+}
+
+fn create_personal_note_file_on_disk(
+    active_vault: &str,
+    problem_root: &str,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    markdown: &[u8],
+) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
+    let vault = std::fs::canonicalize(active_vault)
+        .map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
+    let root = std::fs::canonicalize(problem_root)
+        .map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
+    if !root.is_dir() || !root.starts_with(&vault) || root == vault {
+        return Err(PersonalNoteError::WorkspaceUnavailable);
+    }
+    let filename = format!(
+        "CF-{}-{}.md",
+        problem.contest().contest_id(),
+        problem.index()
+    );
+    let target = root.join(filename);
+    let mut handle = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&target)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                PersonalNoteError::TargetAlreadyExists
+            } else {
+                PersonalNoteError::FileWriteFailed
+            }
+        })?;
+    handle
+        .write_all(markdown)
+        .and_then(|_| handle.sync_all())
+        .map_err(|_| PersonalNoteError::FileWriteFailed)?;
+    drop(handle);
+
+    let verified = std::fs::read(&target).map_err(|_| PersonalNoteError::FileVerificationFailed)?;
+    if verified != markdown {
+        return Err(PersonalNoteError::FileVerificationFailed);
+    }
+    let resolved = std::fs::canonicalize(&target)
+        .map_err(|_| PersonalNoteError::FileVerificationFailed)?;
+    if !resolved.starts_with(&vault) {
+        return Err(PersonalNoteError::FileVerificationFailed);
+    }
+    let relative = resolved
+        .strip_prefix(&vault)
+        .map_err(|_| PersonalNoteError::FileVerificationFailed)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if relative.is_empty() || relative.starts_with('/') {
+        return Err(PersonalNoteError::FileVerificationFailed);
+    }
+    Ok(CreatedPersonalNoteFile {
+        vault_relative_path: relative,
+        content_digest: sha256_hex(&verified),
+        windows_file_key: windows_file_key(&resolved),
+    })
+}
+
+fn discard_created_note_on_disk(
+    active_vault: &str,
+    file: &CreatedPersonalNoteFile,
+) -> Result<(), PersonalNoteError> {
+    let vault = std::fs::canonicalize(active_vault)
+        .map_err(|_| PersonalNoteError::CompensationFailed)?;
+    let target = vault.join(Path::new(&file.vault_relative_path));
+    let resolved = std::fs::canonicalize(&target)
+        .map_err(|_| PersonalNoteError::CompensationFailed)?;
+    if !resolved.starts_with(&vault) {
+        return Err(PersonalNoteError::CompensationFailed);
+    }
+    let current = std::fs::read(&resolved).map_err(|_| PersonalNoteError::CompensationFailed)?;
+    if sha256_hex(&current) != file.content_digest {
+        return Err(PersonalNoteError::CompensationFailed);
+    }
+    std::fs::remove_file(resolved).map_err(|_| PersonalNoteError::CompensationFailed)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(windows)]
+fn windows_file_key(path: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+
+    struct FileKeyHasher(Sha256);
+
+    impl Hasher for FileKeyHasher {
+        fn finish(&self) -> u64 {
+            let digest = self.0.clone().finalize();
+            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix"))
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.update(bytes);
+        }
+    }
+
+    let handle = same_file::Handle::from_path(path).ok()?;
+    let mut hasher = FileKeyHasher(Sha256::new());
+    handle.hash(&mut hasher);
+    Some(format!("same-file-1:{:016x}", hasher.finish()))
+}
+
+#[cfg(not(windows))]
+fn windows_file_key(_path: &Path) -> Option<String> {
+    None
 }
 
 impl ContestImportPort for DatabaseRuntime {
@@ -295,20 +566,21 @@ impl ContestReadPort for DatabaseRuntime {
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
         let (title, source_url, import_status) = row.ok_or(ContestReadError::NotFound)?;
-        let rows: Vec<(String, String, Option<i64>, i64)> = sqlx::query_as(
-            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id) FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
+        let rows: Vec<(String, String, Option<i64>, i64, String)> = sqlx::query_as(
+            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
         )
         .bind(contest.contest_id() as i64)
         .fetch_all(pool)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        let problems = rows.into_iter().map(|(index, title, rating, snapshot)| {
+        let problems = rows.into_iter().map(|(index, title, rating, snapshot, identity_type)| {
             Ok(LightweightProblemItem {
                 problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
                     .map_err(|_| ContestReadError::Unavailable)?,
                 title,
                 rating: rating.map(|value| value as u32),
                 has_statement_snapshot: snapshot != 0,
+                identity_type: parse_problem_identity_type(&identity_type)?,
             })
         }).collect::<Result<Vec<_>, _>>()?;
         Ok(ContestDetail {
@@ -325,15 +597,16 @@ impl ContestReadPort for DatabaseRuntime {
     }
 
     async fn list_lightweight_problems(&self) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
-        let rows: Vec<(i64, String, String, Option<i64>, i64)> = sqlx::query_as(
+        let rows: Vec<(i64, String, String, Option<i64>, i64, String)> = sqlx::query_as(
             "SELECT p.external_contest_key, p.external_problem_key, p.title, p.rating, \
-                    EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id) \
+                    EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), \
+                    p.identity_type \
              FROM problems p ORDER BY p.external_contest_key DESC, p.external_problem_key ASC",
         )
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        rows.into_iter().map(|(contest_id, index, title, rating, snapshot)| {
+        rows.into_iter().map(|(contest_id, index, title, rating, snapshot, identity_type)| {
             Ok(LightweightProblemItem {
                 problem: acm_os_domain::CodeforcesProblemIdentity::new(
                     acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64).map_err(|_| ContestReadError::Unavailable)?, index,
@@ -341,6 +614,7 @@ impl ContestReadPort for DatabaseRuntime {
                 title,
                 rating: rating.map(|value| value as u32),
                 has_statement_snapshot: snapshot != 0,
+                identity_type: parse_problem_identity_type(&identity_type)?,
             })
         }).collect()
     }
@@ -349,9 +623,12 @@ impl ContestReadPort for DatabaseRuntime {
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<LightweightProblemDetail, ContestReadError> {
-        let row: Option<(String, Option<i64>, String, Option<String>)> = sqlx::query_as(
-            "SELECT p.title, p.rating, p.source_url, ss.sanitized_html \
-             FROM problems p LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+        let row: Option<(String, Option<i64>, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT p.title, p.rating, p.source_url, ss.sanitized_html, p.identity_type, \
+                    fb.vault_relative_path, fb.content_digest, fb.windows_file_key \
+             FROM problems p \
+             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 AND p.external_problem_key = ?2",
         )
         .bind(problem.contest().contest_id() as i64)
@@ -359,7 +636,20 @@ impl ContestReadPort for DatabaseRuntime {
         .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        let (title, rating, source_url, sanitized_html) = row.ok_or(ContestReadError::NotFound)?;
+        let (title, rating, source_url, sanitized_html, identity_type, relative_path, digest, file_key) = row.ok_or(ContestReadError::NotFound)?;
+        let personal_note = match (relative_path, digest) {
+            (Some(vault_relative_path), Some(content_digest)) => Some(PersonalNoteBinding {
+                vault_relative_path,
+                content_digest,
+                windows_file_key: file_key,
+            }),
+            (None, None) => None,
+            _ => return Err(ContestReadError::Unavailable),
+        };
+        let identity_type = parse_problem_identity_type(&identity_type)?;
+        if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
+            return Err(ContestReadError::Unavailable);
+        }
         Ok(LightweightProblemDetail {
             problem: problem.clone(),
             title,
@@ -369,6 +659,8 @@ impl ContestReadPort for DatabaseRuntime {
                 Some(sanitized_html) => StatementReadState::Ready { sanitized_html },
                 None => StatementReadState::Pending,
             },
+            identity_type,
+            personal_note,
         })
     }
 
@@ -393,6 +685,12 @@ impl ContestReadPort for DatabaseRuntime {
 }
 
 impl DatabaseRuntime {
+    fn personal_note_pool(&self) -> Result<&SqlitePool, PersonalNoteError> {
+        self._pool
+            .as_ref()
+            .ok_or(PersonalNoteError::PersistenceUnavailable)
+    }
+
     fn contest_pool(&self) -> Result<&SqlitePool, ContestImportPersistenceError> {
         self._pool.as_ref().ok_or(ContestImportPersistenceError::Unavailable)
     }
@@ -420,6 +718,14 @@ impl DatabaseRuntime {
             .bind(match status { ContestImportStatus::Incomplete => "incomplete", ContestImportStatus::Complete => "complete" })
             .bind(contest_id).execute(pool).await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
         Ok(PersistedContestImport { status, missing_snapshot_problems })
+    }
+}
+
+fn parse_problem_identity_type(value: &str) -> Result<ProblemIdentityType, ContestReadError> {
+    match value {
+        "lightweight" => Ok(ProblemIdentityType::Lightweight),
+        "personal" => Ok(ProblemIdentityType::Personal),
+        _ => Err(ContestReadError::Unavailable),
     }
 }
 
@@ -627,7 +933,7 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2 | 3) {
+    if !matches!(schema_version, 1 | 2 | 3 | 4) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
@@ -683,6 +989,14 @@ async fn validate_schema_contract(
         ]);
         expected_objects.sort();
     }
+    if schema_version >= 4 {
+        expected_objects.push((
+            "table".to_owned(),
+            "file_bindings".to_owned(),
+            "file_bindings".to_owned(),
+        ));
+        expected_objects.sort();
+    }
     if objects != expected_objects {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
@@ -724,28 +1038,54 @@ async fn validate_schema_contract(
         validate_workspace_settings_contract(pool).await?;
     }
     if schema_version >= 3 {
-        validate_contest_import_contract(pool).await?;
+        validate_contest_import_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 4 {
+        validate_personal_note_contract(pool).await?;
     }
 
     Ok(())
 }
 
-async fn validate_contest_import_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+async fn validate_contest_import_contract(
+    pool: &SqlitePool,
+    schema_version: i64,
+) -> Result<(), StartupRecoveryReason> {
     validate_table_columns(
         pool,
         "contests",
         &["id", "platform", "external_contest_key", "title", "source_url", "starts_at_utc", "import_status", "created_at_utc"],
     )
     .await?;
-    validate_table_columns(
-        pool,
-        "problems",
-        &["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc"],
-    )
-    .await?;
+    let problem_columns = if schema_version >= 4 {
+        vec!["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc", "identity_type"]
+    } else {
+        vec!["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc"]
+    };
+    validate_table_columns(pool, "problems", &problem_columns).await?;
     validate_table_columns(pool, "contest_problems", &["contest_id", "problem_id", "ordinal", "import_state"]).await?;
     validate_table_columns(pool, "problem_statement_snapshots", &["problem_id", "source_html", "sanitized_html", "captured_at_utc"]).await?;
     validate_table_columns(pool, "problem_statement_assets", &["problem_id", "local_ref", "media_type", "bytes"]).await
+}
+
+async fn validate_personal_note_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "file_bindings",
+        &[
+            "id",
+            "problem_id",
+            "vault_relative_path",
+            "windows_file_key",
+            "content_digest",
+            "binding_state",
+            "created_at_utc",
+            "updated_at_utc",
+        ],
+    )
+    .await
 }
 
 async fn validate_table_columns(
@@ -759,6 +1099,7 @@ async fn validate_table_columns(
         "contest_problems" => "PRAGMA table_xinfo('contest_problems')",
         "problem_statement_snapshots" => "PRAGMA table_xinfo('problem_statement_snapshots')",
         "problem_statement_assets" => "PRAGMA table_xinfo('problem_statement_assets')",
+        "file_bindings" => "PRAGMA table_xinfo('file_bindings')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -1057,10 +1398,12 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        configure_workspace, import_codeforces_contest, query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
+        configure_workspace, create_personal_note, import_codeforces_contest,
+        query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
-        WorkspaceConfigurationStatus, WorkspacePathField,
+        WorkspaceConfigurationStatus, WorkspacePathField, PersonalNoteError,
+        ProblemIdentityType, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
     use tempfile::TempDir;
@@ -1111,6 +1454,28 @@ mod tests {
             bytes: vec![1, 2, 3],
         });
         snapshot
+    }
+
+    async fn configure_temporary_workspace(
+        runtime: &DatabaseRuntime,
+        directory: &TempDir,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let vault = directory.path().join("vault");
+        let problems = vault.join("Problems");
+        let knowledge = vault.join("Knowledge");
+        fs::create_dir_all(&problems).expect("problem root");
+        fs::create_dir_all(&knowledge).expect("knowledge root");
+        configure_workspace(
+            runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.to_string_lossy().into_owned(),
+                problem_root_path: problems.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("configure temporary workspace");
+        (vault, problems, knowledge)
     }
 
     async fn create_empty_migration_ledger(pool: &SqlitePool) {
@@ -1170,14 +1535,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 3 }
+            &StartupGateStatus::Ready { schema_version: 4 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 3);
+        assert_eq!(ledger_count, 4);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -1247,6 +1612,90 @@ mod tests {
         .await
         .expect("stored first snapshot");
         assert_eq!(stored, "<img src=\"acm-os-asset://fixture\">");
+    }
+
+    #[tokio::test]
+    async fn create_personal_note_writes_the_frozen_skeleton_and_commits_one_binding() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+
+        let first = create_personal_note(&runtime, &problem)
+            .await
+            .expect("create personal note");
+        assert_eq!(first.vault_relative_path, "Problems/CF-1979-A.md");
+        assert_eq!(first.content_digest.len(), 64);
+        if cfg!(windows) {
+            assert!(first.windows_file_key.as_deref().is_some_and(|key| key.starts_with("same-file-1:")));
+        }
+        assert_eq!(
+            fs::read_to_string(problems.join("CF-1979-A.md")).expect("read created note"),
+            INITIAL_PROBLEM_MARKDOWN
+        );
+
+        let second = create_personal_note(&runtime, &problem)
+            .await
+            .expect("idempotent create");
+        assert_eq!(second, first);
+        let detail = runtime
+            .lightweight_problem_detail(&problem)
+            .await
+            .expect("personal detail");
+        assert_eq!(detail.identity_type, ProblemIdentityType::Personal);
+        assert_eq!(detail.personal_note, Some(first));
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM file_bindings), \
+                    (SELECT COUNT(*) FROM problems WHERE identity_type = 'personal')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("personal note counts");
+        assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn create_personal_note_never_overwrites_an_existing_target() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let target = problems.join("CF-1979-A.md");
+        fs::write(&target, "external user note").expect("external note fixture");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+
+        assert_eq!(
+            create_personal_note(&runtime, &problem).await,
+            Err(PersonalNoteError::TargetAlreadyExists)
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("preserved external note"),
+            "external user note"
+        );
+        let detail = runtime
+            .lightweight_problem_detail(&problem)
+            .await
+            .expect("lightweight detail");
+        assert_eq!(detail.identity_type, ProblemIdentityType::Lightweight);
+        assert!(detail.personal_note.is_none());
     }
 
     #[tokio::test]
@@ -1545,7 +1994,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 4), \
+                        CHECK (schema_generation < 5), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -1649,7 +2098,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 3 }
+            &StartupGateStatus::Ready { schema_version: 4 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -1681,7 +2130,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 3 }
+            &StartupGateStatus::Ready { schema_version: 4 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 =
@@ -2007,7 +2456,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 3 }
+            &StartupGateStatus::Ready { schema_version: 4 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

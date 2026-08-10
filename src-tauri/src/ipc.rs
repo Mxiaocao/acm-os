@@ -49,6 +49,7 @@ pub struct LightweightProblemItemDto {
     title: String,
     rating: Option<u32>,
     has_statement_snapshot: bool,
+    identity_type: &'static str,
 }
 
 #[derive(serde::Deserialize)]
@@ -67,6 +68,14 @@ pub struct LightweightProblemDetailDto {
     rating: Option<u32>,
     source_url: String,
     statement: StatementReadStateDto,
+    identity_type: &'static str,
+    personal_note: Option<PersonalNoteBindingDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalNoteBindingDto {
+    vault_relative_path: String,
 }
 
 #[derive(serde::Serialize)]
@@ -182,6 +191,21 @@ pub async fn lightweight_problem_detail(
 }
 
 #[tauri::command]
+pub async fn create_personal_note(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<PersonalNoteBindingDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::create_personal_note(database.inner(), &problem)
+        .await
+        .map(personal_note_binding_dto)
+        .map_err(acm_os_application::PersonalNoteError::code)
+}
+
+#[tauri::command]
 pub async fn statement_assets(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
@@ -233,6 +257,7 @@ fn lightweight_problem_item_dto(item: acm_os_application::LightweightProblemItem
         title: item.title,
         rating: item.rating,
         has_statement_snapshot: item.has_statement_snapshot,
+        identity_type: problem_identity_type_dto(item.identity_type),
     }
 }
 
@@ -247,6 +272,21 @@ fn lightweight_problem_detail_dto(item: acm_os_application::LightweightProblemDe
             acm_os_application::StatementReadState::Pending => StatementReadStateDto::Pending,
             acm_os_application::StatementReadState::Ready { sanitized_html } => StatementReadStateDto::Ready { sanitized_html },
         },
+        identity_type: problem_identity_type_dto(item.identity_type),
+        personal_note: item.personal_note.map(personal_note_binding_dto),
+    }
+}
+
+fn problem_identity_type_dto(identity_type: acm_os_application::ProblemIdentityType) -> &'static str {
+    match identity_type {
+        acm_os_application::ProblemIdentityType::Lightweight => "lightweight",
+        acm_os_application::ProblemIdentityType::Personal => "personal",
+    }
+}
+
+fn personal_note_binding_dto(binding: acm_os_application::PersonalNoteBinding) -> PersonalNoteBindingDto {
+    PersonalNoteBindingDto {
+        vault_relative_path: binding.vault_relative_path,
     }
 }
 
@@ -571,6 +611,8 @@ mod tests {
             statement: StatementReadStateDto::Ready {
                 sanitized_html: "<p>safe local statement</p>".to_owned(),
             },
+            identity_type: "lightweight",
+            personal_note: None,
         };
         assert_eq!(
             serde_json::to_value(dto).expect("serialize problem detail"),
@@ -583,7 +625,9 @@ mod tests {
                 "statement": {
                     "state": "ready",
                     "sanitizedHtml": "<p>safe local statement</p>"
-                }
+                },
+                "identityType": "lightweight",
+                "personalNote": null
             })
         );
     }

@@ -22,6 +22,7 @@ export interface LightweightProblemItemDto {
   title: string;
   rating: number | null;
   hasStatementSnapshot: boolean;
+  identityType: "lightweight" | "personal";
 }
 
 export interface ContestImportRunDto {
@@ -41,6 +42,12 @@ export interface LightweightProblemDetailDto {
   rating: number | null;
   sourceUrl: string;
   statement: StatementReadStateDto;
+  identityType: "lightweight" | "personal";
+  personalNote: PersonalNoteBindingDto | null;
+}
+
+export interface PersonalNoteBindingDto {
+  vaultRelativePath: string;
 }
 
 export interface LocalStatementAssetDto {
@@ -69,6 +76,10 @@ export function getLightweightProblems(): Promise<LightweightProblemItemDto[]> {
 
 export function getLightweightProblemDetail(contestId: number, index: string): Promise<LightweightProblemDetailDto> {
   return invoke<LightweightProblemDetailDto>("lightweight_problem_detail", { input: { contestId, index } });
+}
+
+export function createPersonalNote(contestId: number, index: string): Promise<PersonalNoteBindingDto> {
+  return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
 }
 
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {

@@ -19,6 +19,12 @@ const validRustPackages = () => [
     dependencies: [
       { name: "acm-os-application", kind: null, path: "local/application" },
       { name: "acm-os-domain", kind: null, path: "local/domain" },
+      { name: "reqwest", kind: null },
+      { name: "rustls", kind: null },
+      { name: "same-file", kind: null },
+      { name: "serde", kind: null },
+      { name: "serde_json", kind: null },
+      { name: "sha2", kind: null },
       { name: "sqlx", kind: null },
       { name: "tokio", kind: null },
       { name: "tempfile", kind: "dev" },
@@ -29,6 +35,7 @@ const validRustPackages = () => [
     name: "acm-os",
     dependencies: [
       { name: "acm-os-application", kind: null, path: "local/application" },
+      { name: "acm-os-domain", kind: null, path: "local/domain" },
       { name: "acm-os-infrastructure", kind: null, path: "local/infrastructure" },
       { name: "serde", kind: null },
       { name: "serde_json", kind: "dev" },

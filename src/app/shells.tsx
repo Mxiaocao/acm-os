@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
+  createPersonalNote,
   getContestDetail,
   getContestShelf,
   getLightweightProblemDetail,
@@ -393,6 +394,8 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
   const [detail, setDetail] = useState<LightweightProblemDetailDto | null>(null);
   const [renderedHtml, setRenderedHtml] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [creatingNote, setCreatingNote] = useState(false);
+  const [noteMessage, setNoteMessage] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     const objectUrls: string[] = [];
@@ -415,11 +418,46 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
     };
   }, [contestId, index]);
+  const createNote = async () => {
+    if (creatingNote) return;
+    setCreatingNote(true);
+    setNoteMessage(null);
+    try {
+      await createPersonalNote(contestId, index);
+      setDetail(await getLightweightProblemDetail(contestId, index));
+      setNoteMessage("Personal Markdown created and verified.");
+    } catch (error) {
+      setNoteMessage(
+        error === "note_target_exists"
+          ? "The target Markdown filename already exists. No file or Problem identity was overwritten."
+          : "Personal Markdown could not be created. The Problem remains lightweight.",
+      );
+    } finally {
+      setCreatingNote(false);
+    }
+  };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
   return <>
     <PageHeader eyebrow="M1 local statement snapshot" headingRef={headingRef} title={detail.index + ". " + detail.title} />
-    <section className="content-panel"><p>Codeforces {detail.contestId}{detail.rating ? " · Rating " + detail.rating : ""}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a></section>
+    <section className="content-panel">
+      <p>
+        Codeforces {detail.contestId}{detail.rating ? " · Rating " + detail.rating : ""}
+        {" · "}{detail.identityType === "personal" ? "Personal Problem" : "Lightweight Problem"}
+      </p>
+      <a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a>
+      {detail.identityType === "lightweight" ? (
+        <button className="primary-action" disabled={creatingNote} onClick={createNote} type="button">
+          {creatingNote ? "Creating note…" : "Create my note"}
+        </button>
+      ) : null}
+      {detail.personalNote ? (
+        <p className="safe-note">
+          Personal Markdown: <code>{detail.personalNote.vaultRelativePath}</code>
+        </p>
+      ) : null}
+      {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
+    </section>
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
 }

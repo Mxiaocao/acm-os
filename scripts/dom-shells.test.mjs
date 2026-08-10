@@ -228,3 +228,59 @@ test("Normal navigation pushes and popstate enters Review focus with isolated ch
     await view.cleanup();
   }
 });
+
+test("Problem detail creates a Personal Markdown through business IPC and re-queries Core", {
+  concurrency: false,
+}, async () => {
+  let detailReads = 0;
+  let createCalls = 0;
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") {
+      return {
+        state: "normal",
+        recoveryReason: null,
+        supportedSchemaVersion: null,
+        foundSchemaVersion: null,
+        workspace: configuredWorkspace,
+      };
+    }
+    if (command === "lightweight_problem_detail") {
+      detailReads += 1;
+      const personal = detailReads > 1;
+      return {
+        contestId: 1979,
+        index: "A",
+        title: "Problem A",
+        rating: 800,
+        sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+        statement: { state: "pending" },
+        identityType: personal ? "personal" : "lightweight",
+        personalNote: personal ? { vaultRelativePath: "Problems/CF-1979-A.md" } : null,
+      };
+    }
+    if (command === "create_personal_note") {
+      createCalls += 1;
+      return { vaultRelativePath: "Problems/CF-1979-A.md" };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const createButton = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create my note");
+    assert.ok(createButton);
+    await act(async () => createButton.click());
+    await settle();
+    assert.equal(createCalls, 1);
+    assert.equal(detailReads, 2);
+    assert.match(view.document.body.textContent, /Personal Problem/);
+    assert.match(view.document.body.textContent, /Problems\/CF-1979-A\.md/);
+    assert.equal(
+      [...view.document.querySelectorAll("button")]
+        .some((button) => button.textContent === "Create my note"),
+      false,
+    );
+  } finally {
+    await view.cleanup();
+  }
+});

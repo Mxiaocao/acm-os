@@ -213,6 +213,7 @@ pub struct LightweightProblemItem {
     pub title: String,
     pub rating: Option<u32>,
     pub has_statement_snapshot: bool,
+    pub identity_type: ProblemIdentityType,
 }
 
 /// Read-only M1 detail. Source HTML stays archival-only in Infrastructure.
@@ -223,6 +224,117 @@ pub struct LightweightProblemDetail {
     pub rating: Option<u32>,
     pub source_url: String,
     pub statement: StatementReadState,
+    pub identity_type: ProblemIdentityType,
+    pub personal_note: Option<PersonalNoteBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemIdentityType {
+    Lightweight,
+    Personal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalNoteBinding {
+    pub vault_relative_path: String,
+    pub content_digest: String,
+    pub windows_file_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalNoteCreationContext {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub existing_binding: Option<PersonalNoteBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedPersonalNoteFile {
+    pub vault_relative_path: String,
+    pub content_digest: String,
+    pub windows_file_key: Option<String>,
+}
+
+impl From<CreatedPersonalNoteFile> for PersonalNoteBinding {
+    fn from(value: CreatedPersonalNoteFile) -> Self {
+        Self {
+            vault_relative_path: value.vault_relative_path,
+            content_digest: value.content_digest,
+            windows_file_key: value.windows_file_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalNoteError {
+    ProblemNotFound,
+    WorkspaceUnavailable,
+    TargetAlreadyExists,
+    FileWriteFailed,
+    FileVerificationFailed,
+    PersistenceUnavailable,
+    CompensationFailed,
+}
+
+impl PersonalNoteError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::WorkspaceUnavailable => "workspace_unavailable",
+            Self::TargetAlreadyExists => "note_target_exists",
+            Self::FileWriteFailed => "note_write_failed",
+            Self::FileVerificationFailed => "note_verification_failed",
+            Self::PersistenceUnavailable => "note_persistence_unavailable",
+            Self::CompensationFailed => "note_compensation_failed",
+        }
+    }
+}
+
+pub const INITIAL_PROBLEM_MARKDOWN: &str = "# Problem\n\n## 前置知识\n\n## 题解\n\n### 标准推导\n\n## 额外题目\n";
+
+#[allow(async_fn_in_trait)]
+pub trait PersonalNotePort {
+    async fn personal_note_creation_context(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<PersonalNoteCreationContext, PersonalNoteError>;
+
+    async fn create_personal_note_file(
+        &self,
+        context: &PersonalNoteCreationContext,
+        markdown: &[u8],
+    ) -> Result<CreatedPersonalNoteFile, PersonalNoteError>;
+
+    async fn commit_personal_note_binding(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        file: &CreatedPersonalNoteFile,
+    ) -> Result<PersonalNoteBinding, PersonalNoteError>;
+
+    async fn discard_created_personal_note(
+        &self,
+        file: &CreatedPersonalNoteFile,
+    ) -> Result<(), PersonalNoteError>;
+}
+
+pub async fn create_personal_note<P: PersonalNotePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<PersonalNoteBinding, PersonalNoteError> {
+    let context = port.personal_note_creation_context(problem).await?;
+    if let Some(binding) = context.existing_binding {
+        return Ok(binding);
+    }
+
+    let file = port
+        .create_personal_note_file(&context, INITIAL_PROBLEM_MARKDOWN.as_bytes())
+        .await?;
+    match port.commit_personal_note_binding(problem, &file).await {
+        Ok(binding) => Ok(binding),
+        Err(error) => match port.discard_created_personal_note(&file).await {
+            Ok(()) => Err(error),
+            Err(_) => Err(PersonalNoteError::CompensationFailed),
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,7 +780,65 @@ fn map_persistence_error(error: WorkspacePersistenceError) -> WorkspaceConfigura
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
+
+    fn run_ready<F: Future>(future: F) -> F::Output {
+        let mut future = Box::pin(future);
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly yielded"),
+        }
+    }
+
+    struct FailingPersonalNoteCommit {
+        discarded: Cell<bool>,
+    }
+
+    impl PersonalNotePort for FailingPersonalNoteCommit {
+        async fn personal_note_creation_context(
+            &self,
+            problem: &acm_os_domain::CodeforcesProblemIdentity,
+        ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+            Ok(PersonalNoteCreationContext {
+                problem: problem.clone(),
+                existing_binding: None,
+            })
+        }
+
+        async fn create_personal_note_file(
+            &self,
+            _context: &PersonalNoteCreationContext,
+            markdown: &[u8],
+        ) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
+            assert_eq!(markdown, INITIAL_PROBLEM_MARKDOWN.as_bytes());
+            Ok(CreatedPersonalNoteFile {
+                vault_relative_path: "Problems/CF-1979-A.md".to_owned(),
+                content_digest: "0".repeat(64),
+                windows_file_key: None,
+            })
+        }
+
+        async fn commit_personal_note_binding(
+            &self,
+            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _file: &CreatedPersonalNoteFile,
+        ) -> Result<PersonalNoteBinding, PersonalNoteError> {
+            Err(PersonalNoteError::PersistenceUnavailable)
+        }
+
+        async fn discard_created_personal_note(
+            &self,
+            _file: &CreatedPersonalNoteFile,
+        ) -> Result<(), PersonalNoteError> {
+            self.discarded.set(true);
+            Ok(())
+        }
+    }
 
     fn contest_identity() -> acm_os_domain::CodeforcesContestIdentity {
         acm_os_domain::CodeforcesContestIdentity::new(1979).expect("valid contest")
@@ -772,6 +942,20 @@ mod tests {
             ContestImportExecutionPlan::validated(plan.manifest.clone(), vec![foreign]),
             Err(ContestImportExecutionError::SnapshotOutsideManifest)
         );
+    }
+
+    #[test]
+    fn personal_note_creation_compensates_a_failed_binding_commit() {
+        let port = FailingPersonalNoteCommit {
+            discarded: Cell::new(false),
+        };
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest_identity(), "A")
+            .expect("problem");
+        assert_eq!(
+            run_ready(create_personal_note(&port, &problem)),
+            Err(PersonalNoteError::PersistenceUnavailable)
+        );
+        assert!(port.discarded.get());
     }
 
     fn test_path(windows: &str, unix: &str) -> String {
