@@ -1,8 +1,317 @@
 #![forbid(unsafe_code)]
 
+pub mod codeforces;
+
 use std::path::{Component, Path};
 
 pub const BOUNDARY_NAME: &str = "acm-os-application";
+
+/// The canonical, adapter-validated import contract.  It deliberately has no
+/// network or database details: adapters produce it and persistence consumes
+/// it after identity validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestImportDraft {
+    pub contest: acm_os_domain::CodeforcesContestIdentity,
+    pub title: String,
+    pub source_url: String,
+    pub starts_at_utc: Option<String>,
+    pub slots: Vec<ContestProblemSlotDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestProblemSlotDraft {
+    pub ordinal: u32,
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub title: String,
+    pub rating: Option<u32>,
+    pub source_url: String,
+}
+
+/// The first successful capture is immutable.  Re-import may fill a missing
+/// snapshot, but it must never replace an existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementSnapshotDraft {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub source_html: String,
+    pub sanitized_html: String,
+    pub assets: Vec<StatementAssetDraft>,
+}
+
+/// A binary asset captured alongside the first statement snapshot. The
+/// renderer only receives the local reference, never the original remote URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementAssetDraft {
+    pub local_ref: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// An adapter has completed all external work before this plan reaches
+/// persistence. Keeping this value pure makes it impossible for a SQLite
+/// transaction to own an HTTP request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestImportExecutionPlan {
+    pub manifest: ContestImportDraft,
+    pub snapshots: Vec<StatementSnapshotDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContestImportExecutionError {
+    SnapshotOutsideManifest,
+    DuplicateSnapshotIdentity,
+}
+
+impl ContestImportExecutionPlan {
+    pub fn validated(
+        manifest: ContestImportDraft,
+        snapshots: Vec<StatementSnapshotDraft>,
+    ) -> Result<Self, ContestImportExecutionError> {
+        let manifest_problems: std::collections::HashSet<_> = manifest
+            .slots
+            .iter()
+            .map(|slot| slot.problem.clone())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for snapshot in &snapshots {
+            if !manifest_problems.contains(&snapshot.problem) {
+                return Err(ContestImportExecutionError::SnapshotOutsideManifest);
+            }
+            if !seen.insert(snapshot.problem.clone()) {
+                return Err(ContestImportExecutionError::DuplicateSnapshotIdentity);
+            }
+        }
+        Ok(Self { manifest, snapshots })
+    }
+
+    /// Selects only the snapshots still missing after manifest persistence.
+    /// Existing first captures are never scheduled for replacement.
+    pub fn snapshots_for_missing(
+        &self,
+        missing: &[acm_os_domain::CodeforcesProblemIdentity],
+    ) -> Vec<&StatementSnapshotDraft> {
+        self.snapshots
+            .iter()
+            .filter(|snapshot| missing.contains(&snapshot.problem))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestImportStatus {
+    Incomplete,
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedContestImport {
+    pub status: ContestImportStatus,
+    pub missing_snapshot_problems: Vec<acm_os_domain::CodeforcesProblemIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestImportPersistenceError {
+    Unavailable,
+    ManifestConflict,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestImportPort {
+    /// Persists the first manifest for a contest. A later call must preserve
+    /// that manifest rather than silently accepting remote structural drift.
+    async fn persist_manifest(
+        &self,
+        draft: &ContestImportDraft,
+    ) -> Result<PersistedContestImport, ContestImportPersistenceError>;
+
+    /// Inserts a first snapshot only if it is currently missing, returning the
+    /// contest's recalculated completion state.
+    async fn persist_first_snapshot(
+        &self,
+        snapshot: &StatementSnapshotDraft,
+    ) -> Result<PersistedContestImport, ContestImportPersistenceError>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestImportSource {
+    /// Fetches and validates a full ordered manifest before System Facts are
+    /// changed. Implementations own all network authority.
+    async fn fetch_manifest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestImportDraft, ContestImportSourceError>;
+
+    /// Fetches one missing first snapshot. This is deliberately separate from
+    /// manifest fetch so partial retry never re-downloads completed items.
+    async fn fetch_snapshot(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<StatementSnapshotDraft, ContestImportSourceError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContestImportSourceError {
+    Unavailable,
+    InvalidRemoteData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestImportRun {
+    pub persisted: PersistedContestImport,
+    pub failed_snapshot_problems: Vec<acm_os_domain::CodeforcesProblemIdentity>,
+}
+
+/// Coordinates an adapter and persistence without granting network authority
+/// to the application. Every database call is complete before the next remote
+/// request begins; partial item failures preserve already captured snapshots.
+pub async fn import_codeforces_contest<P: ContestImportPort, S: ContestImportSource>(
+    persistence: &P,
+    source: &S,
+    contest: acm_os_domain::CodeforcesContestIdentity,
+) -> Result<ContestImportRun, ContestImportSourceError> {
+    let manifest = source.fetch_manifest(&contest).await?;
+    let mut persisted = persistence
+        .persist_manifest(&manifest)
+        .await
+        .map_err(|_| ContestImportSourceError::Unavailable)?;
+    let mut failed_snapshot_problems = Vec::new();
+
+    for problem in persisted.missing_snapshot_problems.clone() {
+        match source.fetch_snapshot(&problem).await {
+            Ok(snapshot) => {
+                persisted = persistence
+                    .persist_first_snapshot(&snapshot)
+                    .await
+                    .map_err(|_| ContestImportSourceError::Unavailable)?;
+            }
+            Err(_) => failed_snapshot_problems.push(problem),
+        }
+    }
+    Ok(ContestImportRun { persisted, failed_snapshot_problems })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestShelfItem {
+    pub contest: acm_os_domain::CodeforcesContestIdentity,
+    pub title: String,
+    pub import_status: ContestImportStatus,
+    pub problem_count: u32,
+    pub missing_snapshot_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestDetail {
+    pub contest: acm_os_domain::CodeforcesContestIdentity,
+    pub title: String,
+    pub source_url: String,
+    pub import_status: ContestImportStatus,
+    pub problems: Vec<LightweightProblemItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightweightProblemItem {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub title: String,
+    pub rating: Option<u32>,
+    pub has_statement_snapshot: bool,
+}
+
+/// Read-only M1 detail. Source HTML stays archival-only in Infrastructure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightweightProblemDetail {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub title: String,
+    pub rating: Option<u32>,
+    pub source_url: String,
+    pub statement: StatementReadState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatementReadState {
+    Pending,
+    Ready { sanitized_html: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalStatementAsset {
+    pub local_ref: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestReadError {
+    Unavailable,
+    NotFound,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestReadPort {
+    async fn list_contests(&self) -> Result<Vec<ContestShelfItem>, ContestReadError>;
+    async fn contest_detail(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDetail, ContestReadError>;
+    async fn list_lightweight_problems(&self) -> Result<Vec<LightweightProblemItem>, ContestReadError>;
+    async fn lightweight_problem_detail(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<LightweightProblemDetail, ContestReadError>;
+    async fn statement_assets(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<LocalStatementAsset>, ContestReadError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContestImportContractError {
+    TitleRequired,
+    SourceUrlRequired,
+    EmptyManifest,
+    NonContiguousOrdinal,
+    SlotContestMismatch,
+    DuplicateProblemIdentity,
+}
+
+impl ContestImportDraft {
+    pub fn validated(
+        contest: acm_os_domain::CodeforcesContestIdentity,
+        title: String,
+        source_url: String,
+        starts_at_utc: Option<String>,
+        slots: Vec<ContestProblemSlotDraft>,
+    ) -> Result<Self, ContestImportContractError> {
+        if title.trim().is_empty() {
+            return Err(ContestImportContractError::TitleRequired);
+        }
+        if source_url.trim().is_empty() {
+            return Err(ContestImportContractError::SourceUrlRequired);
+        }
+        if slots.is_empty() {
+            return Err(ContestImportContractError::EmptyManifest);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for (position, slot) in slots.iter().enumerate() {
+            if slot.ordinal != position as u32 + 1 {
+                return Err(ContestImportContractError::NonContiguousOrdinal);
+            }
+            if slot.problem.contest() != &contest {
+                return Err(ContestImportContractError::SlotContestMismatch);
+            }
+            if !seen.insert(slot.problem.clone()) {
+                return Err(ContestImportContractError::DuplicateProblemIdentity);
+            }
+        }
+
+        Ok(Self {
+            contest,
+            title,
+            source_url,
+            starts_at_utc,
+            slots,
+        })
+    }
+}
 
 pub struct FoundationStatus {
     pub status: &'static str,
@@ -360,6 +669,110 @@ fn map_persistence_error(error: WorkspacePersistenceError) -> WorkspaceConfigura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contest_identity() -> acm_os_domain::CodeforcesContestIdentity {
+        acm_os_domain::CodeforcesContestIdentity::new(1979).expect("valid contest")
+    }
+
+    fn problem_slot(
+        contest: acm_os_domain::CodeforcesContestIdentity,
+        ordinal: u32,
+        index: &str,
+    ) -> ContestProblemSlotDraft {
+        ContestProblemSlotDraft {
+            ordinal,
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+                .expect("valid problem"),
+            title: format!("Problem {index}"),
+            rating: Some(800),
+            source_url: format!("https://codeforces.com/contest/1979/problem/{index}"),
+        }
+    }
+
+    #[test]
+    fn import_manifest_requires_a_stable_complete_ordered_identity_list() {
+        let contest = contest_identity();
+        let valid = ContestImportDraft::validated(
+            contest.clone(),
+            "Codeforces Round".to_owned(),
+            "https://codeforces.com/contest/1979".to_owned(),
+            None,
+            vec![
+                problem_slot(contest.clone(), 1, "A"),
+                problem_slot(contest.clone(), 2, "B"),
+            ],
+        )
+        .expect("complete manifest");
+        assert_eq!(valid.slots.len(), 2);
+
+        assert_eq!(
+            ContestImportDraft::validated(
+                contest.clone(),
+                "Contest".to_owned(),
+                "https://codeforces.com/contest/1979".to_owned(),
+                None,
+                vec![],
+            ),
+            Err(ContestImportContractError::EmptyManifest)
+        );
+        assert_eq!(
+            ContestImportDraft::validated(
+                contest.clone(),
+                "Contest".to_owned(),
+                "https://codeforces.com/contest/1979".to_owned(),
+                None,
+                vec![problem_slot(contest.clone(), 2, "A")],
+            ),
+            Err(ContestImportContractError::NonContiguousOrdinal)
+        );
+        assert_eq!(
+            ContestImportDraft::validated(
+                contest.clone(),
+                "Contest".to_owned(),
+                "https://codeforces.com/contest/1979".to_owned(),
+                None,
+                vec![
+                    problem_slot(contest.clone(), 1, "A"),
+                    problem_slot(contest, 2, "A"),
+                ],
+            ),
+            Err(ContestImportContractError::DuplicateProblemIdentity)
+        );
+    }
+
+    #[test]
+    fn import_execution_plan_only_retries_missing_snapshot_identities() {
+        let contest = contest_identity();
+        let manifest = ContestImportDraft::validated(
+            contest.clone(),
+            "Codeforces Round".to_owned(),
+            "https://codeforces.com/contest/1979".to_owned(),
+            None,
+            vec![problem_slot(contest.clone(), 1, "A"), problem_slot(contest.clone(), 2, "B")],
+        )
+        .expect("manifest");
+        let snapshot = |index: &str| StatementSnapshotDraft {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index).expect("problem"),
+            source_html: format!("<div class=\"problem-statement\">{index}</div>"),
+            sanitized_html: format!("<div class=\"problem-statement\">{index}</div>"),
+            assets: Vec::new(),
+        };
+        let plan = ContestImportExecutionPlan::validated(manifest, vec![snapshot("A"), snapshot("B")])
+            .expect("execution plan");
+        let missing_b = acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("problem B");
+        assert_eq!(plan.snapshots_for_missing(&[missing_b])[0].problem.index(), "B");
+
+        let foreign = StatementSnapshotDraft {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, "C").expect("problem C"),
+            source_html: "<div class=\"problem-statement\">C</div>".to_owned(),
+            sanitized_html: "<div class=\"problem-statement\">C</div>".to_owned(),
+            assets: Vec::new(),
+        };
+        assert_eq!(
+            ContestImportExecutionPlan::validated(plan.manifest.clone(), vec![foreign]),
+            Err(ContestImportExecutionError::SnapshotOutsideManifest)
+        );
+    }
 
     fn test_path(windows: &str, unix: &str) -> String {
         if cfg!(windows) {

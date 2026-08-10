@@ -7,6 +7,10 @@ build = "build.rs"
 [dependencies]
 acm-os-application = { path = "../acm-os-application" }
 acm-os-domain = { path = "../acm-os-domain" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite"] }
 tokio = { version = "1", features = ["rt"] }
 

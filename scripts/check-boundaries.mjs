@@ -12,6 +12,10 @@ const EXPECTED_RUST_DEPENDENCIES = {
     "dev:tokio",
     "normal:acm-os-application",
     "normal:acm-os-domain",
+    "normal:reqwest",
+    "normal:rustls",
+    "normal:serde",
+    "normal:serde_json",
     "normal:sqlx",
     "normal:tokio",
   ],
@@ -19,6 +23,7 @@ const EXPECTED_RUST_DEPENDENCIES = {
     "build:tauri-build",
     "dev:serde_json",
     "normal:acm-os-application",
+    "normal:acm-os-domain",
     "normal:acm-os-infrastructure",
     "normal:serde",
     "normal:tauri",
@@ -28,7 +33,7 @@ const EXPECTED_RUST_DEPENDENCIES = {
 const REQUIRED_LOCAL_RUST_DEPENDENCIES = {
   "acm-os-application": ["acm-os-domain"],
   "acm-os-infrastructure": ["acm-os-application", "acm-os-domain"],
-  "acm-os": ["acm-os-application", "acm-os-infrastructure"],
+  "acm-os": ["acm-os-application", "acm-os-domain", "acm-os-infrastructure"],
 };
 
 const EXPECTED_FRONTEND_DEPENDENCIES = {

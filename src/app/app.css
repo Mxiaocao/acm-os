@@ -214,6 +214,27 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 
 .content-panel { max-width: 820px; }
 
+.detail-list li { display: flex; align-items: center; gap: 12px; }
+.list-link {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 4px;
+  padding: 4px 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.list-link span { color: var(--ink-muted); }
+.list-link:hover strong, .list-link:focus-visible strong { text-decoration: underline; }
+.statement-view { max-width: 960px; overflow: auto; }
+.statement-view img { max-width: 100%; height: auto; }
+.statement-view table { width: 100%; border-collapse: collapse; }
+.statement-view th, .statement-view td { padding: 8px; border: 1px solid var(--line); text-align: left; }
+.statement-view pre { overflow: auto; padding: 12px; background: var(--surface-muted); }
+
 .review-shell { min-height: 100vh; padding: 32px clamp(28px, 6vw, 80px); background: #f0ebec; }
 
 .review-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; }

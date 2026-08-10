@@ -11,6 +11,30 @@ test("maps the frozen normal application routes", () => {
   assert.deepEqual(parseAppRoute("/settings"), { kind: "normal", page: "settings" });
 });
 
+test("accepts only canonical M1 problem-detail identities", () => {
+  assert.deepEqual(parseAppRoute("/problems/1979/A"), {
+    kind: "problemDetail", contestId: 1979, index: "A",
+  });
+  assert.deepEqual(parseAppRoute("/problems/1/F1"), {
+    kind: "problemDetail", contestId: 1, index: "F1",
+  });
+  for (const pathname of [
+    "/problems/0/A", "/problems/01/A", "/problems/1979/a",
+    "/problems/1979/%41", "/problems/1979/A/extra", "/problems/1979/A%2F",
+  ]) {
+    assert.equal(parseAppRoute(pathname).kind, "notFound");
+  }
+});
+
+test("accepts only canonical M1 contest-detail identities", () => {
+  assert.deepEqual(parseAppRoute("/contests/1979"), {
+    kind: "contestDetail", contestId: 1979,
+  });
+  for (const pathname of ["/contests/0", "/contests/01", "/contests/1979/A", "/contests/%31"]) {
+    assert.equal(parseAppRoute(pathname).kind, "notFound");
+  }
+});
+
 test("recognizes one stable Review Attempt id without exposing normal navigation", () => {
   const attemptId = "018f0d8e-4a5b-7c6d-8e9f-0123456789ab";
   assert.deepEqual(parseAppRoute(`/review/${attemptId}`), {

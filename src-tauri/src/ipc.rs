@@ -17,6 +17,248 @@ pub fn foundation_status() -> FoundationStatusDto {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContestShelfItemDto {
+    contest_id: u64,
+    title: String,
+    import_status: &'static str,
+    problem_count: u32,
+    missing_snapshot_count: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestDetailInput {
+    contest_id: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestDetailDto {
+    contest_id: u64,
+    title: String,
+    source_url: String,
+    import_status: &'static str,
+    problems: Vec<LightweightProblemItemDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightweightProblemItemDto {
+    contest_id: u64,
+    index: String,
+    title: String,
+    rating: Option<u32>,
+    has_statement_snapshot: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightweightProblemDetailInput {
+    contest_id: u64,
+    index: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightweightProblemDetailDto {
+    contest_id: u64,
+    index: String,
+    title: String,
+    rating: Option<u32>,
+    source_url: String,
+    statement: StatementReadStateDto,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum StatementReadStateDto {
+    Pending,
+    Ready { #[serde(rename = "sanitizedHtml")] sanitized_html: String },
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalStatementAssetDto {
+    local_ref: String,
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestImportInput {
+    contest_url: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestImportRunDto {
+    import_status: &'static str,
+    missing_snapshot_problems: Vec<String>,
+    failed_snapshot_problems: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn import_codeforces_contest(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestImportInput,
+) -> Result<ContestImportRunDto, &'static str> {
+    use acm_os_application::import_codeforces_contest;
+
+    let contest = acm_os_application::codeforces::locate_public_contest(&input.contest_url)
+        .map_err(|_| "unsupported_contest_url")?;
+    let source = acm_os_infrastructure::codeforces::CodeforcesHttpAdapter::new()
+        .map_err(|_| "adapter_unavailable")?;
+    let result = import_codeforces_contest(database.inner(), &source, contest)
+        .await
+        .map_err(|_| "import_unavailable")?;
+    Ok(ContestImportRunDto {
+        import_status: match result.persisted.status {
+            acm_os_application::ContestImportStatus::Incomplete => "incomplete",
+            acm_os_application::ContestImportStatus::Complete => "complete",
+        },
+        missing_snapshot_problems: result.persisted.missing_snapshot_problems.into_iter()
+            .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
+            .collect(),
+        failed_snapshot_problems: result.failed_snapshot_problems.into_iter()
+            .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn contest_shelf(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<ContestShelfItemDto>, ()> {
+    use acm_os_application::ContestReadPort;
+    database
+        .list_contests()
+        .await
+        .map(|items| items.into_iter().map(contest_shelf_item_dto).collect())
+        .map_err(|_| ())
+}
+
+#[tauri::command]
+pub async fn contest_detail(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestDetailInput,
+) -> Result<ContestDetailDto, &'static str> {
+    use acm_os_application::ContestReadPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    database.contest_detail(&contest).await
+        .map(contest_detail_dto)
+        .map_err(contest_read_error_code)
+}
+
+#[tauri::command]
+pub async fn lightweight_problems(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<LightweightProblemItemDto>, ()> {
+    use acm_os_application::ContestReadPort;
+    database
+        .list_lightweight_problems()
+        .await
+        .map(|items| items.into_iter().map(lightweight_problem_item_dto).collect())
+        .map_err(|_| ())
+}
+
+#[tauri::command]
+pub async fn lightweight_problem_detail(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<LightweightProblemDetailDto, &'static str> {
+    use acm_os_application::ContestReadPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    database.lightweight_problem_detail(&problem).await
+        .map(lightweight_problem_detail_dto)
+        .map_err(|error| match error {
+            acm_os_application::ContestReadError::NotFound => "problem_not_found",
+            acm_os_application::ContestReadError::Unavailable => "problem_unavailable",
+        })
+}
+
+#[tauri::command]
+pub async fn statement_assets(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<Vec<LocalStatementAssetDto>, &'static str> {
+    use acm_os_application::ContestReadPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    database.statement_assets(&problem).await
+        .map(|assets| assets.into_iter().map(|asset| LocalStatementAssetDto {
+            local_ref: asset.local_ref,
+            media_type: asset.media_type,
+            bytes: asset.bytes,
+        }).collect())
+        .map_err(contest_read_error_code)
+}
+
+fn contest_shelf_item_dto(item: acm_os_application::ContestShelfItem) -> ContestShelfItemDto {
+    ContestShelfItemDto {
+        contest_id: item.contest.contest_id(),
+        title: item.title,
+        import_status: match item.import_status {
+            acm_os_application::ContestImportStatus::Incomplete => "incomplete",
+            acm_os_application::ContestImportStatus::Complete => "complete",
+        },
+        problem_count: item.problem_count,
+        missing_snapshot_count: item.missing_snapshot_count,
+    }
+}
+
+fn contest_detail_dto(item: acm_os_application::ContestDetail) -> ContestDetailDto {
+    ContestDetailDto {
+        contest_id: item.contest.contest_id(),
+        title: item.title,
+        source_url: item.source_url,
+        import_status: match item.import_status {
+            acm_os_application::ContestImportStatus::Incomplete => "incomplete",
+            acm_os_application::ContestImportStatus::Complete => "complete",
+        },
+        problems: item.problems.into_iter().map(lightweight_problem_item_dto).collect(),
+    }
+}
+
+fn lightweight_problem_item_dto(item: acm_os_application::LightweightProblemItem) -> LightweightProblemItemDto {
+    LightweightProblemItemDto {
+        contest_id: item.problem.contest().contest_id(),
+        index: item.problem.index().to_owned(),
+        title: item.title,
+        rating: item.rating,
+        has_statement_snapshot: item.has_statement_snapshot,
+    }
+}
+
+fn lightweight_problem_detail_dto(item: acm_os_application::LightweightProblemDetail) -> LightweightProblemDetailDto {
+    LightweightProblemDetailDto {
+        contest_id: item.problem.contest().contest_id(),
+        index: item.problem.index().to_owned(),
+        title: item.title,
+        rating: item.rating,
+        source_url: item.source_url,
+        statement: match item.statement {
+            acm_os_application::StatementReadState::Pending => StatementReadStateDto::Pending,
+            acm_os_application::StatementReadState::Ready { sanitized_html } => StatementReadStateDto::Ready { sanitized_html },
+        },
+    }
+}
+
+fn contest_read_error_code(error: acm_os_application::ContestReadError) -> &'static str {
+    match error {
+        acm_os_application::ContestReadError::NotFound => "not_found",
+        acm_os_application::ContestReadError::Unavailable => "unavailable",
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartupStatusDto {
     state: &'static str,
     schema_version: Option<i64>,
@@ -223,6 +465,7 @@ mod tests {
 
     use super::{
         app_shell_status_dto, startup_status_dto, workspace_error_dto, workspace_status_dto,
+        LightweightProblemDetailDto, StatementReadStateDto,
     };
 
     #[test]
@@ -313,6 +556,34 @@ mod tests {
             json!({
                 "code": "root_outside_vault",
                 "field": "knowledge_root"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_problem_detail_without_source_html() {
+        let dto = LightweightProblemDetailDto {
+            contest_id: 1979,
+            index: "A".to_owned(),
+            title: "Problem A".to_owned(),
+            rating: Some(800),
+            source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+            statement: StatementReadStateDto::Ready {
+                sanitized_html: "<p>safe local statement</p>".to_owned(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize problem detail"),
+            json!({
+                "contestId": 1979,
+                "index": "A",
+                "title": "Problem A",
+                "rating": 800,
+                "sourceUrl": "https://codeforces.com/contest/1979/problem/A",
+                "statement": {
+                    "state": "ready",
+                    "sanitizedHtml": "<p>safe local statement</p>"
+                }
             })
         );
     }

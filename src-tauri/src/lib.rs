@@ -23,6 +23,12 @@ pub fn run() {
             ipc::foundation_status,
             ipc::startup_status,
             ipc::app_shell_status,
+            ipc::contest_shelf,
+            ipc::contest_detail,
+            ipc::import_codeforces_contest,
+            ipc::lightweight_problems,
+            ipc::lightweight_problem_detail,
+            ipc::statement_assets,
             ipc::workspace_status,
             ipc::configure_workspace
         ])

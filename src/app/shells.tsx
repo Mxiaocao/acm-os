@@ -7,6 +7,18 @@ import {
   useState,
 } from "react";
 import type { FoundationStatus } from "../ipc/foundation";
+import {
+  getContestDetail,
+  getContestShelf,
+  getLightweightProblemDetail,
+  getLightweightProblems,
+  getStatementAssets,
+  importCodeforcesContest,
+  type ContestDetailDto,
+  type ContestShelfItemDto,
+  type LightweightProblemDetailDto,
+  type LightweightProblemItemDto,
+} from "../ipc/contest";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -215,7 +227,11 @@ export function NormalAppShell({
       </aside>
       <main className="normal-content" id="main-content" tabIndex={-1}>
         {route.kind === "normal" ? (
-          <NormalPageContent page={route.page} workspace={workspace} />
+          <NormalPageContent navigate={navigate} page={route.page} workspace={workspace} />
+        ) : route.kind === "contestDetail" ? (
+          <ContestDetail contestId={route.contestId} navigate={navigate} />
+        ) : route.kind === "problemDetail" ? (
+          <ProblemDetail contestId={route.contestId} index={route.index} />
         ) : (
           <NotFoundContent pathname={route.pathname} navigate={navigate} />
         )}
@@ -248,7 +264,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
   );
 }
 
-function NormalPageContent({ page, workspace }: { page: NormalPage; workspace: ConfiguredWorkspace }) {
+function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; workspace: ConfiguredWorkspace; navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   if (page === "today") {
     return (
@@ -277,9 +293,9 @@ function NormalPageContent({ page, workspace }: { page: NormalPage; workspace: C
       </>
     );
   }
-  const titles: Record<Exclude<NormalPage, "today" | "settings">, string> = {
-    contests: "Contests",
-    problems: "我的题库",
+  if (page === "contests") return <ContestShelf navigate={navigate} />;
+  if (page === "problems") return <ProblemIndex navigate={navigate} />;
+  const titles: Record<Exclude<NormalPage, "today" | "settings" | "contests" | "problems">, string> = {
     knowledge: "Knowledge",
   };
   return (
@@ -291,6 +307,152 @@ function NormalPageContent({ page, workspace }: { page: NormalPage; workspace: C
       </section>
     </>
   );
+}
+
+function ContestShelf({ navigate }: { navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [items, setItems] = useState<ContestShelfItemDto[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [contestUrl, setContestUrl] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+  useEffect(() => { getContestShelf().then(setItems).catch(() => setFailed(true)); }, []);
+  const submitImport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (importing) return;
+    setImporting(true); setImportMessage(null);
+    try {
+      const result = await importCodeforcesContest(contestUrl);
+      setImportMessage(result.importStatus === "complete" ? "Contest imported completely." : `Contest saved; ${result.missingSnapshotProblems.length} statements remain missing.`);
+      setItems(await getContestShelf());
+    } catch {
+      setImportMessage("Import could not complete. The existing local import state was preserved.");
+    } finally { setImporting(false); }
+  };
+  const retryMissing = async (contestId: number) => {
+    if (importing) return;
+    setImporting(true); setImportMessage(null);
+    try {
+      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`);
+      setImportMessage(result.importStatus === "complete" ? "Missing statements were captured; contest is complete." : `Retry preserved the import; ${result.missingSnapshotProblems.length} statements remain missing.`);
+      setItems(await getContestShelf());
+    } catch {
+      setImportMessage("Retry could not complete. Existing snapshots and manifest were preserved.");
+    } finally { setImporting(false); }
+  };
+  return (
+    <>
+      <PageHeader eyebrow="M1 · Contest import" headingRef={headingRef} title="Contests" />
+      <form className="content-panel" onSubmit={submitImport}>
+        <label>Codeforces public contest URL
+          <input autoComplete="off" disabled={importing} onChange={(event) => setContestUrl(event.currentTarget.value)} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} />
+        </label>
+        <button className="primary-action" disabled={importing} type="submit">{importing ? "Importing…" : "Import contest"}</button>
+        {importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}
+      </form>
+      {failed ? <section className="empty-state" role="alert"><h2>Contest data is unavailable</h2><p>System Facts could not be read. No import state was changed.</p></section> : null}
+      {items?.length === 0 ? <section className="empty-state"><h2>No contests imported</h2><p>Import becomes available when the Codeforces adapter is connected.</p></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="Imported contests"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.importStatus === "complete" ? "complete" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">Retry missing statements</button> : null}</li>)}</ul></section> : null}
+      {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>Loading local contests…</p></section> : null}
+    </>
+  );
+}
+
+function ProblemIndex({ navigate }: { navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [items, setItems] = useState<LightweightProblemItemDto[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { getLightweightProblems().then(setItems).catch(() => setFailed(true)); }, []);
+  return (
+    <>
+      <PageHeader eyebrow="M1 · Lightweight Problems" headingRef={headingRef} title="我的题库" />
+      {failed ? <section className="empty-state" role="alert"><h2>Problem index is unavailable</h2><p>No local learning state was changed.</p></section> : null}
+      {items?.length === 0 ? <section className="empty-state"><h2>No lightweight problems yet</h2><p>Imported contest problems will appear here without creating Markdown notes.</p></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="Lightweight problems"><ul className="detail-list">{items.map((item) => <li key={`${item.contestId}-${item.index}`}><button className="list-link" onClick={() => navigate(`/problems/${item.contestId}/${item.index}`)} type="button"><strong>{item.index}. {item.title}</strong><span>Codeforces {item.contestId}{item.rating ? ` · ${item.rating}` : ""} · {item.hasStatementSnapshot ? "statement captured" : "statement pending"}</span></button></li>)}</ul></section> : null}
+      {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>Loading local problems…</p></section> : null}
+    </>
+  );
+}
+
+function ContestDetail({ contestId, navigate }: { contestId: number; navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [detail, setDetail] = useState<ContestDetailDto | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { getContestDetail(contestId).then(setDetail).catch(() => setFailed(true)); }, [contestId]);
+  if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Contest is unavailable</h1><p>The local contest detail could not be read.</p></section>;
+  if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading contest</h1></section>;
+  return <>
+    <PageHeader eyebrow="M1 · Contest detail" headingRef={headingRef} title={detail.title} />
+    <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.importStatus}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original contest</a></section>
+    <section className="content-panel" aria-label="Contest problems"><h2>Problems</h2><ul className="detail-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {problem.title}</strong><span>{problem.rating ? `Rating ${problem.rating} · ` : ""}{problem.hasStatementSnapshot ? "statement captured" : "statement pending"}</span></button></li>)}</ul></section>
+  </>;
+}
+
+function ProblemDetail({ contestId, index }: { contestId: number; index: string }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [detail, setDetail] = useState<LightweightProblemDetailDto | null>(null);
+  const [renderedHtml, setRenderedHtml] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const objectUrls: string[] = [];
+    getLightweightProblemDetail(contestId, index).then(async (nextDetail) => {
+      if (!active) return;
+      setDetail(nextDetail);
+      if (nextDetail.statement.state !== "ready") return;
+      const assets = await getStatementAssets(contestId, index);
+      if (!active) return;
+      const assetUrls = new Map<string, string>();
+      for (const asset of assets) {
+        const objectUrl = URL.createObjectURL(new Blob([new Uint8Array(asset.bytes)], { type: asset.mediaType }));
+        objectUrls.push(objectUrl);
+        assetUrls.set(asset.localRef, objectUrl);
+      }
+      setRenderedHtml(sanitizeStatementForRender(nextDetail.statement.sanitizedHtml, assetUrls));
+    }).catch(() => { if (active) setFailed(true); });
+    return () => {
+      active = false;
+      for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
+    };
+  }, [contestId, index]);
+  if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
+  if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
+  return <>
+    <PageHeader eyebrow="M1 local statement snapshot" headingRef={headingRef} title={detail.index + ". " + detail.title} />
+    <section className="content-panel"><p>Codeforces {detail.contestId}{detail.rating ? " · Rating " + detail.rating : ""}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a></section>
+    {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
+  </>;
+}
+
+function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string, string>): string {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const allowedTags = new Set(["DIV", "P", "SPAN", "H1", "H2", "H3", "H4", "PRE", "CODE", "UL", "OL", "LI", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "BR", "STRONG", "B", "EM", "I", "SUP", "SUB", "A", "IMG", "HR"]);
+  for (const element of Array.from(document.body.querySelectorAll("*"))) {
+    if (!allowedTags.has(element.tagName)) {
+      element.replaceWith(...Array.from(element.childNodes));
+      continue;
+    }
+    for (const attribute of Array.from(element.attributes)) {
+      if (!["class", "title", "alt", "href", "src"].includes(attribute.name.toLowerCase())) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+    if (element instanceof HTMLImageElement) {
+      const localUrl = assetUrls.get(element.getAttribute("src") ?? "");
+      if (!localUrl) {
+        element.remove();
+        continue;
+      }
+      element.src = localUrl;
+    }
+    if (element instanceof HTMLAnchorElement) {
+      const href = element.getAttribute("href") ?? "";
+      if (href !== "#" && !/^https:\/\//i.test(href)) element.setAttribute("href", "#");
+      element.target = "_blank";
+      element.rel = "noreferrer noopener";
+    }
+  }
+  return document.body.innerHTML;
 }
 
 function NotFoundContent({ pathname, navigate }: { pathname: string; navigate: Navigate }) {

@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 acm-os-application = { path = "crates/acm-os-application" }
+acm-os-domain = { path = "crates/acm-os-domain" }
 acm-os-infrastructure = { path = "crates/acm-os-infrastructure" }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }

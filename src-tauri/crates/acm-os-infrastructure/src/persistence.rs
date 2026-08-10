@@ -4,7 +4,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acm_os_application::{
-    StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
+    ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
+    ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
+    LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
+    StartupGateStatus, StartupRecoveryReason, StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
 use sqlx::sqlite::{
@@ -110,6 +113,313 @@ impl WorkspaceConfigurationPort for DatabaseRuntime {
             }
             _ => WorkspacePersistenceError::Unavailable,
         })
+    }
+}
+
+impl ContestImportPort for DatabaseRuntime {
+    async fn persist_manifest(
+        &self,
+        draft: &ContestImportDraft,
+    ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
+        let pool = self.contest_pool()?;
+        let mut transaction = pool.begin().await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(draft.contest.contest_id() as i64)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let contest_id = match existing {
+            Some(id) => {
+                let persisted_slots: Vec<(i64, String)> = sqlx::query_as(
+                    "SELECT p.external_contest_key, p.external_problem_key FROM contest_problems cp \
+                     JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+                )
+                .bind(id)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                let incoming_slots: Vec<(i64, String)> = draft
+                    .slots
+                    .iter()
+                    .map(|slot| (slot.problem.contest().contest_id() as i64, slot.problem.index().to_owned()))
+                    .collect();
+                if persisted_slots != incoming_slots {
+                    return Err(ContestImportPersistenceError::ManifestConflict);
+                }
+                id
+            }
+            None => {
+                let result = sqlx::query(
+                    "INSERT INTO contests (platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
+                     VALUES ('codeforces', ?1, ?2, ?3, ?4, 'incomplete')",
+                )
+                .bind(draft.contest.contest_id() as i64)
+                .bind(&draft.title)
+                .bind(&draft.source_url)
+                .bind(&draft.starts_at_utc)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                let id = result.last_insert_rowid();
+                for slot in &draft.slots {
+                    sqlx::query(
+                        "INSERT INTO problems (platform, external_contest_key, external_problem_key, title, rating, source_url) \
+                         VALUES ('codeforces', ?1, ?2, ?3, ?4, ?5) \
+                         ON CONFLICT(platform, external_contest_key, external_problem_key) DO NOTHING",
+                    )
+                    .bind(slot.problem.contest().contest_id() as i64)
+                    .bind(slot.problem.index())
+                    .bind(&slot.title)
+                    .bind(slot.rating.map(i64::from))
+                    .bind(&slot.source_url)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                    let problem_id: i64 = sqlx::query_scalar(
+                        "SELECT id FROM problems WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = ?2",
+                    )
+                    .bind(slot.problem.contest().contest_id() as i64)
+                    .bind(slot.problem.index())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                    sqlx::query(
+                        "INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) VALUES (?1, ?2, ?3, 'pending_snapshot')",
+                    )
+                    .bind(id)
+                    .bind(problem_id)
+                    .bind(i64::from(slot.ordinal))
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                }
+                id
+            }
+        };
+        transaction.commit().await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        self.import_state(contest_id).await
+    }
+
+    async fn persist_first_snapshot(
+        &self,
+        snapshot: &StatementSnapshotDraft,
+    ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
+        let pool = self.contest_pool()?;
+        let problem_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM problems WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = ?2",
+        )
+        .bind(snapshot.problem.contest().contest_id() as i64)
+        .bind(snapshot.problem.index())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let problem_id = problem_id.ok_or(ContestImportPersistenceError::ManifestConflict)?;
+        sqlx::query(
+            "INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(problem_id) DO NOTHING",
+        )
+        .bind(problem_id)
+        .bind(&snapshot.source_html)
+        .bind(&snapshot.sanitized_html)
+        .execute(pool)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        for asset in &snapshot.assets {
+            sqlx::query(
+                "INSERT INTO problem_statement_assets (problem_id, local_ref, media_type, bytes) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(problem_id, local_ref) DO NOTHING",
+            )
+            .bind(problem_id)
+            .bind(&asset.local_ref)
+            .bind(&asset.media_type)
+            .bind(&asset.bytes)
+            .execute(pool)
+            .await
+            .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        }
+        sqlx::query(
+            "UPDATE contest_problems SET import_state = 'ready' WHERE problem_id = ?1 AND EXISTS (SELECT 1 FROM problem_statement_snapshots WHERE problem_id = ?1)",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let contest_id: i64 = sqlx::query_scalar(
+            "SELECT contest_id FROM contest_problems WHERE problem_id = ?1 ORDER BY contest_id LIMIT 1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        self.import_state(contest_id).await
+    }
+}
+
+impl ContestReadPort for DatabaseRuntime {
+    async fn list_contests(&self) -> Result<Vec<ContestShelfItem>, ContestReadError> {
+        let rows: Vec<(i64, String, String, i64, i64)> = sqlx::query_as(
+            "SELECT c.external_contest_key, c.title, c.import_status, COUNT(cp.problem_id), \
+                    SUM(CASE WHEN cp.import_state = 'pending_snapshot' THEN 1 ELSE 0 END) \
+             FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id \
+             GROUP BY c.id ORDER BY c.created_at_utc DESC",
+        )
+        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        rows.into_iter().map(|(id, title, status, count, missing)| {
+            Ok(ContestShelfItem {
+                contest: acm_os_domain::CodeforcesContestIdentity::new(id as u64).map_err(|_| ContestReadError::Unavailable)?,
+                title,
+                import_status: match status.as_str() {
+                    "incomplete" => ContestImportStatus::Incomplete,
+                    "complete" => ContestImportStatus::Complete,
+                    _ => return Err(ContestReadError::Unavailable),
+                },
+                problem_count: count as u32,
+                missing_snapshot_count: missing as u32,
+            })
+        }).collect()
+    }
+
+    async fn contest_detail(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDetail, ContestReadError> {
+        let pool = self.contest_pool().map_err(|_| ContestReadError::Unavailable)?;
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT title, source_url, import_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        let (title, source_url, import_status) = row.ok_or(ContestReadError::NotFound)?;
+        let rows: Vec<(String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id) FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        let problems = rows.into_iter().map(|(index, title, rating, snapshot)| {
+            Ok(LightweightProblemItem {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
+                    .map_err(|_| ContestReadError::Unavailable)?,
+                title,
+                rating: rating.map(|value| value as u32),
+                has_statement_snapshot: snapshot != 0,
+            })
+        }).collect::<Result<Vec<_>, _>>()?;
+        Ok(ContestDetail {
+            contest: contest.clone(),
+            title,
+            source_url,
+            import_status: match import_status.as_str() {
+                "incomplete" => ContestImportStatus::Incomplete,
+                "complete" => ContestImportStatus::Complete,
+                _ => return Err(ContestReadError::Unavailable),
+            },
+            problems,
+        })
+    }
+
+    async fn list_lightweight_problems(&self) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
+        let rows: Vec<(i64, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT p.external_contest_key, p.external_problem_key, p.title, p.rating, \
+                    EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id) \
+             FROM problems p ORDER BY p.external_contest_key DESC, p.external_problem_key ASC",
+        )
+        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        rows.into_iter().map(|(contest_id, index, title, rating, snapshot)| {
+            Ok(LightweightProblemItem {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                    acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64).map_err(|_| ContestReadError::Unavailable)?, index,
+                ).map_err(|_| ContestReadError::Unavailable)?,
+                title,
+                rating: rating.map(|value| value as u32),
+                has_statement_snapshot: snapshot != 0,
+            })
+        }).collect()
+    }
+
+    async fn lightweight_problem_detail(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<LightweightProblemDetail, ContestReadError> {
+        let row: Option<(String, Option<i64>, String, Option<String>)> = sqlx::query_as(
+            "SELECT p.title, p.rating, p.source_url, ss.sanitized_html \
+             FROM problems p LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        let (title, rating, source_url, sanitized_html) = row.ok_or(ContestReadError::NotFound)?;
+        Ok(LightweightProblemDetail {
+            problem: problem.clone(),
+            title,
+            rating: rating.map(|value| value as u32),
+            source_url,
+            statement: match sanitized_html {
+                Some(sanitized_html) => StatementReadState::Ready { sanitized_html },
+                None => StatementReadState::Pending,
+            },
+        })
+    }
+
+    async fn statement_assets(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<LocalStatementAsset>, ContestReadError> {
+        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT a.local_ref, a.media_type, a.bytes FROM problem_statement_assets a JOIN problems p ON p.id = a.problem_id WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 AND p.external_problem_key = ?2 ORDER BY a.local_ref",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        Ok(rows.into_iter().map(|(local_ref, media_type, bytes)| LocalStatementAsset {
+            local_ref,
+            media_type,
+            bytes,
+        }).collect())
+    }
+}
+
+impl DatabaseRuntime {
+    fn contest_pool(&self) -> Result<&SqlitePool, ContestImportPersistenceError> {
+        self._pool.as_ref().ok_or(ContestImportPersistenceError::Unavailable)
+    }
+
+    async fn import_state(&self, contest_id: i64) -> Result<PersistedContestImport, ContestImportPersistenceError> {
+        let pool = self.contest_pool()?;
+        let missing: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT p.external_contest_key, p.external_problem_key FROM contest_problems cp \
+             JOIN problems p ON p.id = cp.problem_id LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             WHERE cp.contest_id = ?1 AND ss.problem_id IS NULL ORDER BY cp.ordinal",
+        )
+        .bind(contest_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let missing_snapshot_problems = missing.into_iter().map(|(contest_id, index)| {
+            acm_os_domain::CodeforcesProblemIdentity::new(
+                acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                    .map_err(|_| ContestImportPersistenceError::Unavailable)?,
+                index,
+            ).map_err(|_| ContestImportPersistenceError::Unavailable)
+        }).collect::<Result<Vec<_>, _>>()?;
+        let status = if missing_snapshot_problems.is_empty() { ContestImportStatus::Complete } else { ContestImportStatus::Incomplete };
+        sqlx::query("UPDATE contests SET import_status = ?1 WHERE id = ?2")
+            .bind(match status { ContestImportStatus::Incomplete => "incomplete", ContestImportStatus::Complete => "complete" })
+            .bind(contest_id).execute(pool).await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        Ok(PersistedContestImport { status, missing_snapshot_problems })
     }
 }
 
@@ -317,7 +627,7 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2) {
+    if !matches!(schema_version, 1 | 2 | 3) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
@@ -342,6 +652,36 @@ async fn validate_schema_contract(
             "workspace_settings".to_owned(),
             "workspace_settings".to_owned(),
         ));
+    }
+    if schema_version >= 3 {
+        expected_objects.extend([
+            (
+                "table".to_owned(),
+                "contest_problems".to_owned(),
+                "contest_problems".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "contests".to_owned(),
+                "contests".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_statement_snapshots".to_owned(),
+                "problem_statement_snapshots".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_statement_assets".to_owned(),
+                "problem_statement_assets".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problems".to_owned(),
+                "problems".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
     }
     if objects != expected_objects {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
@@ -383,8 +723,54 @@ async fn validate_schema_contract(
     if schema_version >= 2 {
         validate_workspace_settings_contract(pool).await?;
     }
+    if schema_version >= 3 {
+        validate_contest_import_contract(pool).await?;
+    }
 
     Ok(())
+}
+
+async fn validate_contest_import_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "contests",
+        &["id", "platform", "external_contest_key", "title", "source_url", "starts_at_utc", "import_status", "created_at_utc"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "problems",
+        &["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc"],
+    )
+    .await?;
+    validate_table_columns(pool, "contest_problems", &["contest_id", "problem_id", "ordinal", "import_state"]).await?;
+    validate_table_columns(pool, "problem_statement_snapshots", &["problem_id", "source_html", "sanitized_html", "captured_at_utc"]).await?;
+    validate_table_columns(pool, "problem_statement_assets", &["problem_id", "local_ref", "media_type", "bytes"]).await
+}
+
+async fn validate_table_columns(
+    pool: &SqlitePool,
+    table: &str,
+    expected_names: &[&str],
+) -> Result<(), StartupRecoveryReason> {
+    let sql = match table {
+        "contests" => "PRAGMA table_xinfo('contests')",
+        "problems" => "PRAGMA table_xinfo('problems')",
+        "contest_problems" => "PRAGMA table_xinfo('contest_problems')",
+        "problem_statement_snapshots" => "PRAGMA table_xinfo('problem_statement_snapshots')",
+        "problem_statement_assets" => "PRAGMA table_xinfo('problem_statement_assets')",
+        _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
+    };
+    let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    let actual_names: Vec<&str> = actual.iter().map(|column| column.1.as_str()).collect();
+    if actual_names == expected_names {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
 }
 
 async fn validate_migration_ledger_contract(
@@ -671,7 +1057,8 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        configure_workspace, query_workspace_configuration, StartupGateStatus,
+        configure_workspace, import_codeforces_contest, query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
+        ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
         WorkspaceConfigurationStatus, WorkspacePathField,
     };
@@ -679,6 +1066,52 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn contest_draft() -> ContestImportDraft {
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        ContestImportDraft::validated(
+            contest.clone(),
+            "Codeforces Round".to_owned(),
+            "https://codeforces.com/contest/1979".to_owned(),
+            None,
+            ["A", "B"]
+                .into_iter()
+                .enumerate()
+                .map(|(position, index)| ContestProblemSlotDraft {
+                    ordinal: position as u32 + 1,
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
+                        .expect("problem identity"),
+                    title: format!("Problem {index}"),
+                    rating: Some(800 + position as u32 * 100),
+                    source_url: format!("https://codeforces.com/contest/1979/problem/{index}"),
+                })
+                .collect(),
+        )
+        .expect("valid manifest")
+    }
+
+    fn snapshot(index: &str, source: &str, sanitized: &str) -> StatementSnapshotDraft {
+        StatementSnapshotDraft {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+                index,
+            )
+            .expect("problem identity"),
+            source_html: source.to_owned(),
+            sanitized_html: sanitized.to_owned(),
+            assets: Vec::new(),
+        }
+    }
+
+    fn snapshot_with_asset(index: &str) -> StatementSnapshotDraft {
+        let mut snapshot = snapshot(index, "<img src=\"acm-os-asset://fixture\">", "<img src=\"acm-os-asset://fixture\">");
+        snapshot.assets.push(StatementAssetDraft {
+            local_ref: "acm-os-asset://fixture".to_owned(),
+            media_type: "image/png".to_owned(),
+            bytes: vec![1, 2, 3],
+        });
+        snapshot
+    }
 
     async fn create_empty_migration_ledger(pool: &SqlitePool) {
         pool.execute(
@@ -737,15 +1170,176 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 2 }
+            &StartupGateStatus::Ready { schema_version: 3 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 2);
+        assert_eq!(ledger_count, 3);
         verify_integrity(pool).await.expect("database integrity");
+    }
+
+    #[tokio::test]
+    async fn contest_import_is_progressive_idempotent_and_preserves_first_snapshot() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+
+        let initial = runtime.persist_manifest(&draft).await.expect("persist manifest");
+        assert_eq!(initial.status, ContestImportStatus::Incomplete);
+        assert_eq!(initial.missing_snapshot_problems.len(), 2);
+
+        let after_a = runtime
+            .persist_first_snapshot(&snapshot_with_asset("A"))
+            .await
+            .expect("persist first snapshot");
+        assert_eq!(after_a.status, ContestImportStatus::Incomplete);
+        assert_eq!(after_a.missing_snapshot_problems.len(), 1);
+        assert_eq!(after_a.missing_snapshot_problems[0].index(), "B");
+
+        // A duplicate manifest is the existing manifest fast path: no objects
+        // are copied and it retains the known missing slot.
+        let duplicate = runtime.persist_manifest(&draft).await.expect("duplicate manifest");
+        assert_eq!(duplicate, after_a);
+
+        let complete = runtime
+            .persist_first_snapshot(&snapshot("B", "<p>first B</p>", "<p>first B</p>"))
+            .await
+            .expect("retry missing snapshot");
+        assert_eq!(complete.status, ContestImportStatus::Complete);
+        assert!(complete.missing_snapshot_problems.is_empty());
+
+        // Re-importing a first snapshot must be a no-overwrite operation.
+        let after_reimport = runtime
+            .persist_first_snapshot(&snapshot("A", "<p>later A</p>", "<p>later A</p>"))
+            .await
+            .expect("idempotent snapshot");
+        assert_eq!(after_reimport.status, ContestImportStatus::Complete);
+
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contests), (SELECT COUNT(*) FROM problems), \
+                    (SELECT COUNT(*) FROM contest_problems), (SELECT COUNT(*) FROM problem_statement_snapshots)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("import counts");
+        assert_eq!(counts, (1, 2, 2, 2));
+        let asset_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM problem_statement_assets")
+            .fetch_one(pool)
+            .await
+            .expect("stored localized asset");
+        assert_eq!(asset_count, 1);
+        let asset_problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("asset contest"),
+            "A",
+        ).expect("asset problem");
+        let assets = runtime.statement_assets(&asset_problem).await.expect("read localized assets");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].local_ref, "acm-os-asset://fixture");
+        let stored: String = sqlx::query_scalar(
+            "SELECT source_html FROM problem_statement_snapshots ss JOIN problems p ON p.id = ss.problem_id \
+             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("stored first snapshot");
+        assert_eq!(stored, "<img src=\"acm-os-asset://fixture\">");
+    }
+
+    #[tokio::test]
+    async fn problem_detail_exposes_only_sanitized_snapshot_or_pending_state() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime.persist_manifest(&contest_draft()).await.expect("persist manifest");
+        runtime.persist_first_snapshot(&snapshot(
+            "A",
+            "<script>unsafe()</script><p>source only</p>",
+            "<p>safe local statement</p>",
+        )).await.expect("persist snapshot");
+
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let contest_detail = runtime.contest_detail(&contest).await.expect("contest detail");
+        assert_eq!(contest_detail.problems.len(), 2);
+        assert_eq!(contest_detail.problems[0].problem.index(), "A");
+        let ready = runtime.lightweight_problem_detail(
+            &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem A"),
+        ).await.expect("ready problem detail");
+        assert_eq!(ready.title, "Problem A");
+        assert_eq!(ready.statement, StatementReadState::Ready {
+            sanitized_html: "<p>safe local statement</p>".to_owned(),
+        });
+        assert!(runtime.statement_assets(
+            &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem A assets"),
+        ).await.expect("statement assets").is_empty());
+
+        let pending = runtime.lightweight_problem_detail(
+            &acm_os_domain::CodeforcesProblemIdentity::new(contest, "B").expect("problem B"),
+        ).await.expect("pending problem detail");
+        assert_eq!(pending.statement, StatementReadState::Pending);
+    }
+
+    #[tokio::test]
+    #[ignore = "release-only real Codeforces import smoke; requires live network"]
+    async fn real_codeforces_import_smoke_is_idempotent_in_a_temporary_database() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let adapter = crate::codeforces::CodeforcesHttpAdapter::new().expect("HTTP adapter");
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1).expect("contest identity");
+
+        let first = import_codeforces_contest(&runtime, &adapter, contest.clone())
+            .await
+            .expect("first real import");
+        let shelf = runtime.list_contests().await.expect("contest shelf");
+        assert_eq!(shelf.len(), 1);
+        assert_eq!(shelf[0].contest, contest);
+        assert!(shelf[0].problem_count > 0);
+
+        let second = import_codeforces_contest(&runtime, &adapter, contest)
+            .await
+            .expect("idempotent real retry");
+        // A retry may either leave an already-complete import unchanged or
+        // fill additional pending snapshots. It must never create a second
+        // contest or increase the missing set.
+        assert!(
+            second.persisted.missing_snapshot_problems.len()
+                <= first.persisted.missing_snapshot_problems.len()
+        );
+        assert_eq!(runtime.list_contests().await.expect("shelf after retry").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reimport_rejects_manifest_drift_without_changing_the_first_manifest() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime.persist_manifest(&contest_draft()).await.expect("first manifest");
+
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let drifted = ContestImportDraft::validated(
+            contest.clone(),
+            "Changed remote title".to_owned(),
+            "https://codeforces.com/contest/1979".to_owned(),
+            None,
+            vec![ContestProblemSlotDraft {
+                ordinal: 1,
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, "A").expect("problem"),
+                title: "Problem A".to_owned(),
+                rating: Some(800),
+                source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+            }],
+        )
+        .expect("valid but drifted remote manifest");
+        assert_eq!(
+            runtime.persist_manifest(&drifted).await,
+            Err(ContestImportPersistenceError::ManifestConflict)
+        );
+
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let persisted_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems")
+            .fetch_one(pool).await.expect("persisted slots");
+        assert_eq!(persisted_count, 2);
     }
 
     #[tokio::test]
@@ -951,7 +1545,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 3), \
+                        CHECK (schema_generation < 4), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -1055,7 +1649,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 2 }
+            &StartupGateStatus::Ready { schema_version: 3 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -1075,7 +1669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_one_database_is_backed_up_then_migrated_to_version_two() {
+    async fn version_one_database_is_backed_up_then_migrated_to_current_version() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
         let pool = connect_read_write(&database_path)
@@ -1087,7 +1681,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 2 }
+            &StartupGateStatus::Ready { schema_version: 3 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 =
@@ -1413,7 +2007,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 2 }
+            &StartupGateStatus::Ready { schema_version: 3 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

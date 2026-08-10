@@ -2,6 +2,8 @@ export type NormalPage = "today" | "contests" | "problems" | "knowledge" | "sett
 
 export type AppRoute =
   | { kind: "normal"; page: NormalPage }
+  | { kind: "contestDetail"; contestId: number }
+  | { kind: "problemDetail"; contestId: number; index: string }
   | { kind: "review"; attemptId: string }
   | { kind: "notFound"; pathname: string };
 
@@ -21,6 +23,16 @@ export function parseAppRoute(pathname: string): AppRoute {
   const normalPage = NORMAL_ROUTES[normalized];
   if (normalPage) {
     return { kind: "normal", page: normalPage };
+  }
+
+  const contestMatch = /^\/contests\/([1-9][0-9]*)$/.exec(normalized);
+  if (contestMatch) {
+    return { kind: "contestDetail", contestId: Number(contestMatch[1]) };
+  }
+
+  const problemMatch = /^\/problems\/([1-9][0-9]*)\/([A-Z][0-9]?)$/.exec(normalized);
+  if (problemMatch) {
+    return { kind: "problemDetail", contestId: Number(problemMatch[1]), index: problemMatch[2] };
   }
 
   const reviewMatch = /^\/review\/([^/]+)$/.exec(normalized);
