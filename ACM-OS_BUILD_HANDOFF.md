@@ -1,234 +1,253 @@
-# ACM-OS BUILD Handoff — M1 checkpoint
+# ACM-OS BUILD Handoff — M2.1 closed / M2.2 next
 
-> 更新时间：2026-08-10（Asia/Shanghai）
+> 更新时间：2026-08-11（Asia/Shanghai）
 >
-> 用途：切换 Codex 窗口后，在同一 Windows 本地仓库继续 M1。
+> 用途：在丢失聊天上下文或切换 Codex 账号后，从真实 Windows 仓库安全恢复工作。
 >
-> 本文件是交接上下文，不是完成证明。接手者必须以四份权威文档、当前文件、实际工作区和命令结果为准。
+> 本文件是交接上下文，不替代当前仓库和实际命令证据。
 
-## 1. Authority and frozen scope
+## 1. Authority
 
-权威顺序：
+权威顺序严格保持：
 
-`ACM-OS_SPEC_v1.md > ACM-OS_DESIGN_v1.md > ACM-OS_PLAN_v1.md > implementation`
+`SPEC > DESIGN > PLAN > IMPLEMENTATION`
 
-接手后完整阅读：
+接手者必须完整阅读：
 
 - `ACM-OS_SPEC_v1.md`
 - `ACM-OS_DESIGN_v1.md`
 - `ACM-OS_PLAN_v1.md`
 - `ACM-OS_BUILD_HANDOFF.md`
 
-当前 Milestone：`M1 — Real Contest Import → Lightweight Problems`。
+SPEC 是唯一产品事实来源。不得自行改变冻结的产品行为、Authority、状态机、Review、Today、Markdown、事务边界、测试策略或 Milestone 顺序。若发现真实冲突，标记 `SPEC-CONFLICT` 并停止。
 
-冻结目标：
-
-```text
-真实 Codeforces Public Contest
-→ 完整 manifest
-→ 全部题成为 Lightweight Problem
-→ 每题保存第一次成功的题面 snapshot
-```
-
-本窗口不得进入 M2+：Personal Markdown、Vault discovery/watchers、Problem learning lifecycle、Review scheduling/execution、Today planning。
-
-## 2. Repository and Git checkpoint
+## 2. Verified repository checkpoint
 
 真实路径：
 
 `E:\项目开发\acm-os`
 
-当前分支与已完成 M0：
+2026-08-11 实际核对结果：
 
 ```text
-Branch: main
-HEAD:   42815a8 build: complete B0.4 startup shells
-Tag:    acm-os-m0-foundation → 42815a8
-Remote: https://github.com/Mxiaocao/acm-os.git
+Branch:      main
+M2.1 code checkpoint: 27f785f build: complete M2.1 personal note binding
+Working tree after the M2.1 code commit: documentation changes only
+origin/main: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
+M1 tag:     acm-os-m1-contest-import
+Remote tag: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
+Remote:      https://github.com/Mxiaocao/acm-os.git
 ```
 
-M0 已完成并已推送：
-
-- `main` 已推送到 `origin/main`；
-- `acm-os-m0-foundation` 标签已推送到 `origin`。
-
-当前 M1 尚未提交、尚未打标签、尚未推送。不要对 M1 执行 commit/tag/push，除非用户明确授权并完成阶段验收。
-
-当前工作区预期：
+里程碑历史：
 
 ```text
- M src-tauri/crates/acm-os-application/src/lib.rs
- M src-tauri/crates/acm-os-domain/src/lib.rs
- M src-tauri/crates/acm-os-infrastructure/src/persistence.rs
-?? src-tauri/crates/acm-os-application/src/codeforces.rs
-?? src-tauri/crates/acm-os-infrastructure/migrations/0003_create_contest_import.sql
+d00a915 build: complete B0.1 repository scaffold
+ece09f8 build: complete B0.2 SQLite startup gate
+f140316 build: complete B0.3 workspace configuration
+42815a8 build: complete B0.4 startup shells
+4e25359 build: complete M1 contest import
+27f785f build: complete M2.1 personal note binding
 ```
 
-交接时不要丢弃这些改动，不要 reset、clean 或 checkout 覆盖它们。
-
-## 3. M1 implementation already present
-
-### Domain identity
-
-`src-tauri/crates/acm-os-domain/src/lib.rs`
-
-- `CodeforcesContestIdentity`：`platform = codeforces`，正整数 contest id；
-- `CodeforcesProblemIdentity`：`(codeforces, contest id, uppercase/digit index)`；
-- 标题、URL、难度不是去重 identity；
-- malformed contest id / problem index 被拒绝。
-
-### Secure locator
-
-`src-tauri/crates/acm-os-application/src/codeforces.rs`
-
-只接受：
+标签：
 
 ```text
-https://codeforces.com/contest/<positive-id>
-https://www.codeforces.com/contest/<positive-id>
+acm-os-m0-foundation    → 42815a8
+acm-os-m1-contest-import → 4e25359
 ```
 
-可带一个尾部 `/`。HTTP、非 Codeforces host、problem URL、嵌套路径、零 id 均拒绝。后续 adapter 必须从 strong identity 自己构造远程 URL，不能把用户输入当任意 downloader URL。
+M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1 提交 `27f785f` 目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.1。
 
-### Canonical import contract
-
-`src-tauri/crates/acm-os-application/src/lib.rs`
-
-已加入：
-
-- `ContestImportDraft`；
-- ordered `ContestProblemSlotDraft`；
-- `StatementSnapshotDraft`；
-- `ContestImportPort`；
-- `ContestImportStatus::{Incomplete, Complete}`；
-- manifest validation：title/source URL、非空 manifest、连续 ordinal、slot contest identity、duplicate identity。
-
-Application/domain 不得加入 filesystem、network、SQLite 或平台 authority。
-
-### Persistence schema and idempotency
-
-`src-tauri/crates/acm-os-infrastructure/migrations/0003_create_contest_import.sql`
-
-schema v3 新增：
-
-- `contests`：Codeforces contest strong identity、metadata、`incomplete/complete`；
-- `problems`：Lightweight Problem strong identity；
-- `contest_problems`：ordered Contest slots 与 snapshot state；
-- `problem_statement_snapshots`：每个 Problem 单一 first snapshot，`ON CONFLICT DO NOTHING`。
-
-`src-tauri/crates/acm-os-infrastructure/src/persistence.rs` 已实现：
-
-- schema v3 严格启动对象/列校验；
-- manifest-first persistence；
-- duplicate fast path；
-- manifest drift rejection，不静默刷新首次 manifest；
-- progressive import：成功项保留，缺失 snapshot 返回 `Incomplete`；
-- retry missing；
-- first snapshot no-overwrite；
-- import status 重新计算。
-
-注意：真实 Codeforces adapter、HTTP/API、statement HTML parser/sanitize、asset localization、IPC、Contest UI、My Problems UI、Problem statement view 尚未实现。
-
-## 4. Verification evidence
-
-最近一次通过：
+## 3. Current BUILD position
 
 ```text
-C:\Users\Mxiaocao\.cargo\bin\cargo.exe test --workspace --locked
+Completed: M0 — Executable Foundation + Workspace Ready Gate
+Completed: M1 — Real Contest Import → Lightweight Problems
+Completed: M2.1 — Create Personal Note + File Binding
+Next:      M2.2 — Fresh Read + Markdown Parser
+M2 state:  IN PROGRESS
 ```
 
-结果：
+不要重复实现 M1/M2.1，也不要跳到 M2.3 或 M3+。
+
+## 4. M1 closure record
+
+M1 已实现并由提交 `4e25359` 封存：
+
+- Codeforces locator 与 strong identity；
+- fixture-backed adapter；
+- manifest-first、progressive、idempotent import；
+- statement sanitize 与必要 asset localization；
+- first statement snapshot no-overwrite；
+- Contest Import / Shelf / Detail typed IPC 与 UI；
+- My Problems 与本地 statement view；
+- schema migration `0003_create_contest_import.sql`。
+
+提交前记录的验证证据：
+
+- `cargo test --workspace --locked`：PASS；
+- `cargo check --workspace --locked`：PASS；
+- TypeScript type-check：PASS；
+- Vite production build：PASS；
+- Tauri Debug build：PASS；
+- startup-shell tests：PASS；
+- boundary checks：PASS；
+- `git diff --check`：PASS；
+- ignored real Codeforces metadata smoke：手动 PASS；
+- full import/idempotency smoke：手动 PASS。
+
+已知环境限制：`scripts/dom-shells.test.mjs` 曾在 Windows 读取 pnpm dependency 时因 EPERM 无法启动，发生在应用断言之前。接手者必须重新核对当前环境，不能把旧记录自动当成当前 PASS 或 FAIL。
+
+## 5. M2.1 closure record
+
+M2.1 已实现并由提交 `27f785f` 封存：
+
+- schema migration `0004_create_personal_notes.sql`；
+- Lightweight / Personal identity 与 File Binding Registry；
+- 冻结 initial Markdown skeleton；
+- `create_new` 防覆盖、写后重读验证、SHA-256 digest；
+- 安全封装的 Windows file key；
+- binding commit 失败时的 digest-guarded 补偿；
+- typed IPC 与 Problem Detail 创建笔记 UI。
+
+验证证据：
+
+- Rust workspace：51 passed，2 个真实网络 smoke ignored；
+- startup / boundary / DOM：18 passed；
+- TypeScript type-check、Vite production build、Cargo check：PASS；
+- Tauri Debug build：PASS；
+- `git diff --check`：PASS。
+
+M2.1 没有实现 Fresh Read parser、relocation、watcher、Safe Patch 产品行为或 M3 lifecycle。
+
+## 6. Frozen M2 outcome and scope
+
+PLAN 中的 M2 Outcome：
 
 ```text
-Tauri IPC:       6 passed
-Application:     7 passed
-Domain:          1 passed
-Infrastructure: 26 passed
-全部通过
+Lightweight Problem 创建真实 Personal Markdown
+→ 外部 Obsidian 修改
+→ ACM-OS Fresh Read 最新内容
 ```
 
-边界检查：
+M2 范围：
+
+- create personal note；
+- initial Markdown skeleton；
+- File Binding Registry；
+- Windows file key；
+- digest 与 relocation；
+- Fresh Read / parser；
+- watcher（只做 cache invalidation / re-read trigger，不是事实源）；
+- window-focus revalidation；
+- Open in Obsidian；
+- Safe Patch engine；
+- Recovery Copy foundation。
+
+主要验收：
+
+- `AC-PROBLEM-01`；
+- `AC-MD-01` 至 `AC-MD-06`；
+- Candidate relation 的实际产品行为仍留到 M6。
+
+M2 blocking evidence：
 
 ```text
-C:\Users\Mxiaocao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe scripts\check-boundaries.mjs
+已有 stale cache
+→ 外部编辑 Markdown
+→ watcher event 丢失或没有发生
+→ 再次读取时仍必须通过 Fresh Read 得到最新内容
 ```
 
-结果：`boundary check passed`。
+M2 checkpoint 仅在完整 DoD 后创建：
 
-`git diff --check`：通过。Rust 测试期间只有已有的 Windows linker stdout warning，无编译失败。
+`acm-os-m2-vault-binding`
 
-当前未完成验证：
+## 7. Frozen Markdown and Authority constraints
 
-- Codeforces fixture adapter tests；
-- HTML sanitize / assets tests；
-- real Codeforces smoke；
-- frontend/IPC/UI tests；
-- M1 Tauri debug build and desktop smoke。
+接手者必须特别保护：
 
-## 5. Exact next actions for the next Codex window
+- Markdown 内容由 Markdown 权威拥有，SQLite 不能覆盖正文事实；
+- 不向 Markdown 注入 ACM-OS 私有 ID；
+- Problem Identity 与 File Binding 分离；
+- watcher 事件不是事实源；
+- 每次 authoritative read 必须 Fresh Read；
+- write 必须执行 fresh read、唯一目标验证、minimal/byte-preserving patch、并发 digest 检查、pre-write recovery copy、写后重读/重解析/语义验证；
+- 外部编辑优先，不能用 stale cache 回写覆盖；
+- Vault 暂时不可用是 degraded/affected-scope 状态，不等于全局 Startup Recovery；
+- React 不得获得 filesystem 或 SQLite Authority；
+- 网络或文件 I/O 不得放进长 SQLite transaction；
+- M2 不实现 Problem learning lifecycle、Review、Today 或 Knowledge 正式关系。
 
-1. `Get-Location` 确认精确为 `E:\项目开发\acm-os`。
-2. 完整阅读四份权威文档和本 handoff。
-3. 执行：
+## 8. Recovery procedure if chat or handoff is lost
 
-   ```powershell
-   git status
-   git branch --show-current
-   git log -3 --oneline --decorate
-   git remote -v
-   git tag --points-at HEAD
-   ```
+如果聊天窗口消失，但仓库还在：
 
-4. 读取全部当前 M1 diff，并单独读取两个未跟踪文件：`src-tauri/crates/acm-os-application/src/codeforces.rs`、`src-tauri/crates/acm-os-infrastructure/migrations/0003_create_contest_import.sql`。
-5. 不提交当前 M1 改动。先实现 Codeforces adapter 的 fixture contract：官方 API metadata fixture、statement HTML fixture、identity validation、manifest completeness、URL construction security。
-6. 再实现 statement sanitizer 与必要 asset localization；raw external HTML 永不直接 render，网络请求不得在长 SQLite transaction 内执行。
-7. 用固定 fixture 覆盖：complete、partial、retry missing only、duplicate、manifest stability、first snapshot no-overwrite、sanitize/assets、URL security。
-8. 运行 focused tests、`check-boundaries`、Rust workspace tests/check、`git diff --check`。
-9. 之后再实现薄 IPC 与 M1 UI：Contest import、Contest shelf/detail、partial retry、My Problems index、Problem statement view；不要实现 M2+。
-10. 只有 M1 DoD 全部有证据后，向用户请求允许提交；提交后再创建 `acm-os-m1-contest-import` 标签并推送。
+1. 打开 `E:\项目开发\acm-os`；
+2. 运行 `Get-Location`、`git status`、`git branch --show-current`、`git log --oneline --decorate -10`；
+3. 运行 `git tag --points-at HEAD`、`git remote -v`；
+4. 完整阅读三份冻结文档；
+5. 用 `git show --stat 4e25359`、`git show --stat 27f785f` 和 `git show acm-os-m1-contest-import:ACM-OS_BUILD_HANDOFF.md` 查看 M1/M2.1 历史证据；
+6. 若工作树非空，先识别用户改动，禁止 reset/clean/覆盖；
+7. 只有 HEAD/分支/工作树与用户目标厘清后才继续。
 
-## 6. M1 closure update (2026-08-10)
+如果本地仓库也丢失：
 
-This section supersedes any earlier implementation-status notes in this handoff
-that say the M1 Codeforces adapter, statement sanitizer/assets, IPC, contest UI,
-or problem statement view are not implemented. M1 implementation and acceptance
-verification are complete in the working tree, subject to the Git closure policy
-below. The work remains intentionally uncommitted.
+- 远程仓库为 `https://github.com/Mxiaocao/acm-os.git`；
+- 已确认远程 `main` 与 `acm-os-m1-contest-import` 都指向完整 M1 提交 `4e253590fd0eee8d5d7af61bb14529bff4cd6e6b`；
+- 只在用户指定的空目录中重新 clone；不要覆盖未知目录或现有用户文件；
+- clone 后再次读取权威文档并核对 tag，不凭本 handoff 直接实施。
 
-Implemented and verified:
+## 9. Exact next-session workflow
 
-- Codeforces fixed-request adapter, fixture contract, strict locator validation,
-  sanitized statement snapshots, and localized assets.
-- Manifest-first and idempotent SQLite import, partial retry, snapshot protection,
-  Contest Import/Shelf/Detail IPC, My Problems, and local-only statement rendering.
-- `cargo test --workspace --locked`, `cargo check --workspace --locked`, TypeScript
-  type-check, Vite production build, Tauri Debug build, startup-shell tests,
-  boundary check, and `git diff --check` all passed.
-- The ignored real Codeforces metadata smoke and full import/idempotency smoke both
-  passed when run manually.
+新 Codex 首轮必须先只读取证：
 
-Known environment limitation: `scripts/dom-shells.test.mjs` cannot start because
-Windows returns EPERM while Node reads a pnpm dependency under `node_modules`; this
-occurs before the application assertions. It is not a failing application test.
+```powershell
+Get-Location
+git status
+git branch --show-current
+git log -10 --oneline --decorate
+git remote -v
+git tag --points-at HEAD
+```
 
-No commit, tag, or push has been performed. Do not enter M2 until the user grants
-Git closure authority and M1 has been deliberately committed/tagged/pushed.
+然后：
 
-## 7. Git handoff rules
+1. 完整阅读四份权威文档；
+2. 检查顶层目录、manifests、lockfiles、toolchain 与当前测试入口；
+3. 检查 `4e25359` 和 `27f785f` 的实际 change surface；
+4. 明确报告 M1/M2.1 checkpoint 是否仍完整、工作树是否有未知改动；
+5. 从 SPEC/DESIGN/PLAN 提取 M2.2 最小纵向 Slice 和 Done Evidence；
+6. 在修改前提交 M2.2 实施计划供用户确认；
+7. 按“最小 Slice → focused verification → broader verification → diff review → status”执行；
+8. 当前 Slice 失败时不叠加下一 Slice；
+9. 未经用户明确允许，不 commit、tag、push；
+10. M2 完成前不进入 M3。
 
-当前目标不是提交 M1，而是安全切换窗口并保留未提交进度。
+建议的 M2.2 首个动作不是写代码，而是：
+
+`审阅 M2.1 的 File Binding 与 Problem Detail 边界，并形成 Fresh Read/parser 的最小实施切片与验收矩阵。`
+
+## 10. Git and safety rules
 
 禁止：
 
-- `git reset --hard`、`git clean`、覆盖式 checkout；
-- 把未完成 M1 改动推送到 M0 标签；
-- 提前创建 M1 checkpoint tag；
-- 将 fixture PASS 冒充 real Codeforces smoke PASS；
-- 宣称 M1 完成。
+- `git reset --hard`；
+- `git clean`；
+- 覆盖式 checkout；
+- 在未知目录 clone/复制覆盖；
+- 手写或伪造 lockfile；
+- 用假工具、跳过边界检查或伪造 build/test PASS；
+- 未经允许安装大型或系统级工具；
+- 未经允许 commit、tag、push；
+- M2 未完成就创建 `acm-os-m2-vault-binding`；
+- 进入 M3+。
 
-阶段完成后的流程：
+## 11. Durable recovery prompt
 
-```text
-实现 → focused verification → full verification → 用户确认
-→ commit → 阶段 tag → push main + tag → 更新 handoff → 新 Codex 窗口
-```
+可直接复制到新 Codex 窗口的完整提示词保存在：
+
+`ACM-OS_RECOVERY_PROMPT.md`
+
+该提示词被设计为即使没有聊天记录、甚至没有本 handoff，也会先从 Git 和权威文档重建事实，而不是相信旧会话记忆。
