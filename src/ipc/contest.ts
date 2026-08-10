@@ -50,6 +50,31 @@ export interface PersonalNoteBindingDto {
   vaultRelativePath: string;
 }
 
+export interface ProblemMarkdownProjectionDto {
+  contentDigest: string;
+  knownSections: KnownMarkdownSectionDto[];
+  solutionRoutes: SolutionRouteDto[];
+  warnings: MarkdownParseWarningDto[];
+}
+
+export interface KnownMarkdownSectionDto {
+  name: string;
+  startOffset: number;
+  endOffset: number;
+}
+
+export interface SolutionRouteDto {
+  name: string;
+  startOffset: number;
+  endOffset: number;
+}
+
+export interface MarkdownParseWarningDto {
+  code: "duplicate_known_section";
+  name: string;
+  count: number;
+}
+
 export interface LocalStatementAssetDto {
   localRef: string;
   mediaType: string;
@@ -80,6 +105,10 @@ export function getLightweightProblemDetail(contestId: number, index: string): P
 
 export function createPersonalNote(contestId: number, index: string): Promise<PersonalNoteBindingDto> {
   return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
+}
+
+export function getPersonalNoteProjection(contestId: number, index: string): Promise<ProblemMarkdownProjectionDto> {
+  return invoke<ProblemMarkdownProjectionDto>("personal_note_projection", { input: { contestId, index } });
 }
 
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {

@@ -12,6 +12,7 @@ const EXPECTED_RUST_DEPENDENCIES = {
     "dev:tokio",
     "normal:acm-os-application",
     "normal:acm-os-domain",
+    "normal:pulldown-cmark",
     "normal:reqwest",
     "normal:rustls",
     "normal:same-file",

@@ -1,4 +1,4 @@
-# ACM-OS BUILD Handoff — M2.1 closed / M2.2 next
+# ACM-OS BUILD Handoff — M2.2 closed / M2.3 next
 
 > 更新时间：2026-08-11（Asia/Shanghai）
 >
@@ -32,7 +32,8 @@ SPEC 是唯一产品事实来源。不得自行改变冻结的产品行为、Aut
 ```text
 Branch:      main
 M2.1 code checkpoint: 27f785f build: complete M2.1 personal note binding
-Working tree after the M2.1 code commit: documentation changes only
+M2.1 handoff checkpoint: cec7d6f docs: record M2.1 handoff
+Working tree: verified M2.2 implementation and handoff changes, pending commit
 origin/main: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
 M1 tag:     acm-os-m1-contest-import
 Remote tag: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
@@ -48,6 +49,7 @@ f140316 build: complete B0.3 workspace configuration
 42815a8 build: complete B0.4 startup shells
 4e25359 build: complete M1 contest import
 27f785f build: complete M2.1 personal note binding
+cec7d6f docs: record M2.1 handoff
 ```
 
 标签：
@@ -65,11 +67,12 @@ M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1 提交 `27f785
 Completed: M0 — Executable Foundation + Workspace Ready Gate
 Completed: M1 — Real Contest Import → Lightweight Problems
 Completed: M2.1 — Create Personal Note + File Binding
-Next:      M2.2 — Fresh Read + Markdown Parser
+Completed: M2.2 — Fresh Read + Markdown Parser
+Next:      M2.3 — Binding Resolution + Vault Availability
 M2 state:  IN PROGRESS
 ```
 
-不要重复实现 M1/M2.1，也不要跳到 M2.3 或 M3+。
+不要重复实现 M1/M2.1/M2.2，也不要跳过 M2.3 或进入 M3+。
 
 ## 4. M1 closure record
 
@@ -120,6 +123,29 @@ M2.1 已实现并由提交 `27f785f` 封存：
 - `git diff --check`：PASS。
 
 M2.1 没有实现 Fresh Read parser、relocation、watcher、Safe Patch 产品行为或 M3 lifecycle。
+
+## 5.2 M2.2 closure record
+
+M2.2 已实现并完成验证，尚待用户明确允许后 commit：
+
+- `pulldown-cmark` CommonMark source-offset parser；
+- 已知 H2：`前置知识`、`题解`、`额外题目`、`Hints`、`思路`、`代码`；
+- 仅识别 `## 题解` 下直接 `###` 为 Solution Route，`####` 不识别，Route 名称原样保留；
+- 重复 Known Section 产生局部 warning，不猜测唯一目标；
+- 每次 authoritative read 先读取当前磁盘 bytes 并计算 SHA-256；
+- projection cache 仅在 digest 相同时复用；
+- typed IPC 与 Problem Detail 最新 projection UI；
+- stale cache + 外部直接编辑 + 无 watcher event 的 blocking evidence。
+
+验证证据：
+
+- Rust workspace：56 passed，2 个真实网络 smoke ignored；
+- startup / boundary / DOM：18 passed；
+- TypeScript type-check 与 Vite production build：PASS；
+- Tauri Debug executable（no bundle）：PASS；
+- `git diff --check`：PASS。
+
+M2.2 没有实现 relocation、watcher、window-focus revalidation、Open in Obsidian、Safe Patch、Recovery Copy 或 M3 lifecycle。M2.3 应先处理 path → Windows file key → digest 的绑定解析与 Vault unavailable 的 affected-scope 状态。
 
 ## 6. Frozen M2 outcome and scope
 
@@ -217,17 +243,17 @@ git tag --points-at HEAD
 1. 完整阅读四份权威文档；
 2. 检查顶层目录、manifests、lockfiles、toolchain 与当前测试入口；
 3. 检查 `4e25359` 和 `27f785f` 的实际 change surface；
-4. 明确报告 M1/M2.1 checkpoint 是否仍完整、工作树是否有未知改动；
-5. 从 SPEC/DESIGN/PLAN 提取 M2.2 最小纵向 Slice 和 Done Evidence；
-6. 在修改前提交 M2.2 实施计划供用户确认；
+4. 明确报告 M1/M2.1/M2.2 checkpoint 是否仍完整、工作树是否有未知改动；
+5. 从 SPEC/DESIGN/PLAN 提取 M2.3 最小纵向 Slice 和 Done Evidence；
+6. 在修改前提交 M2.3 实施计划供用户确认；
 7. 按“最小 Slice → focused verification → broader verification → diff review → status”执行；
 8. 当前 Slice 失败时不叠加下一 Slice；
 9. 未经用户明确允许，不 commit、tag、push；
 10. M2 完成前不进入 M3。
 
-建议的 M2.2 首个动作不是写代码，而是：
+建议的 M2.3 首个动作不是写代码，而是：
 
-`审阅 M2.1 的 File Binding 与 Problem Detail 边界，并形成 Fresh Read/parser 的最小实施切片与验收矩阵。`
+`审阅 M2.2 的 Fresh Read 与现有 File Binding 边界，并形成 path → file key → digest relocation、歧义处理和 Vault unavailable 的最小实施切片与验收矩阵。`
 
 ## 10. Git and safety rules
 

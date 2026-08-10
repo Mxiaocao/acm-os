@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +11,7 @@ use acm_os_application::{
     ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
     LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
     PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError, PersonalNotePort,
+    PersonalNoteReadError, PersonalNoteReadPort, ProblemMarkdownProjection,
     ProblemIdentityType, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
     StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
@@ -31,6 +34,7 @@ pub struct DatabaseRuntime {
     _pool: Option<SqlitePool>,
     _startup_lock: Option<File>,
     status: StartupGateStatus,
+    markdown_projection_cache: Mutex<HashMap<String, ProblemMarkdownProjection>>,
 }
 
 impl DatabaseRuntime {
@@ -39,6 +43,7 @@ impl DatabaseRuntime {
             _pool: None,
             _startup_lock: None,
             status: StartupGateStatus::RecoveryRequired { reason },
+            markdown_projection_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -50,6 +55,75 @@ impl DatabaseRuntime {
         self._pool
             .as_ref()
             .ok_or(WorkspacePersistenceError::Unavailable)
+    }
+}
+
+impl PersonalNoteReadPort for DatabaseRuntime {
+    async fn read_personal_note_projection(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemMarkdownProjection, PersonalNoteReadError> {
+        let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT p.identity_type, ws.active_vault_path, fb.vault_relative_path \
+             FROM problems p \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+             WHERE p.platform = 'codeforces' \
+               AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNoteReadError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+        let (identity_type, active_vault, relative_path) =
+            row.ok_or(PersonalNoteReadError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(PersonalNoteReadError::NotPersonal);
+        }
+        let active_vault = active_vault.ok_or(PersonalNoteReadError::WorkspaceUnavailable)?;
+        let relative_path = relative_path.ok_or(PersonalNoteReadError::BindingUnavailable)?;
+        let read_vault = active_vault.clone();
+        let read_relative = relative_path.clone();
+        let bytes = tokio::task::spawn_blocking(move || {
+            read_bound_personal_note(&read_vault, &read_relative)
+        })
+        .await
+        .map_err(|_| PersonalNoteReadError::FileReadFailed)??;
+
+        // Disk bytes are always read and digested before this cache is consulted.
+        let content_digest = sha256_hex(&bytes);
+        let cache_key = format!(
+            "codeforces:{}:{}:{}",
+            problem.contest().contest_id(),
+            problem.index(),
+            relative_path
+        );
+        {
+            let cache = self
+                .markdown_projection_cache
+                .lock()
+                .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+            if let Some(projection) = cache.get(&cache_key) {
+                if projection.content_digest == content_digest {
+                    return Ok(projection.clone());
+                }
+            }
+        }
+
+        let markdown = std::str::from_utf8(&bytes)
+            .map_err(|_| PersonalNoteReadError::InvalidUtf8)?;
+        let projection = crate::markdown::parse_problem_markdown(markdown, content_digest);
+        self.markdown_projection_cache
+            .lock()
+            .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?
+            .insert(cache_key, projection.clone());
+        Ok(projection)
     }
 }
 
@@ -357,6 +431,31 @@ fn discard_created_note_on_disk(
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn read_bound_personal_note(
+    active_vault: &str,
+    vault_relative_path: &str,
+) -> Result<Vec<u8>, PersonalNoteReadError> {
+    let vault = std::fs::canonicalize(active_vault)
+        .map_err(|_| PersonalNoteReadError::WorkspaceUnavailable)?;
+    if !vault.is_dir() {
+        return Err(PersonalNoteReadError::WorkspaceUnavailable);
+    }
+    let relative = Path::new(vault_relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(PersonalNoteReadError::BindingUnavailable);
+    }
+    let resolved = std::fs::canonicalize(vault.join(relative))
+        .map_err(|_| PersonalNoteReadError::FileReadFailed)?;
+    if !resolved.starts_with(&vault) || !resolved.is_file() {
+        return Err(PersonalNoteReadError::BindingUnavailable);
+    }
+    std::fs::read(resolved).map_err(|_| PersonalNoteReadError::FileReadFailed)
 }
 
 #[cfg(windows)]
@@ -802,6 +901,7 @@ async fn try_start_database(
         status: StartupGateStatus::Ready {
             schema_version: applied_schema_version,
         },
+        markdown_projection_cache: Mutex::new(HashMap::new()),
     })
 }
 
@@ -1402,7 +1502,7 @@ mod tests {
         query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
-        WorkspaceConfigurationStatus, WorkspacePathField, PersonalNoteError,
+        WorkspaceConfigurationStatus, WorkspacePathField, PersonalNoteError, PersonalNoteReadPort,
         ProblemIdentityType, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
@@ -1662,6 +1762,44 @@ mod tests {
         .await
         .expect("personal note counts");
         assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn fresh_read_ignores_a_stale_projection_cache_without_a_watcher_event() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        create_personal_note(&runtime, &problem)
+            .await
+            .expect("create personal note");
+
+        let cached = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("initial projection");
+        fs::write(
+            problems.join("CF-1979-A.md"),
+            "# Problem\n\n## 题解\n\n### External edit ×\n\n#### Not a route\n",
+        )
+        .expect("external edit without watcher event");
+
+        let fresh = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("fresh projection");
+        assert_ne!(fresh.content_digest, cached.content_digest);
+        assert_eq!(fresh.solution_routes.len(), 1);
+        assert_eq!(fresh.solution_routes[0].name, "External edit ×");
     }
 
     #[tokio::test]

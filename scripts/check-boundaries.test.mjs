@@ -19,6 +19,7 @@ const validRustPackages = () => [
     dependencies: [
       { name: "acm-os-application", kind: null, path: "local/application" },
       { name: "acm-os-domain", kind: null, path: "local/domain" },
+      { name: "pulldown-cmark", kind: null },
       { name: "reqwest", kind: null },
       { name: "rustls", kind: null },
       { name: "same-file", kind: null },

@@ -79,6 +79,39 @@ pub struct PersonalNoteBindingDto {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemMarkdownProjectionDto {
+    content_digest: String,
+    known_sections: Vec<KnownMarkdownSectionDto>,
+    solution_routes: Vec<SolutionRouteDto>,
+    warnings: Vec<MarkdownParseWarningDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownMarkdownSectionDto {
+    name: String,
+    start_offset: usize,
+    end_offset: usize,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolutionRouteDto {
+    name: String,
+    start_offset: usize,
+    end_offset: usize,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownParseWarningDto {
+    code: &'static str,
+    name: String,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum StatementReadStateDto {
     Pending,
@@ -206,6 +239,23 @@ pub async fn create_personal_note(
 }
 
 #[tauri::command]
+pub async fn personal_note_projection(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<ProblemMarkdownProjectionDto, &'static str> {
+    use acm_os_application::PersonalNoteReadPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    database
+        .read_personal_note_projection(&problem)
+        .await
+        .map(problem_markdown_projection_dto)
+        .map_err(acm_os_application::PersonalNoteReadError::code)
+}
+
+#[tauri::command]
 pub async fn statement_assets(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
@@ -287,6 +337,31 @@ fn problem_identity_type_dto(identity_type: acm_os_application::ProblemIdentityT
 fn personal_note_binding_dto(binding: acm_os_application::PersonalNoteBinding) -> PersonalNoteBindingDto {
     PersonalNoteBindingDto {
         vault_relative_path: binding.vault_relative_path,
+    }
+}
+
+fn problem_markdown_projection_dto(
+    projection: acm_os_application::ProblemMarkdownProjection,
+) -> ProblemMarkdownProjectionDto {
+    ProblemMarkdownProjectionDto {
+        content_digest: projection.content_digest,
+        known_sections: projection.known_sections.into_iter().map(|section| KnownMarkdownSectionDto {
+            name: section.name,
+            start_offset: section.start_offset,
+            end_offset: section.end_offset,
+        }).collect(),
+        solution_routes: projection.solution_routes.into_iter().map(|route| SolutionRouteDto {
+            name: route.name,
+            start_offset: route.start_offset,
+            end_offset: route.end_offset,
+        }).collect(),
+        warnings: projection.warnings.into_iter().map(|warning| match warning {
+            acm_os_application::MarkdownParseWarning::DuplicateKnownSection { name, count } => MarkdownParseWarningDto {
+                code: "duplicate_known_section",
+                name,
+                count,
+            },
+        }).collect(),
     }
 }
 
@@ -498,14 +573,16 @@ fn workspace_error_dto(
 #[cfg(test)]
 mod tests {
     use acm_os_application::{
+        KnownMarkdownSection, MarkdownParseWarning, ProblemMarkdownProjection, SolutionRoute,
         StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
         WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
     };
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, startup_status_dto, workspace_error_dto, workspace_status_dto,
-        LightweightProblemDetailDto, StatementReadStateDto,
+        app_shell_status_dto, problem_markdown_projection_dto, startup_status_dto,
+        workspace_error_dto, workspace_status_dto, LightweightProblemDetailDto,
+        StatementReadStateDto,
     };
 
     #[test]
@@ -628,6 +705,36 @@ mod tests {
                 },
                 "identityType": "lightweight",
                 "personalNote": null
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_markdown_projection_contract() {
+        let dto = problem_markdown_projection_dto(ProblemMarkdownProjection {
+            content_digest: "abc123".to_owned(),
+            known_sections: vec![KnownMarkdownSection {
+                name: "题解".to_owned(),
+                start_offset: 10,
+                end_offset: 42,
+            }],
+            solution_routes: vec![SolutionRoute {
+                name: "Route ×".to_owned(),
+                start_offset: 18,
+                end_offset: 42,
+            }],
+            warnings: vec![MarkdownParseWarning::DuplicateKnownSection {
+                name: "题解".to_owned(),
+                count: 2,
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize Markdown projection"),
+            json!({
+                "contentDigest": "abc123",
+                "knownSections": [{ "name": "题解", "startOffset": 10, "endOffset": 42 }],
+                "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42 }],
+                "warnings": [{ "code": "duplicate_known_section", "name": "题解", "count": 2 }]
             })
         );
     }

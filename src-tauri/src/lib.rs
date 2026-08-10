@@ -29,6 +29,7 @@ pub fn run() {
             ipc::lightweight_problems,
             ipc::lightweight_problem_detail,
             ipc::create_personal_note,
+            ipc::personal_note_projection,
             ipc::statement_assets,
             ipc::workspace_status,
             ipc::configure_workspace

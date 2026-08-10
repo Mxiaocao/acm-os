@@ -242,6 +242,66 @@ pub struct PersonalNoteBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemMarkdownProjection {
+    pub content_digest: String,
+    pub known_sections: Vec<KnownMarkdownSection>,
+    pub solution_routes: Vec<SolutionRoute>,
+    pub warnings: Vec<MarkdownParseWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownMarkdownSection {
+    pub name: String,
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolutionRoute {
+    pub name: String,
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownParseWarning {
+    DuplicateKnownSection { name: String, count: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalNoteReadError {
+    ProblemNotFound,
+    NotPersonal,
+    WorkspaceUnavailable,
+    BindingUnavailable,
+    FileReadFailed,
+    InvalidUtf8,
+    PersistenceUnavailable,
+}
+
+impl PersonalNoteReadError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::WorkspaceUnavailable => "workspace_unavailable",
+            Self::BindingUnavailable => "note_binding_unavailable",
+            Self::FileReadFailed => "note_read_failed",
+            Self::InvalidUtf8 => "note_invalid_utf8",
+            Self::PersistenceUnavailable => "note_persistence_unavailable",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PersonalNoteReadPort {
+    async fn read_personal_note_projection(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemMarkdownProjection, PersonalNoteReadError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonalNoteCreationContext {
     pub problem: acm_os_domain::CodeforcesProblemIdentity,
     pub existing_binding: Option<PersonalNoteBinding>,

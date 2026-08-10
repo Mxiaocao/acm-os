@@ -13,12 +13,14 @@ import {
   getContestShelf,
   getLightweightProblemDetail,
   getLightweightProblems,
+  getPersonalNoteProjection,
   getStatementAssets,
   importCodeforcesContest,
   type ContestDetailDto,
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
+  type ProblemMarkdownProjectionDto,
 } from "../ipc/contest";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
@@ -396,12 +398,24 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
   const [failed, setFailed] = useState(false);
   const [creatingNote, setCreatingNote] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
+  const [noteProjection, setNoteProjection] = useState<ProblemMarkdownProjectionDto | null>(null);
+  const [noteReadFailed, setNoteReadFailed] = useState(false);
   useEffect(() => {
     let active = true;
     const objectUrls: string[] = [];
+    setNoteProjection(null);
+    setNoteReadFailed(false);
     getLightweightProblemDetail(contestId, index).then(async (nextDetail) => {
       if (!active) return;
       setDetail(nextDetail);
+      if (nextDetail.identityType === "personal") {
+        try {
+          const projection = await getPersonalNoteProjection(contestId, index);
+          if (active) setNoteProjection(projection);
+        } catch {
+          if (active) setNoteReadFailed(true);
+        }
+      }
       if (nextDetail.statement.state !== "ready") return;
       const assets = await getStatementAssets(contestId, index);
       if (!active) return;
@@ -424,8 +438,17 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
     setNoteMessage(null);
     try {
       await createPersonalNote(contestId, index);
-      setDetail(await getLightweightProblemDetail(contestId, index));
+      const nextDetail = await getLightweightProblemDetail(contestId, index);
+      setDetail(nextDetail);
       setNoteMessage("Personal Markdown created and verified.");
+      if (nextDetail.identityType === "personal") {
+        try {
+          setNoteProjection(await getPersonalNoteProjection(contestId, index));
+          setNoteReadFailed(false);
+        } catch {
+          setNoteReadFailed(true);
+        }
+      }
     } catch (error) {
       setNoteMessage(
         error === "note_target_exists"
@@ -458,6 +481,22 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       ) : null}
       {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
     </section>
+    {detail.identityType === "personal" ? (
+      noteReadFailed ? (
+        <section className="empty-state" role="alert"><h2>Personal Markdown is unavailable</h2><p>The current bound file could not be read. System Facts were preserved.</p></section>
+      ) : noteProjection === null ? (
+        <section className="empty-state" aria-busy="true"><p>Reading current Personal Markdown...</p></section>
+      ) : (
+        <section className="content-panel" aria-label="Personal Markdown projection">
+          <h2>My note</h2>
+          <h3>Known sections</h3>
+          {noteProjection.knownSections.length ? <ul>{noteProjection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>No known sections found.</p>}
+          <h3>Solution routes</h3>
+          {noteProjection.solutionRoutes.length ? <ol>{noteProjection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>No solution routes found.</p>}
+          {noteProjection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
+        </section>
+      )
+    ) : null}
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
 }

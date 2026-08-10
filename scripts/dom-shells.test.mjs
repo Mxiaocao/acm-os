@@ -263,6 +263,19 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
       createCalls += 1;
       return { vaultRelativePath: "Problems/CF-1979-A.md" };
     }
+    if (command === "personal_note_projection") {
+      return {
+        contentDigest: "fresh-digest",
+        knownSections: [
+          { name: "题解", startOffset: 11, endOffset: 44 },
+          { name: "额外题目", startOffset: 44, endOffset: 55 },
+        ],
+        solutionRoutes: [
+          { name: "External edit ×", startOffset: 20, endOffset: 44 },
+        ],
+        warnings: [],
+      };
+    }
     throw new Error(`unexpected command ${command}`);
   }, "/problems/1979/A");
   try {
@@ -275,6 +288,7 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     assert.equal(detailReads, 2);
     assert.match(view.document.body.textContent, /Personal Problem/);
     assert.match(view.document.body.textContent, /Problems\/CF-1979-A\.md/);
+    assert.match(view.document.body.textContent, /External edit ×/);
     assert.equal(
       [...view.document.querySelectorAll("button")]
         .some((button) => button.textContent === "Create my note"),
