@@ -11,16 +11,19 @@ use acm_os_application::{
     ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
     LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
     PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError, PersonalNotePort,
-    PersonalNoteReadError, PersonalNoteReadPort, ProblemMarkdownProjection,
+    PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
     ProblemIdentityType, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
     StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
-use sha2::{Digest, Sha256};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
 use sqlx::SqlitePool;
+
+use crate::file_binding::{
+    resolve_personal_note, sha256_hex, windows_file_key, BindingResolution, ResolvedNoteFile,
+};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const DATABASE_FILENAME: &str = "system-facts.sqlite3";
@@ -56,15 +59,104 @@ impl DatabaseRuntime {
             .as_ref()
             .ok_or(WorkspacePersistenceError::Unavailable)
     }
+
+    async fn update_binding_state(
+        &self,
+        problem_id: i64,
+        state: &str,
+        expected: &PersonalNoteBinding,
+    ) -> Result<(), PersonalNoteReadError> {
+        let result = sqlx::query(
+            "UPDATE file_bindings \
+             SET binding_state = ?1, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?2 AND vault_relative_path = ?3 \
+               AND content_digest = ?4 AND windows_file_key IS ?5",
+        )
+        .bind(state)
+        .bind(problem_id)
+        .bind(&expected.vault_relative_path)
+        .bind(&expected.content_digest)
+        .bind(&expected.windows_file_key)
+        .execute(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNoteReadError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PersonalNoteReadError::BindingUnavailable)
+        }
+    }
+
+    async fn commit_resolved_binding(
+        &self,
+        problem_id: i64,
+        expected: &PersonalNoteBinding,
+        resolved: &ResolvedNoteFile,
+    ) -> Result<bool, PersonalNoteReadError> {
+        let result = match sqlx::query(
+            "UPDATE file_bindings \
+             SET vault_relative_path = ?1, windows_file_key = ?2, content_digest = ?3, \
+                 binding_state = 'linked', \
+                 updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?4 AND vault_relative_path = ?5 \
+               AND content_digest = ?6 AND windows_file_key IS ?7",
+        )
+        .bind(&resolved.relative_path)
+        .bind(&resolved.windows_file_key)
+        .bind(&resolved.content_digest)
+        .bind(problem_id)
+        .bind(&expected.vault_relative_path)
+        .bind(&expected.content_digest)
+        .bind(&expected.windows_file_key)
+        .execute(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNoteReadError::PersistenceUnavailable)?,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(sqlx::Error::Database(database_error))
+                if database_error.is_unique_violation() => {
+                return Ok(false);
+            }
+            Err(_) => return Err(PersonalNoteReadError::PersistenceUnavailable),
+        };
+        if result.rows_affected() == 1 {
+            Ok(true)
+        } else {
+            Err(PersonalNoteReadError::BindingUnavailable)
+        }
+    }
+}
+
+fn resolved_binding(resolved: &ResolvedNoteFile) -> PersonalNoteBinding {
+    PersonalNoteBinding {
+        vault_relative_path: resolved.relative_path.clone(),
+        content_digest: resolved.content_digest.clone(),
+        windows_file_key: resolved.windows_file_key.clone(),
+    }
 }
 
 impl PersonalNoteReadPort for DatabaseRuntime {
     async fn read_personal_note_projection(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
-    ) -> Result<ProblemMarkdownProjection, PersonalNoteReadError> {
-        let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT p.identity_type, ws.active_vault_path, fb.vault_relative_path \
+    ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
+        let row: Option<(
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
+                    fb.content_digest, fb.windows_file_key \
              FROM problems p \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
@@ -81,28 +173,81 @@ impl PersonalNoteReadPort for DatabaseRuntime {
         )
         .await
         .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
-        let (identity_type, active_vault, relative_path) =
+        let (problem_id, identity_type, active_vault, relative_path, digest, file_key) =
             row.ok_or(PersonalNoteReadError::ProblemNotFound)?;
         if identity_type != "personal" {
             return Err(PersonalNoteReadError::NotPersonal);
         }
-        let active_vault = active_vault.ok_or(PersonalNoteReadError::WorkspaceUnavailable)?;
+        let active_vault = match active_vault {
+            Some(active_vault) => active_vault,
+            None => {
+                return Err(PersonalNoteReadError::PersistenceUnavailable);
+            }
+        };
         let relative_path = relative_path.ok_or(PersonalNoteReadError::BindingUnavailable)?;
+        let digest = digest.ok_or(PersonalNoteReadError::BindingUnavailable)?;
+        let last_binding = PersonalNoteBinding {
+            vault_relative_path: relative_path.clone(),
+            content_digest: digest.clone(),
+            windows_file_key: file_key.clone(),
+        };
         let read_vault = active_vault.clone();
         let read_relative = relative_path.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            read_bound_personal_note(&read_vault, &read_relative)
+        let read_key = file_key.clone();
+        let read_digest = digest.clone();
+        let resolution = tokio::task::spawn_blocking(move || {
+            resolve_personal_note(
+                &read_vault,
+                &read_relative,
+                read_key.as_deref(),
+                &read_digest,
+            )
         })
         .await
-        .map_err(|_| PersonalNoteReadError::FileReadFailed)??;
+        .map_err(|_| PersonalNoteReadError::FileReadFailed)?;
+
+        let resolved = match resolution {
+            BindingResolution::Ready(resolved) => resolved,
+            BindingResolution::LocationAnomaly => {
+                self.update_binding_state(problem_id, "location_anomaly", &last_binding)
+                    .await?;
+                return Ok(PersonalNoteReadState::LocationAnomaly {
+                    binding: last_binding,
+                });
+            }
+            BindingResolution::VaultUnavailable => {
+                self.update_binding_state(
+                    problem_id,
+                    "external_source_unavailable",
+                    &last_binding,
+                )
+                    .await?;
+                return Ok(PersonalNoteReadState::VaultUnavailable {
+                    binding: last_binding,
+                });
+            }
+            BindingResolution::InvalidBinding => {
+                return Err(PersonalNoteReadError::BindingUnavailable);
+            }
+        };
+        if !self
+            .commit_resolved_binding(problem_id, &last_binding, &resolved)
+            .await?
+        {
+            self.update_binding_state(problem_id, "location_anomaly", &last_binding)
+                .await?;
+            return Ok(PersonalNoteReadState::LocationAnomaly {
+                binding: last_binding,
+            });
+        }
 
         // Disk bytes are always read and digested before this cache is consulted.
-        let content_digest = sha256_hex(&bytes);
+        let content_digest = resolved.content_digest.clone();
         let cache_key = format!(
             "codeforces:{}:{}:{}",
             problem.contest().contest_id(),
             problem.index(),
-            relative_path
+            resolved.relative_path
         );
         {
             let cache = self
@@ -111,19 +256,27 @@ impl PersonalNoteReadPort for DatabaseRuntime {
                 .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
             if let Some(projection) = cache.get(&cache_key) {
                 if projection.content_digest == content_digest {
-                    return Ok(projection.clone());
+                    return Ok(PersonalNoteReadState::Ready {
+                        binding: resolved_binding(&resolved),
+                        projection: projection.clone(),
+                        relocated: resolved.relocated,
+                    });
                 }
             }
         }
 
-        let markdown = std::str::from_utf8(&bytes)
+        let markdown = std::str::from_utf8(&resolved.bytes)
             .map_err(|_| PersonalNoteReadError::InvalidUtf8)?;
         let projection = crate::markdown::parse_problem_markdown(markdown, content_digest);
         self.markdown_projection_cache
             .lock()
             .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?
             .insert(cache_key, projection.clone());
-        Ok(projection)
+        Ok(PersonalNoteReadState::Ready {
+            binding: resolved_binding(&resolved),
+            projection,
+            relocated: resolved.relocated,
+        })
     }
 }
 
@@ -426,64 +579,6 @@ fn discard_created_note_on_disk(
         return Err(PersonalNoteError::CompensationFailed);
     }
     std::fs::remove_file(resolved).map_err(|_| PersonalNoteError::CompensationFailed)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn read_bound_personal_note(
-    active_vault: &str,
-    vault_relative_path: &str,
-) -> Result<Vec<u8>, PersonalNoteReadError> {
-    let vault = std::fs::canonicalize(active_vault)
-        .map_err(|_| PersonalNoteReadError::WorkspaceUnavailable)?;
-    if !vault.is_dir() {
-        return Err(PersonalNoteReadError::WorkspaceUnavailable);
-    }
-    let relative = Path::new(vault_relative_path);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(PersonalNoteReadError::BindingUnavailable);
-    }
-    let resolved = std::fs::canonicalize(vault.join(relative))
-        .map_err(|_| PersonalNoteReadError::FileReadFailed)?;
-    if !resolved.starts_with(&vault) || !resolved.is_file() {
-        return Err(PersonalNoteReadError::BindingUnavailable);
-    }
-    std::fs::read(resolved).map_err(|_| PersonalNoteReadError::FileReadFailed)
-}
-
-#[cfg(windows)]
-fn windows_file_key(path: &Path) -> Option<String> {
-    use std::hash::{Hash, Hasher};
-
-    struct FileKeyHasher(Sha256);
-
-    impl Hasher for FileKeyHasher {
-        fn finish(&self) -> u64 {
-            let digest = self.0.clone().finalize();
-            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix"))
-        }
-
-        fn write(&mut self, bytes: &[u8]) {
-            self.0.update(bytes);
-        }
-    }
-
-    let handle = same_file::Handle::from_path(path).ok()?;
-    let mut hasher = FileKeyHasher(Sha256::new());
-    handle.hash(&mut hasher);
-    Some(format!("same-file-1:{:016x}", hasher.finish()))
-}
-
-#[cfg(not(windows))]
-fn windows_file_key(_path: &Path) -> Option<String> {
-    None
 }
 
 impl ContestImportPort for DatabaseRuntime {
@@ -1503,6 +1598,7 @@ mod tests {
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
         WorkspaceConfigurationStatus, WorkspacePathField, PersonalNoteError, PersonalNoteReadPort,
+        PersonalNoteReadState,
         ProblemIdentityType, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
@@ -1576,6 +1672,32 @@ mod tests {
         .await
         .expect("configure temporary workspace");
         (vault, problems, knowledge)
+    }
+
+    async fn personal_note_fixture() -> (
+        TempDir,
+        DatabaseRuntime,
+        PathBuf,
+        PathBuf,
+        acm_os_domain::CodeforcesProblemIdentity,
+    ) {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        create_personal_note(&runtime, &problem)
+            .await
+            .expect("create personal note");
+        (directory, runtime, vault, problems, problem)
     }
 
     async fn create_empty_migration_ledger(pool: &SqlitePool) {
@@ -1797,9 +1919,197 @@ mod tests {
             .read_personal_note_projection(&problem)
             .await
             .expect("fresh projection");
+        let PersonalNoteReadState::Ready {
+            projection: cached,
+            ..
+        } = cached else {
+            panic!("initial projection must be ready");
+        };
+        let PersonalNoteReadState::Ready {
+            projection: fresh,
+            ..
+        } = fresh else {
+            panic!("fresh projection must be ready");
+        };
         assert_ne!(fresh.content_digest, cached.content_digest);
         assert_eq!(fresh.solution_routes.len(), 1);
         assert_eq!(fresh.solution_routes[0].name, "External edit ×");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn relocation_uses_the_unique_windows_file_key_before_digest() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let moved_root = vault.join("Moved");
+        fs::create_dir_all(&moved_root).expect("moved root");
+        let moved = moved_root.join("renamed.md");
+        fs::rename(problems.join("CF-1979-A.md"), &moved).expect("external rename");
+        fs::write(&moved, "# Changed\n\n## 题解\n\n### File key route\n")
+            .expect("external edit after rename");
+
+        let state = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("file-key relocation");
+        let PersonalNoteReadState::Ready {
+            binding,
+            projection,
+            relocated,
+        } = state else {
+            panic!("file-key relocation must resolve");
+        };
+        assert!(relocated);
+        assert_eq!(binding.vault_relative_path, "Moved/renamed.md");
+        assert_eq!(projection.solution_routes[0].name, "File key route");
+    }
+
+    #[tokio::test]
+    async fn relocation_uses_a_unique_full_content_digest_when_file_key_is_unavailable() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let original = problems.join("CF-1979-A.md");
+        let bytes = fs::read(&original).expect("original note");
+        fs::remove_file(&original).expect("remove original path");
+        let moved_root = vault.join("Archive");
+        fs::create_dir_all(&moved_root).expect("archive root");
+        fs::write(moved_root.join("note.md"), bytes).expect("replacement at new path");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove file-key evidence");
+
+        let state = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("digest relocation");
+        let PersonalNoteReadState::Ready {
+            binding,
+            relocated,
+            ..
+        } = state else {
+            panic!("unique digest must resolve");
+        };
+        assert!(relocated);
+        assert_eq!(binding.vault_relative_path, "Archive/note.md");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_digest_preserves_personal_identity_and_marks_location_anomaly() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let original = problems.join("CF-1979-A.md");
+        let bytes = fs::read(&original).expect("original note");
+        fs::remove_file(&original).expect("remove original path");
+        fs::write(vault.join("copy-one.md"), &bytes).expect("first digest match");
+        fs::write(vault.join("copy-two.md"), &bytes).expect("second digest match");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove file-key evidence");
+
+        let state = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("location anomaly state");
+        assert!(matches!(state, PersonalNoteReadState::LocationAnomaly { .. }));
+        let detail = runtime
+            .lightweight_problem_detail(&problem)
+            .await
+            .expect("preserved problem");
+        assert_eq!(detail.identity_type, ProblemIdentityType::Personal);
+        let binding_state: String = sqlx::query_scalar("SELECT binding_state FROM file_bindings")
+            .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("binding state");
+        assert_eq!(binding_state, "location_anomaly");
+    }
+
+    #[tokio::test]
+    async fn unavailable_vault_preserves_personal_identity_and_system_facts() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let offline = directory.path().join("vault-offline");
+        fs::rename(&vault, &offline).expect("make vault unavailable");
+
+        let state = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("vault unavailable state");
+        assert!(matches!(state, PersonalNoteReadState::VaultUnavailable { .. }));
+        let detail = runtime
+            .lightweight_problem_detail(&problem)
+            .await
+            .expect("preserved problem facts");
+        assert_eq!(detail.identity_type, ProblemIdentityType::Personal);
+        assert!(detail.personal_note.is_some());
+        let binding_state: String = sqlx::query_scalar("SELECT binding_state FROM file_bindings")
+            .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("binding state");
+        assert_eq!(binding_state, "external_source_unavailable");
+
+        fs::rename(&offline, &vault).expect("restore vault");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("restored vault read"),
+            PersonalNoteReadState::Ready { .. }
+        ));
+        let restored_state: String =
+            sqlx::query_scalar("SELECT binding_state FROM file_bindings")
+                .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+                .await
+                .expect("restored binding state");
+        assert_eq!(restored_state, "linked");
+    }
+
+    #[tokio::test]
+    async fn invalid_binding_path_never_reads_outside_the_vault() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        fs::write(directory.path().join("outside.md"), "outside secret")
+            .expect("outside fixture");
+        sqlx::query("UPDATE file_bindings SET vault_relative_path = '../outside.md'")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("invalid binding fixture");
+
+        assert_eq!(
+            runtime.read_personal_note_projection(&problem).await,
+            Err(PersonalNoteReadError::BindingUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_relocation_never_steals_another_problem_binding() {
+        let (_directory, runtime, _vault, problems, problem_a) = personal_note_fixture().await;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("create B note");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove A path");
+        sqlx::query(
+            "UPDATE file_bindings SET windows_file_key = NULL \
+             WHERE problem_id = (SELECT id FROM problems WHERE external_problem_key = 'A')",
+        )
+        .execute(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("remove A file-key evidence");
+
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem_a)
+                .await
+                .expect("occupied relocation state"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT vault_relative_path FROM file_bindings ORDER BY problem_id")
+                .fetch_all(runtime._pool.as_ref().expect("ready database pool"))
+                .await
+                .expect("preserved bindings");
+        assert_eq!(paths, ["Problems/CF-1979-A.md", "Problems/CF-1979-B.md"]);
     }
 
     #[tokio::test]

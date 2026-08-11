@@ -88,6 +88,25 @@ pub struct ProblemMarkdownProjectionDto {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum PersonalNoteReadStateDto {
+    Ready {
+        #[serde(rename = "vaultRelativePath")]
+        vault_relative_path: String,
+        relocated: bool,
+        projection: ProblemMarkdownProjectionDto,
+    },
+    LocationAnomaly {
+        #[serde(rename = "lastKnownPath")]
+        last_known_path: String,
+    },
+    VaultUnavailable {
+        #[serde(rename = "lastKnownPath")]
+        last_known_path: String,
+    },
+}
+
+#[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownMarkdownSectionDto {
     name: String,
@@ -242,7 +261,7 @@ pub async fn create_personal_note(
 pub async fn personal_note_projection(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
-) -> Result<ProblemMarkdownProjectionDto, &'static str> {
+) -> Result<PersonalNoteReadStateDto, &'static str> {
     use acm_os_application::PersonalNoteReadPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
@@ -251,8 +270,34 @@ pub async fn personal_note_projection(
     database
         .read_personal_note_projection(&problem)
         .await
-        .map(problem_markdown_projection_dto)
+        .map(personal_note_read_state_dto)
         .map_err(acm_os_application::PersonalNoteReadError::code)
+}
+
+fn personal_note_read_state_dto(
+    state: acm_os_application::PersonalNoteReadState,
+) -> PersonalNoteReadStateDto {
+    match state {
+        acm_os_application::PersonalNoteReadState::Ready {
+            binding,
+            projection,
+            relocated,
+        } => PersonalNoteReadStateDto::Ready {
+            vault_relative_path: binding.vault_relative_path,
+            relocated,
+            projection: problem_markdown_projection_dto(projection),
+        },
+        acm_os_application::PersonalNoteReadState::LocationAnomaly { binding } => {
+            PersonalNoteReadStateDto::LocationAnomaly {
+                last_known_path: binding.vault_relative_path,
+            }
+        }
+        acm_os_application::PersonalNoteReadState::VaultUnavailable { binding } => {
+            PersonalNoteReadStateDto::VaultUnavailable {
+                last_known_path: binding.vault_relative_path,
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -573,14 +618,15 @@ fn workspace_error_dto(
 #[cfg(test)]
 mod tests {
     use acm_os_application::{
-        KnownMarkdownSection, MarkdownParseWarning, ProblemMarkdownProjection, SolutionRoute,
+        KnownMarkdownSection, MarkdownParseWarning, PersonalNoteBinding, PersonalNoteReadState,
+        ProblemMarkdownProjection, SolutionRoute,
         StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
         WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
     };
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, problem_markdown_projection_dto, startup_status_dto,
+        app_shell_status_dto, personal_note_read_state_dto, startup_status_dto,
         workspace_error_dto, workspace_status_dto, LightweightProblemDetailDto,
         StatementReadStateDto,
     };
@@ -711,31 +757,69 @@ mod tests {
 
     #[test]
     fn serializes_markdown_projection_contract() {
-        let dto = problem_markdown_projection_dto(ProblemMarkdownProjection {
-            content_digest: "abc123".to_owned(),
-            known_sections: vec![KnownMarkdownSection {
-                name: "题解".to_owned(),
-                start_offset: 10,
-                end_offset: 42,
-            }],
-            solution_routes: vec![SolutionRoute {
-                name: "Route ×".to_owned(),
-                start_offset: 18,
-                end_offset: 42,
-            }],
-            warnings: vec![MarkdownParseWarning::DuplicateKnownSection {
-                name: "题解".to_owned(),
-                count: 2,
-            }],
+        let dto = personal_note_read_state_dto(PersonalNoteReadState::Ready {
+            binding: PersonalNoteBinding {
+                vault_relative_path: "Archive/note.md".to_owned(),
+                content_digest: "abc123".to_owned(),
+                windows_file_key: None,
+            },
+            relocated: true,
+            projection: ProblemMarkdownProjection {
+                content_digest: "abc123".to_owned(),
+                known_sections: vec![KnownMarkdownSection {
+                    name: "题解".to_owned(),
+                    start_offset: 10,
+                    end_offset: 42,
+                }],
+                solution_routes: vec![SolutionRoute {
+                    name: "Route ×".to_owned(),
+                    start_offset: 18,
+                    end_offset: 42,
+                }],
+                warnings: vec![MarkdownParseWarning::DuplicateKnownSection {
+                    name: "题解".to_owned(),
+                    count: 2,
+                }],
+            },
         });
         assert_eq!(
             serde_json::to_value(dto).expect("serialize Markdown projection"),
             json!({
-                "contentDigest": "abc123",
-                "knownSections": [{ "name": "题解", "startOffset": 10, "endOffset": 42 }],
-                "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42 }],
-                "warnings": [{ "code": "duplicate_known_section", "name": "题解", "count": 2 }]
+                "state": "ready",
+                "vaultRelativePath": "Archive/note.md",
+                "relocated": true,
+                "projection": {
+                    "contentDigest": "abc123",
+                    "knownSections": [{ "name": "题解", "startOffset": 10, "endOffset": 42 }],
+                    "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42 }],
+                    "warnings": [{ "code": "duplicate_known_section", "name": "题解", "count": 2 }]
+                }
             })
+        );
+    }
+
+    #[test]
+    fn serializes_affected_scope_markdown_states() {
+        let binding = PersonalNoteBinding {
+            vault_relative_path: "Problems/last-known.md".to_owned(),
+            content_digest: "digest".to_owned(),
+            windows_file_key: None,
+        };
+        assert_eq!(
+            serde_json::to_value(personal_note_read_state_dto(
+                PersonalNoteReadState::LocationAnomaly {
+                    binding: binding.clone(),
+                }
+            ))
+            .expect("serialize location anomaly"),
+            json!({ "state": "locationAnomaly", "lastKnownPath": "Problems/last-known.md" })
+        );
+        assert_eq!(
+            serde_json::to_value(personal_note_read_state_dto(
+                PersonalNoteReadState::VaultUnavailable { binding }
+            ))
+            .expect("serialize Vault unavailable"),
+            json!({ "state": "vaultUnavailable", "lastKnownPath": "Problems/last-known.md" })
         );
     }
 

@@ -24,11 +24,12 @@ git tag --points-at HEAD
 - M1 commit: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
 - commit subject: build: complete M1 contest import
 - M2.1 commit: 27f785f build: complete M2.1 personal note binding
+- M2.2 commit: 8edc301 build: complete M2.2 fresh markdown read
 - tag: acm-os-m1-contest-import
 - origin: https://github.com/Mxiaocao/acm-os.git
 - 2026-08-10 已确认远程 main 与远程 M1 tag 均指向该 commit
-- M1、M2.1、M2.2 已完成；M2.2 变更当前尚待 commit
-- M2.1 目前仅在本地 main，origin/main 仍为 M1
+- M1、M2.1、M2.2、M2.3 已完成；M2.3 变更当前尚待 commit
+- M2.1/M2.2 目前仅在本地 main，origin/main 仍为 M1
 
 如果路径不正确、出现 acm-os\acm-os 嵌套、当前目录属于其他项目、存在未知用户文件、分支或 HEAD 不符、工作树有无法解释的改动，立即停止并报告。不要覆盖、merge、reset、clean 或 checkout 丢弃任何内容。
 
@@ -49,13 +50,14 @@ SPEC 是唯一产品事实来源。冻结的产品行为、Authority、状态机
 
 git show --stat 4e25359
 git show --stat 27f785f
+git show --stat 8edc301
 git show acm-os-m1-contest-import:ACM-OS_BUILD_HANDOFF.md
 git diff
 git status
 
 当前下一切片是：
 
-M2.3 — Binding Resolution + Vault Availability
+M2.4 — Revalidation Triggers + Open in Obsidian
 
 冻结 Outcome：Lightweight Problem 创建真实 Personal Markdown；用户在外部 Obsidian 修改后，ACM-OS 必须 Fresh Read 最新内容。
 
@@ -98,7 +100,7 @@ M2 范围包括：
 - 当前 Application/Infrastructure/Tauri/React Authority 边界；
 - 与 M2 直接相关的现有 schema、ports、tests、UI 入口。
 
-然后向我提交一份严格来源于 SPEC/DESIGN/PLAN 的 M2.3 最小切片计划与验收矩阵。计划必须列出 Outcome、Why、Dependencies、Change Surface、Implementation Steps、Focused Tests、Broader Verification、Done Evidence、Rollback，并明确哪些后续 M2 与 M3+ 能力被排除。M2.3 优先处理 path → Windows file key → digest 的绑定解析、歧义处理与 Vault unavailable affected-scope 状态；不要提前实现 watcher、Safe Patch 或 M3 lifecycle。得到我确认后再实施。
+然后向我提交一份严格来源于 SPEC/DESIGN/PLAN 的 M2.4 最小切片计划与验收矩阵。计划必须列出 Outcome、Why、Dependencies、Change Surface、Implementation Steps、Focused Tests、Broader Verification、Done Evidence、Rollback，并明确哪些后续 M2 与 M3+ 能力被排除。M2.4 只处理 watcher cache invalidation、window-focus authoritative re-read 与 Open in Obsidian failure isolation；watcher 不能成为事实源，不要提前实现 Safe Patch 或 M3 lifecycle。得到我确认后再实施。
 
 执行原则：
 

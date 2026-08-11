@@ -20,7 +20,7 @@ import {
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
-  type ProblemMarkdownProjectionDto,
+  type PersonalNoteReadStateDto,
 } from "../ipc/contest";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
@@ -398,20 +398,20 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
   const [failed, setFailed] = useState(false);
   const [creatingNote, setCreatingNote] = useState(false);
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
-  const [noteProjection, setNoteProjection] = useState<ProblemMarkdownProjectionDto | null>(null);
+  const [noteReadState, setNoteReadState] = useState<PersonalNoteReadStateDto | null>(null);
   const [noteReadFailed, setNoteReadFailed] = useState(false);
   useEffect(() => {
     let active = true;
     const objectUrls: string[] = [];
-    setNoteProjection(null);
+    setNoteReadState(null);
     setNoteReadFailed(false);
     getLightweightProblemDetail(contestId, index).then(async (nextDetail) => {
       if (!active) return;
       setDetail(nextDetail);
       if (nextDetail.identityType === "personal") {
         try {
-          const projection = await getPersonalNoteProjection(contestId, index);
-          if (active) setNoteProjection(projection);
+          const readState = await getPersonalNoteProjection(contestId, index);
+          if (active) setNoteReadState(readState);
         } catch {
           if (active) setNoteReadFailed(true);
         }
@@ -443,7 +443,7 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       setNoteMessage("Personal Markdown created and verified.");
       if (nextDetail.identityType === "personal") {
         try {
-          setNoteProjection(await getPersonalNoteProjection(contestId, index));
+          setNoteReadState(await getPersonalNoteProjection(contestId, index));
           setNoteReadFailed(false);
         } catch {
           setNoteReadFailed(true);
@@ -461,6 +461,11 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
   };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
+  const displayedNotePath = noteReadState?.state === "ready"
+    ? noteReadState.vaultRelativePath
+    : noteReadState?.state === "locationAnomaly" || noteReadState?.state === "vaultUnavailable"
+      ? noteReadState.lastKnownPath
+      : detail.personalNote?.vaultRelativePath;
   return <>
     <PageHeader eyebrow="M1 local statement snapshot" headingRef={headingRef} title={detail.index + ". " + detail.title} />
     <section className="content-panel">
@@ -476,7 +481,7 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       ) : null}
       {detail.personalNote ? (
         <p className="safe-note">
-          Personal Markdown: <code>{detail.personalNote.vaultRelativePath}</code>
+          Personal Markdown: <code>{displayedNotePath}</code>
         </p>
       ) : null}
       {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
@@ -484,16 +489,21 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
     {detail.identityType === "personal" ? (
       noteReadFailed ? (
         <section className="empty-state" role="alert"><h2>Personal Markdown is unavailable</h2><p>The current bound file could not be read. System Facts were preserved.</p></section>
-      ) : noteProjection === null ? (
+      ) : noteReadState === null ? (
         <section className="empty-state" aria-busy="true"><p>Reading current Personal Markdown...</p></section>
+      ) : noteReadState.state === "vaultUnavailable" ? (
+        <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>
+      ) : noteReadState.state === "locationAnomaly" ? (
+        <section className="empty-state" role="status"><h2>Note location needs attention</h2><p>The original path is missing and no unique relocation was found. The Personal Problem was not deleted or downgraded.</p></section>
       ) : (
         <section className="content-panel" aria-label="Personal Markdown projection">
           <h2>My note</h2>
+          {noteReadState.relocated ? <p className="safe-note">The note binding was restored to its current location.</p> : null}
           <h3>Known sections</h3>
-          {noteProjection.knownSections.length ? <ul>{noteProjection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>No known sections found.</p>}
+          {noteReadState.projection.knownSections.length ? <ul>{noteReadState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>No known sections found.</p>}
           <h3>Solution routes</h3>
-          {noteProjection.solutionRoutes.length ? <ol>{noteProjection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>No solution routes found.</p>}
-          {noteProjection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
+          {noteReadState.projection.solutionRoutes.length ? <ol>{noteReadState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>No solution routes found.</p>}
+          {noteReadState.projection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
         </section>
       )
     ) : null}

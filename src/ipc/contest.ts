@@ -75,6 +75,16 @@ export interface MarkdownParseWarningDto {
   count: number;
 }
 
+export type PersonalNoteReadStateDto =
+  | {
+      state: "ready";
+      vaultRelativePath: string;
+      relocated: boolean;
+      projection: ProblemMarkdownProjectionDto;
+    }
+  | { state: "locationAnomaly"; lastKnownPath: string }
+  | { state: "vaultUnavailable"; lastKnownPath: string };
+
 export interface LocalStatementAssetDto {
   localRef: string;
   mediaType: string;
@@ -107,8 +117,8 @@ export function createPersonalNote(contestId: number, index: string): Promise<Pe
   return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
 }
 
-export function getPersonalNoteProjection(contestId: number, index: string): Promise<ProblemMarkdownProjectionDto> {
-  return invoke<ProblemMarkdownProjectionDto>("personal_note_projection", { input: { contestId, index } });
+export function getPersonalNoteProjection(contestId: number, index: string): Promise<PersonalNoteReadStateDto> {
+  return invoke<PersonalNoteReadStateDto>("personal_note_projection", { input: { contestId, index } });
 }
 
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {

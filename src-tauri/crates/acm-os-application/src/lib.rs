@@ -272,7 +272,6 @@ pub enum MarkdownParseWarning {
 pub enum PersonalNoteReadError {
     ProblemNotFound,
     NotPersonal,
-    WorkspaceUnavailable,
     BindingUnavailable,
     FileReadFailed,
     InvalidUtf8,
@@ -284,7 +283,6 @@ impl PersonalNoteReadError {
         match self {
             Self::ProblemNotFound => "problem_not_found",
             Self::NotPersonal => "problem_not_personal",
-            Self::WorkspaceUnavailable => "workspace_unavailable",
             Self::BindingUnavailable => "note_binding_unavailable",
             Self::FileReadFailed => "note_read_failed",
             Self::InvalidUtf8 => "note_invalid_utf8",
@@ -293,12 +291,27 @@ impl PersonalNoteReadError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersonalNoteReadState {
+    Ready {
+        binding: PersonalNoteBinding,
+        projection: ProblemMarkdownProjection,
+        relocated: bool,
+    },
+    LocationAnomaly {
+        binding: PersonalNoteBinding,
+    },
+    VaultUnavailable {
+        binding: PersonalNoteBinding,
+    },
+}
+
 #[allow(async_fn_in_trait)]
 pub trait PersonalNoteReadPort {
     async fn read_personal_note_projection(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
-    ) -> Result<ProblemMarkdownProjection, PersonalNoteReadError>;
+    ) -> Result<PersonalNoteReadState, PersonalNoteReadError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -265,15 +265,20 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     }
     if (command === "personal_note_projection") {
       return {
-        contentDigest: "fresh-digest",
-        knownSections: [
-          { name: "题解", startOffset: 11, endOffset: 44 },
-          { name: "额外题目", startOffset: 44, endOffset: 55 },
-        ],
-        solutionRoutes: [
-          { name: "External edit ×", startOffset: 20, endOffset: 44 },
-        ],
-        warnings: [],
+        state: "ready",
+        vaultRelativePath: "Archive/renamed.md",
+        relocated: true,
+        projection: {
+          contentDigest: "fresh-digest",
+          knownSections: [
+            { name: "题解", startOffset: 11, endOffset: 44 },
+            { name: "额外题目", startOffset: 44, endOffset: 55 },
+          ],
+          solutionRoutes: [
+            { name: "External edit ×", startOffset: 20, endOffset: 44 },
+          ],
+          warnings: [],
+        },
       };
     }
     throw new Error(`unexpected command ${command}`);
@@ -287,8 +292,55 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     assert.equal(createCalls, 1);
     assert.equal(detailReads, 2);
     assert.match(view.document.body.textContent, /Personal Problem/);
-    assert.match(view.document.body.textContent, /Problems\/CF-1979-A\.md/);
+    assert.match(view.document.body.textContent, /Archive\/renamed\.md/);
+    assert.match(view.document.body.textContent, /binding was restored/);
     assert.match(view.document.body.textContent, /External edit ×/);
+    assert.equal(
+      [...view.document.querySelectorAll("button")]
+        .some((button) => button.textContent === "Create my note"),
+      false,
+    );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Problem detail preserves Personal identity when the Vault is unavailable", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") {
+      return {
+        state: "normal",
+        recoveryReason: null,
+        supportedSchemaVersion: null,
+        foundSchemaVersion: null,
+        workspace: configuredWorkspace,
+      };
+    }
+    if (command === "lightweight_problem_detail") {
+      return {
+        contestId: 1979,
+        index: "A",
+        title: "Problem A",
+        rating: 800,
+        sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+        statement: { state: "pending" },
+        identityType: "personal",
+        personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      };
+    }
+    if (command === "personal_note_projection") {
+      return { state: "vaultUnavailable", lastKnownPath: "Problems/CF-1979-A.md" };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Personal Problem/);
+    assert.match(view.document.body.textContent, /Vault is unavailable/);
+    assert.match(view.document.body.textContent, /System Facts were preserved/);
     assert.equal(
       [...view.document.querySelectorAll("button")]
         .some((button) => button.textContent === "Create my note"),
