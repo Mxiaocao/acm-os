@@ -315,6 +315,89 @@ pub trait PersonalNoteReadPort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraProblemLinkTarget(String);
+
+impl ExtraProblemLinkTarget {
+    pub fn parse(value: impl Into<String>) -> Result<Self, PersonalNotePatchError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 512
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+            || value.contains("[[")
+            || value.contains("]]")
+            || value.contains('|')
+        {
+            return Err(PersonalNotePatchError::InvalidLinkTarget);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalNotePatchError {
+    InvalidLinkTarget,
+    ProblemNotFound,
+    NotPersonal,
+    BindingUnavailable,
+    LocationAnomaly,
+    VaultUnavailable,
+    InvalidUtf8,
+    TargetSectionMissing,
+    TargetSectionAmbiguous,
+    LinkAlreadyPresent,
+    ConcurrentModification,
+    RecoveryCopyFailed,
+    WriteFailed,
+    VerificationFailed,
+    PersistenceUnavailable,
+}
+
+impl PersonalNotePatchError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidLinkTarget => "invalid_extra_problem_link_target",
+            Self::ProblemNotFound => "problem_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::BindingUnavailable => "note_binding_unavailable",
+            Self::LocationAnomaly => "note_location_anomaly",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::InvalidUtf8 => "note_invalid_utf8",
+            Self::TargetSectionMissing => "markdown_target_section_missing",
+            Self::TargetSectionAmbiguous => "markdown_target_section_ambiguous",
+            Self::LinkAlreadyPresent => "extra_problem_link_already_present",
+            Self::ConcurrentModification => "markdown_concurrent_modification",
+            Self::RecoveryCopyFailed => "markdown_recovery_copy_failed",
+            Self::WriteFailed => "markdown_write_failed",
+            Self::VerificationFailed => "markdown_verification_failed",
+            Self::PersistenceUnavailable => "note_persistence_unavailable",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PersonalNotePatchPort {
+    async fn add_extra_problem_link(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        target: &ExtraProblemLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
+}
+
+pub async fn add_extra_problem_link<P: PersonalNotePatchPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    target: impl Into<String>,
+) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+    let target = ExtraProblemLinkTarget::parse(target)?;
+    port.add_extra_problem_link(problem, &target).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonalNoteCreationContext {
     pub problem: acm_os_domain::CodeforcesProblemIdentity,
     pub existing_binding: Option<PersonalNoteBinding>,
@@ -1114,6 +1197,52 @@ mod tests {
             ),
             StartupDestination::Normal
         );
+    }
+
+    struct RecordingPatchPort {
+        calls: Cell<u32>,
+    }
+
+    impl PersonalNotePatchPort for RecordingPatchPort {
+        async fn add_extra_problem_link(
+            &self,
+            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            target: &ExtraProblemLinkTarget,
+        ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+            assert_eq!(target.as_str(), "CF-2000-A");
+            self.calls.set(self.calls.get() + 1);
+            Ok(PersonalNoteBinding {
+                vault_relative_path: "Problems/CF-1979-A.md".to_owned(),
+                content_digest: "0".repeat(64),
+                windows_file_key: None,
+            })
+        }
+    }
+
+    #[test]
+    fn extra_problem_command_validates_semantics_before_calling_the_port() {
+        let port = RecordingPatchPort { calls: Cell::new(0) };
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        for invalid in [
+            "",
+            " CF-2000-A",
+            "CF-2000-A\n",
+            "[[CF-2000-A]]",
+            "A|alias",
+        ] {
+            assert_eq!(
+                run_ready(add_extra_problem_link(&port, &problem, invalid)),
+                Err(PersonalNotePatchError::InvalidLinkTarget)
+            );
+        }
+        assert_eq!(port.calls.get(), 0);
+        run_ready(add_extra_problem_link(&port, &problem, "CF-2000-A"))
+            .expect("valid semantic command");
+        assert_eq!(port.calls.get(), 1);
     }
 
     #[test]

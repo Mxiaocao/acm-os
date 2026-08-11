@@ -1,4 +1,4 @@
-# ACM-OS BUILD Handoff — M2.4 implemented / M2.5 next
+# ACM-OS BUILD Handoff — M2.5 implemented / M2 checkpoint pending
 
 > 更新时间：2026-08-11（Asia/Shanghai）
 >
@@ -35,7 +35,8 @@ M2.1 code checkpoint: 27f785f build: complete M2.1 personal note binding
 M2.1 handoff checkpoint: cec7d6f docs: record M2.1 handoff
 M2.2 checkpoint: 8edc301 build: complete M2.2 fresh markdown read
 M2.3 checkpoint: 6ae1cbf build: complete M2.3 binding resolution
-Working tree: verified M2.4 implementation and handoff changes, pending commit
+M2.4 checkpoint: 6b80394 build: complete M2.4 revalidation and Obsidian open
+Working tree: verified M2.5 implementation and handoff changes, pending commit
 origin/main: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
 M1 tag:     acm-os-m1-contest-import
 Remote tag: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
@@ -54,6 +55,7 @@ f140316 build: complete B0.3 workspace configuration
 cec7d6f docs: record M2.1 handoff
 8edc301 build: complete M2.2 fresh markdown read
 6ae1cbf build: complete M2.3 binding resolution
+6b80394 build: complete M2.4 revalidation and Obsidian open
 ```
 
 标签：
@@ -63,7 +65,7 @@ acm-os-m0-foundation    → 42815a8
 acm-os-m1-contest-import → 4e25359
 ```
 
-M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2/M2.3 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.3。
+M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2/M2.3/M2.4 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.4。
 
 ## 3. Current BUILD position
 
@@ -73,12 +75,13 @@ Completed: M1 — Real Contest Import → Lightweight Problems
 Completed: M2.1 — Create Personal Note + File Binding
 Completed: M2.2 — Fresh Read + Markdown Parser
 Completed: M2.3 — Binding Resolution + Vault Availability
-Completed: M2.4 — Revalidation Triggers + Open in Obsidian (pending commit)
-Next:      M2.5 — Safe Patch + Recovery Copy Foundation
-M2 state:  IN PROGRESS
+Completed: M2.4 — Revalidation Triggers + Open in Obsidian
+Completed: M2.5 — Safe Patch + Recovery Copy Foundation (pending commit)
+Next:      commit M2.5 → create acm-os-m2-vault-binding checkpoint → M3 planning
+M2 state:  CODE COMPLETE / CHECKPOINT PENDING
 ```
 
-不要重复实现 M1/M2.1/M2.2/M2.3/M2.4，也不要跳过 M2.5 或进入 M3+。
+不要重复实现 M1/M2.1/M2.2/M2.3/M2.4/M2.5。M2.5 未提交且 M2 checkpoint 未确认前，不得进入 M3+。
 
 ## 4. M1 closure record
 
@@ -178,7 +181,7 @@ M2.3 没有实现 watcher、window-focus revalidation、Open in Obsidian、Safe 
 
 ## 5.4 M2.4 closure record
 
-M2.4 已实现并完成验证，尚待用户明确允许后 commit：
+M2.4 已实现并由提交 `6b80394` 封存：
 
 - 使用 `notify` native watcher 递归监听 Active Vault 中的 Markdown 变更；事件只发出 `personal-note-invalidated` 信号，不携带或注入正文事实；
 - watcher 在应用启动和首次 workspace 配置完成后挂载，150ms 去抖；watcher 不可用时 window-focus Fresh Read 仍保证正确性；
@@ -201,6 +204,34 @@ M2.4 已实现并完成验证，尚待用户明确允许后 commit：
 - `git diff --check`：PASS。
 
 M2.4 没有实现 Safe Patch、Recovery Copy 产品行为或任何 M3 lifecycle。下一切片 M2.5 应实现冻结的 Fresh Read → unique target → minimal patch → concurrent digest check → recovery copy → write → re-read/re-parse/semantic verify 事务链。
+
+## 5.5 M2.5 closure record
+
+M2.5 已实现并完成验证，尚待用户明确允许后 commit：
+
+- Application 只暴露 `AddExtraProblemLink` 语义命令；调用者不能传 path、offset、完整 Markdown 或 generic write；
+- link target 在 Application 入口验证，拒绝空值、首尾空白、控制字符、嵌套 `[[...]]` 和 alias 注入；
+- 写事务执行 binding resolve/Fresh Read、Active Vault canonical path 校验、UTF-8 校验、最新结构解析与唯一 `## 额外题目` 验证；
+- patch 只在唯一目标 section 的 source offset 内追加真实 Markdown list item，目标区外 byte-for-byte 保持；
+- 保留 UTF-8 BOM 与目标 section 的 LF/CRLF 风格；重复 link 由 Markdown list AST 判断，不把 code span 文本误认成正式条目；
+- 写前在 App Private `markdown-recovery/problem-markdown` 创建 exact pre-write copy，不污染 Vault；bucket 由稳定 Problem identity hash 决定，文件 rename 后仍归入同一 bucket；
+- recovery filename 保存完整 pre/post digest，为未来 Undo 的“当前 digest 必须等于写后 digest”守卫提供证据；每个 bucket 最多 10 份且最长 30 天；
+- recovery 创建/裁剪失败时不写 Vault；写前再次读盘比较完整 digest，外部并发修改时返回 `markdown_concurrent_modification`，不 merge、不覆盖；
+- 使用同目录临时文件、flush、`sync_all` 与原子 persist 替换；写后重读、重新解析并验证 bytes 与 semantic postcondition；
+- 成功后 optimistic 更新 binding digest/file key 并失效受影响 projection cache；M2.5 不创建 Candidate/正式关系 System Fact，不提供产品 UI，后续 M6 在此事务成功后再提交对应事实。
+
+验证证据：
+
+- Rust workspace：80 passed，2 个真实网络 smoke ignored；
+- temporary Vault：BOM/CRLF、byte-preserving patch、missing/ambiguous/duplicate section、invalid UTF-8、path escape、recovery failure、concurrent edit、atomic write failure、semantic verify failure：PASS；
+- recovery exact bytes、稳定 bucket、完整 pre/post digest、10 copies / 30 days retention：PASS；
+- startup / boundary / DOM：21 passed；
+- TypeScript type-check 与 Vite production build：PASS；
+- `cargo check --workspace --locked`：PASS；
+- Tauri Debug executable（no bundle）：PASS；
+- `git diff --check`：PASS。
+
+M2.5 没有实现 Candidate 接受 UI、自动 Undo UI、任何 Learning Status/Review/Today 行为或 M3 lifecycle。完整 M2 代码已完成；提交 M2.5 后才可由用户明确决定创建 `acm-os-m2-vault-binding` tag。
 
 ## 6. Frozen M2 outcome and scope
 
@@ -298,17 +329,17 @@ git tag --points-at HEAD
 1. 完整阅读四份权威文档；
 2. 检查顶层目录、manifests、lockfiles、toolchain 与当前测试入口；
 3. 检查 `4e25359` 和 `27f785f` 的实际 change surface；
-4. 明确报告 M1/M2.1/M2.2/M2.3 checkpoint 是否仍完整、工作树是否有未知改动；
-5. 从 SPEC/DESIGN/PLAN 提取 M2.4 最小纵向 Slice 和 Done Evidence；
-6. 在修改前提交 M2.4 实施计划供用户确认；
-7. 按“最小 Slice → focused verification → broader verification → diff review → status”执行；
-8. 当前 Slice 失败时不叠加下一 Slice；
-9. 未经用户明确允许，不 commit、tag、push；
-10. M2 完成前不进入 M3。
+4. 明确报告 M1/M2.1/M2.2/M2.3/M2.4 checkpoint 是否仍完整、M2.5 工作树是否只有已知改动；
+5. 核对 Safe Patch / Recovery Copy 的真实 diff 与最后验证证据；
+6. 未经用户明确允许，不 commit、tag、push；
+7. M2.5 commit 后，再由用户明确决定是否创建 `acm-os-m2-vault-binding`；
+8. checkpoint 未确认前不进入 M3；
+9. 后续继续按“最小 Slice → focused verification → broader verification → diff review → status”执行；
+10. 当前 Slice 失败时不叠加下一 Slice。
 
-建议的 M2.4 首个动作不是写代码，而是：
+建议的首个动作不是写代码，而是：
 
-`审阅 M2.3 resolver 与 Tauri lifecycle 边界，并形成 watcher invalidation、window-focus authoritative re-read、Open in Obsidian failure isolation 的最小实施切片与验收矩阵。`
+`审阅 M2.5 staged/unstaged diff、Safe Patch transaction tests 与 recovery retention evidence；确认提交后再处理 M2 checkpoint tag。`
 
 ## 10. Git and safety rules
 
@@ -322,8 +353,8 @@ git tag --points-at HEAD
 - 用假工具、跳过边界检查或伪造 build/test PASS；
 - 未经允许安装大型或系统级工具；
 - 未经允许 commit、tag、push；
-- M2 未完成就创建 `acm-os-m2-vault-binding`；
-- 进入 M3+。
+- M2.5 未提交或验证未通过就创建 `acm-os-m2-vault-binding`；
+- M2 checkpoint 未确认就进入 M3+。
 
 ## 11. Durable recovery prompt
 

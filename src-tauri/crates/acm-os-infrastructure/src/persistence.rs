@@ -10,8 +10,9 @@ use acm_os_application::{
     ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
     ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
     LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
-    PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError, PersonalNotePort,
-    PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
+    ExtraProblemLinkTarget, PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError,
+    PersonalNotePatchError, PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError,
+    PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
     ProblemIdentityType, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
     StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
@@ -38,6 +39,7 @@ pub struct DatabaseRuntime {
     _startup_lock: Option<File>,
     status: StartupGateStatus,
     markdown_projection_cache: Mutex<HashMap<String, ProblemMarkdownProjection>>,
+    recovery_root: Option<PathBuf>,
 }
 
 impl DatabaseRuntime {
@@ -47,6 +49,7 @@ impl DatabaseRuntime {
             _startup_lock: None,
             status: StartupGateStatus::RecoveryRequired { reason },
             markdown_projection_cache: Mutex::new(HashMap::new()),
+            recovery_root: None,
         }
     }
 
@@ -277,6 +280,139 @@ impl PersonalNoteReadPort for DatabaseRuntime {
             projection,
             relocated: resolved.relocated,
         })
+    }
+}
+
+impl PersonalNotePatchPort for DatabaseRuntime {
+    async fn add_extra_problem_link(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        target: &ExtraProblemLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let state = self
+            .read_personal_note_projection(problem)
+            .await
+            .map_err(map_personal_note_read_to_patch_error)?;
+        let expected = match state {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            PersonalNoteReadState::LocationAnomaly { .. } => {
+                return Err(PersonalNotePatchError::LocationAnomaly);
+            }
+            PersonalNoteReadState::VaultUnavailable { .. } => {
+                return Err(PersonalNotePatchError::VaultUnavailable);
+            }
+        };
+        let configuration = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?
+            .ok_or(PersonalNotePatchError::VaultUnavailable)?;
+        let recovery_root = self
+            .recovery_root
+            .clone()
+            .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let active_vault = configuration.active_vault_path().to_owned();
+        let relative_path = expected.vault_relative_path.clone();
+        let recovery_key = format!(
+            "codeforces:{}:{}",
+            problem.contest().contest_id(),
+            problem.index()
+        );
+        let target = target.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::safe_patch::add_extra_problem_link(
+                &active_vault,
+                &relative_path,
+                &recovery_root,
+                &recovery_key,
+                &target,
+                |_| {},
+            )
+        })
+        .await
+        .map_err(|_| PersonalNotePatchError::WriteFailed)?
+        .map_err(map_safe_patch_error)?;
+
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = ?1 AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNotePatchError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?
+        .ok_or(PersonalNotePatchError::ProblemNotFound)?;
+        let resolved = ResolvedNoteFile {
+            relative_path: outcome.relative_path,
+            bytes: Vec::new(),
+            content_digest: outcome.content_digest,
+            windows_file_key: outcome.windows_file_key,
+            relocated: false,
+        };
+        if !self
+            .commit_resolved_binding(problem_id, &expected, &resolved)
+            .await
+            .map_err(map_personal_note_read_to_patch_error)?
+        {
+            return Err(PersonalNotePatchError::BindingUnavailable);
+        }
+        let old_cache_key = format!(
+            "codeforces:{}:{}:{}",
+            problem.contest().contest_id(),
+            problem.index(),
+            expected.vault_relative_path
+        );
+        let new_cache_key = format!(
+            "codeforces:{}:{}:{}",
+            problem.contest().contest_id(),
+            problem.index(),
+            resolved.relative_path
+        );
+        let mut cache = self
+            .markdown_projection_cache
+            .lock()
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        cache.remove(&old_cache_key);
+        cache.remove(&new_cache_key);
+        Ok(resolved_binding(&resolved))
+    }
+}
+
+fn map_personal_note_read_to_patch_error(error: PersonalNoteReadError) -> PersonalNotePatchError {
+    match error {
+        PersonalNoteReadError::ProblemNotFound => PersonalNotePatchError::ProblemNotFound,
+        PersonalNoteReadError::NotPersonal => PersonalNotePatchError::NotPersonal,
+        PersonalNoteReadError::BindingUnavailable => PersonalNotePatchError::BindingUnavailable,
+        PersonalNoteReadError::FileReadFailed => PersonalNotePatchError::WriteFailed,
+        PersonalNoteReadError::InvalidUtf8 => PersonalNotePatchError::InvalidUtf8,
+        PersonalNoteReadError::PersistenceUnavailable => {
+            PersonalNotePatchError::PersistenceUnavailable
+        }
+    }
+}
+
+fn map_safe_patch_error(error: crate::safe_patch::SafePatchError) -> PersonalNotePatchError {
+    use crate::safe_patch::SafePatchError;
+    match error {
+        SafePatchError::VaultUnavailable => PersonalNotePatchError::VaultUnavailable,
+        SafePatchError::BindingUnavailable => PersonalNotePatchError::BindingUnavailable,
+        SafePatchError::InvalidUtf8 => PersonalNotePatchError::InvalidUtf8,
+        SafePatchError::TargetSectionMissing => PersonalNotePatchError::TargetSectionMissing,
+        SafePatchError::TargetSectionAmbiguous => {
+            PersonalNotePatchError::TargetSectionAmbiguous
+        }
+        SafePatchError::LinkAlreadyPresent => PersonalNotePatchError::LinkAlreadyPresent,
+        SafePatchError::ConcurrentModification => {
+            PersonalNotePatchError::ConcurrentModification
+        }
+        SafePatchError::RecoveryCopyFailed => PersonalNotePatchError::RecoveryCopyFailed,
+        SafePatchError::WriteFailed => PersonalNotePatchError::WriteFailed,
+        SafePatchError::VerificationFailed => PersonalNotePatchError::VerificationFailed,
     }
 }
 
@@ -997,6 +1133,7 @@ async fn try_start_database(
             schema_version: applied_schema_version,
         },
         markdown_projection_cache: Mutex::new(HashMap::new()),
+        recovery_root: Some(app_private_data.join("markdown-recovery")),
     })
 }
 
@@ -1593,12 +1730,13 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        configure_workspace, create_personal_note, import_codeforces_contest,
+        add_extra_problem_link, configure_workspace, create_personal_note,
+        import_codeforces_contest,
         query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
-        WorkspaceConfigurationStatus, WorkspacePathField, PersonalNoteError, PersonalNoteReadPort,
-        PersonalNoteReadState,
+        PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
+        WorkspaceConfigurationStatus, WorkspacePathField,
         ProblemIdentityType, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
@@ -1698,6 +1836,22 @@ mod tests {
             .await
             .expect("create personal note");
         (directory, runtime, vault, problems, problem)
+    }
+
+    fn files_under(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory).expect("read directory") {
+                let entry = entry.expect("directory entry");
+                if entry.file_type().expect("file type").is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.push(entry.path());
+                }
+            }
+        }
+        files
     }
 
     async fn create_empty_migration_ledger(pool: &SqlitePool) {
@@ -1934,6 +2088,78 @@ mod tests {
         assert_ne!(fresh.content_digest, cached.content_digest);
         assert_eq!(fresh.solution_routes.len(), 1);
         assert_eq!(fresh.solution_routes[0].name, "External edit ×");
+    }
+
+    #[tokio::test]
+    async fn safe_patch_updates_only_the_extra_problem_section_and_refreshes_binding_evidence() {
+        let (directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let note = problems.join("CF-1979-A.md");
+        let before = "\u{feff}# Custom title\r\n\r\n## 前置知识\r\nkeep\r\n\r\n## 题解\r\n\r\n### Mine\r\nbody\r\n\r\n## 额外题目\r\n\r\n## User section\r\ndo not touch\r\n";
+        fs::write(&note, before.as_bytes()).expect("custom note fixture");
+        runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("refresh external edit");
+
+        let binding = add_extra_problem_link(&runtime, &problem, "CF-2000-A")
+            .await
+            .expect("safe semantic patch");
+        let after = fs::read(&note).expect("patched note");
+        let expected = before.replace(
+            "## 额外题目\r\n\r\n## User section",
+            "## 额外题目\r\n- [[CF-2000-A]]\r\n\r\n## User section",
+        );
+        assert_eq!(after, expected.as_bytes());
+        assert_eq!(binding.content_digest, sha256_hex(&after));
+        let persisted_digest: String = sqlx::query_scalar(
+            "SELECT content_digest FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
+             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("binding digest");
+        assert_eq!(persisted_digest, binding.content_digest);
+
+        let recovery_files = files_under(&directory.path().join("markdown-recovery"));
+        assert_eq!(recovery_files.len(), 1);
+        let recovery_name = recovery_files[0]
+            .file_name()
+            .expect("recovery filename")
+            .to_string_lossy();
+        assert!(recovery_name.contains(&sha256_hex(before.as_bytes())));
+        assert!(recovery_name.contains(&binding.content_digest));
+        assert_eq!(
+            fs::read(&recovery_files[0]).expect("pre-write recovery"),
+            before.as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_patch_rejects_ambiguous_or_invalid_markdown_without_writing() {
+        let (directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let note = problems.join("CF-1979-A.md");
+        let ambiguous = "## 额外题目\nfirst\n\n## 额外题目\nsecond\n";
+        fs::write(&note, ambiguous).expect("ambiguous note");
+
+        assert_eq!(
+            add_extra_problem_link(&runtime, &problem, "CF-2000-A").await,
+            Err(PersonalNotePatchError::TargetSectionAmbiguous)
+        );
+        assert_eq!(
+            fs::read_to_string(&note).expect("unchanged note"),
+            ambiguous
+        );
+        assert!(!directory.path().join("markdown-recovery").exists());
+
+        fs::write(&note, [0xff, 0xfe, 0xfd]).expect("invalid utf-8 note");
+        assert_eq!(
+            add_extra_problem_link(&runtime, &problem, "CF-2000-B").await,
+            Err(PersonalNotePatchError::InvalidUtf8)
+        );
+        assert_eq!(
+            fs::read(&note).expect("invalid note preserved"),
+            [0xff, 0xfe, 0xfd]
+        );
     }
 
     #[cfg(windows)]

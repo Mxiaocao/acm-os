@@ -113,9 +113,41 @@ fn direct_parent_h2(headings: &[Heading], index: usize) -> Option<&str> {
         .map(|heading| heading.name.as_str())
 }
 
+pub(crate) fn section_contains_wikilink_item(
+    markdown: &str,
+    start: usize,
+    end: usize,
+    target: &str,
+) -> bool {
+    let expected = format!("[[{target}]]");
+    let mut item_text: Option<String> = None;
+    for (event, _) in Parser::new(&markdown[start..end]).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Item) => item_text = Some(String::new()),
+            Event::Text(text) => {
+                if let Some(value) = &mut item_text {
+                    value.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(value) = &mut item_text {
+                    value.push(' ');
+                }
+            }
+            Event::End(TagEnd::Item) => {
+                if item_text.take().is_some_and(|value| value.trim() == expected) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_problem_markdown;
+    use super::{parse_problem_markdown, section_contains_wikilink_item};
     use acm_os_application::MarkdownParseWarning;
 
     #[test]
@@ -165,5 +197,22 @@ mod tests {
 
         assert_eq!(projection.solution_routes.len(), 1);
         assert_eq!(projection.solution_routes[0].name, "Route");
+    }
+
+    #[test]
+    fn wikilink_item_detection_uses_markdown_list_structure() {
+        let markdown = "## 额外题目\n- [[CF-2000-A]]\n\n`- [[CF-2000-B]]`\n";
+        assert!(section_contains_wikilink_item(
+            markdown,
+            0,
+            markdown.len(),
+            "CF-2000-A",
+        ));
+        assert!(!section_contains_wikilink_item(
+            markdown,
+            0,
+            markdown.len(),
+            "CF-2000-B",
+        ));
     }
 }

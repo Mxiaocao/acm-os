@@ -28,7 +28,7 @@ const validRustPackages = () => [
       { name: "sha2", kind: null },
       { name: "sqlx", kind: null },
       { name: "tokio", kind: null },
-      { name: "tempfile", kind: "dev" },
+      { name: "tempfile", kind: null },
       { name: "tokio", kind: "dev" },
     ],
   },

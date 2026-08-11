@@ -8,7 +8,6 @@ const EXPECTED_RUST_DEPENDENCIES = {
   "acm-os-domain": [],
   "acm-os-application": ["normal:acm-os-domain"],
   "acm-os-infrastructure": [
-    "dev:tempfile",
     "dev:tokio",
     "normal:acm-os-application",
     "normal:acm-os-domain",
@@ -20,6 +19,7 @@ const EXPECTED_RUST_DEPENDENCIES = {
     "normal:serde_json",
     "normal:sha2",
     "normal:sqlx",
+    "normal:tempfile",
     "normal:tokio",
   ],
   "acm-os": [
