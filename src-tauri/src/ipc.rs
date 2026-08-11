@@ -70,6 +70,24 @@ pub struct LightweightProblemDetailDto {
     statement: StatementReadStateDto,
     identity_type: &'static str,
     personal_note: Option<PersonalNoteBindingDto>,
+    lifecycle: ProblemLifecycleStateDto,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemLifecycleStateDto {
+    learning_status: &'static str,
+    learning_status_since_utc: String,
+    next_review_due_local_date: Option<String>,
+    available_actions: Vec<&'static str>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemLifecycleCommandInput {
+    contest_id: u64,
+    index: String,
+    action: String,
 }
 
 #[derive(serde::Serialize)]
@@ -172,7 +190,10 @@ pub async fn import_codeforces_contest(
         .map_err(|_| "adapter_unavailable")?;
     let result = import_codeforces_contest(database.inner(), &source, contest)
         .await
-        .map_err(|_| "import_unavailable")?;
+        .map_err(|error| match error {
+            acm_os_application::ContestImportSourceError::Unavailable => "import_unavailable",
+            acm_os_application::ContestImportSourceError::InvalidRemoteData => "invalid_remote_data",
+        })?;
     Ok(ContestImportRunDto {
         import_status: match result.persisted.status {
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
@@ -258,6 +279,39 @@ pub async fn create_personal_note(
 }
 
 #[tauri::command]
+pub async fn transition_problem_lifecycle(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ProblemLifecycleCommandInput,
+) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    let action = parse_problem_lifecycle_action(&input.action)?;
+    let today = acm_os_infrastructure::current_local_date()
+        .map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::transition_problem_lifecycle(database.inner(), &problem, action, today)
+        .await
+        .map(problem_lifecycle_state_dto)
+        .map_err(acm_os_application::ProblemLifecycleError::code)
+}
+
+#[tauri::command]
+pub async fn delete_personal_note(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::delete_personal_note(database.inner(), &problem)
+        .await
+        .map(problem_lifecycle_state_dto)
+        .map_err(acm_os_application::PersonalNoteDeletionError::code)
+}
+
+#[tauri::command]
 pub async fn personal_note_projection(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
@@ -321,8 +375,20 @@ fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, 
     }
     let mut uri = url::Url::parse("obsidian://open").map_err(|_| "note_open_failed")?;
     uri.query_pairs_mut()
-        .append_pair("path", target.to_str().ok_or("note_open_failed")?);
+        .append_pair("path", &obsidian_external_path(&target)?);
     Ok(uri.into())
+}
+
+fn obsidian_external_path(path: &std::path::Path) -> Result<String, &'static str> {
+    let raw = path.to_str().ok_or("note_open_failed")?;
+    Ok(normalize_windows_verbatim_path(raw))
+}
+
+fn normalize_windows_verbatim_path(path: &str) -> String {
+    if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc_path}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
 }
 
 fn personal_note_read_state_dto(
@@ -420,6 +486,67 @@ fn lightweight_problem_detail_dto(item: acm_os_application::LightweightProblemDe
         },
         identity_type: problem_identity_type_dto(item.identity_type),
         personal_note: item.personal_note.map(personal_note_binding_dto),
+        lifecycle: problem_lifecycle_state_dto(item.lifecycle),
+    }
+}
+
+fn problem_lifecycle_state_dto(
+    state: acm_os_application::ProblemLifecycleState,
+) -> ProblemLifecycleStateDto {
+    ProblemLifecycleStateDto {
+        learning_status: learning_status_dto(state.learning_status),
+        learning_status_since_utc: state.learning_status_since_utc,
+        next_review_due_local_date: state
+            .active_review_cycle
+            .map(|cycle| cycle.next_due_local_date.to_iso_string()),
+        available_actions: if state.identity_type == acm_os_application::ProblemIdentityType::Personal {
+            acm_os_domain::ProblemLifecycleEngine::available_actions(state.learning_status)
+                .iter()
+                .copied()
+                .map(problem_lifecycle_action_dto)
+                .collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn learning_status_dto(status: acm_os_domain::LearningStatus) -> &'static str {
+    match status {
+        acm_os_domain::LearningStatus::Unstarted => "unstarted",
+        acm_os_domain::LearningStatus::UpsolvePending => "upsolvePending",
+        acm_os_domain::LearningStatus::Learning => "learning",
+        acm_os_domain::LearningStatus::WaitingColdStart => "waitingColdStart",
+        acm_os_domain::LearningStatus::Relearning => "relearning",
+        acm_os_domain::LearningStatus::LongTermReview => "longTermReview",
+    }
+}
+
+fn parse_problem_lifecycle_action(
+    action: &str,
+) -> Result<acm_os_domain::ProblemLifecycleAction, &'static str> {
+    match action {
+        "joinUpsolve" => Ok(acm_os_domain::ProblemLifecycleAction::JoinUpsolve),
+        "startLearning" => Ok(acm_os_domain::ProblemLifecycleAction::StartLearning),
+        "returnToPending" => Ok(acm_os_domain::ProblemLifecycleAction::ReturnToPending),
+        "markUnderstood" => Ok(acm_os_domain::ProblemLifecycleAction::MarkUnderstood),
+        "withdrawUnderstood" => Ok(acm_os_domain::ProblemLifecycleAction::WithdrawUnderstood),
+        "startRelearning" => Ok(acm_os_domain::ProblemLifecycleAction::StartRelearning),
+        "stopLearning" => Ok(acm_os_domain::ProblemLifecycleAction::StopLearning),
+        _ => Err("invalid_lifecycle_action"),
+    }
+}
+
+fn problem_lifecycle_action_dto(action: acm_os_domain::ProblemLifecycleAction) -> &'static str {
+    match action {
+        acm_os_domain::ProblemLifecycleAction::JoinUpsolve => "joinUpsolve",
+        acm_os_domain::ProblemLifecycleAction::StartLearning => "startLearning",
+        acm_os_domain::ProblemLifecycleAction::ReturnToPending => "returnToPending",
+        acm_os_domain::ProblemLifecycleAction::MarkUnderstood => "markUnderstood",
+        acm_os_domain::ProblemLifecycleAction::WithdrawUnderstood => "withdrawUnderstood",
+        acm_os_domain::ProblemLifecycleAction::StartRelearning => "startRelearning",
+        acm_os_domain::ProblemLifecycleAction::StopLearning => "stopLearning",
+        acm_os_domain::ProblemLifecycleAction::DeletePersonalNote => "deletePersonalNote",
     }
 }
 
@@ -673,17 +800,19 @@ fn workspace_error_dto(
 #[cfg(test)]
 mod tests {
     use acm_os_application::{
+        ActiveReviewCycle,
         KnownMarkdownSection, MarkdownParseWarning, PersonalNoteBinding, PersonalNoteReadState,
-        ProblemMarkdownProjection, SolutionRoute,
+        ProblemIdentityType, ProblemLifecycleState, ProblemMarkdownProjection, SolutionRoute,
         StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
         WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
     };
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, obsidian_open_uri, personal_note_read_state_dto, startup_status_dto,
+        app_shell_status_dto, normalize_windows_verbatim_path, obsidian_open_uri,
+        personal_note_read_state_dto, problem_lifecycle_state_dto, startup_status_dto,
         workspace_error_dto, workspace_status_dto, LightweightProblemDetailDto,
-        StatementReadStateDto,
+        ProblemLifecycleStateDto, StatementReadStateDto,
     };
 
     #[test]
@@ -791,6 +920,12 @@ mod tests {
             },
             identity_type: "lightweight",
             personal_note: None,
+            lifecycle: ProblemLifecycleStateDto {
+                learning_status: "unstarted",
+                learning_status_since_utc: "2026-08-11T00:00:00.000Z".to_owned(),
+                next_review_due_local_date: None,
+                available_actions: Vec::new(),
+            },
         };
         assert_eq!(
             serde_json::to_value(dto).expect("serialize problem detail"),
@@ -805,7 +940,38 @@ mod tests {
                     "sanitizedHtml": "<p>safe local statement</p>"
                 },
                 "identityType": "lightweight",
-                "personalNote": null
+                "personalNote": null,
+                "lifecycle": {
+                    "learningStatus": "unstarted",
+                    "learningStatusSinceUtc": "2026-08-11T00:00:00.000Z",
+                    "nextReviewDueLocalDate": null,
+                    "availableActions": []
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_dto_exposes_backend_actions_and_local_date_due() {
+        let dto = problem_lifecycle_state_dto(ProblemLifecycleState {
+            identity_type: ProblemIdentityType::Personal,
+            learning_status: acm_os_domain::LearningStatus::WaitingColdStart,
+            learning_status_since_utc: "2026-08-11T00:00:00.000Z".to_owned(),
+            active_review_cycle: Some(ActiveReviewCycle {
+                cycle_number: 1,
+                stage: 0,
+                schedule_rule_version: 1,
+                next_due_local_date: acm_os_domain::LocalDate::parse_iso("2026-08-14")
+                    .expect("local date"),
+            }),
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize lifecycle"),
+            json!({
+                "learningStatus": "waitingColdStart",
+                "learningStatusSinceUtc": "2026-08-11T00:00:00.000Z",
+                "nextReviewDueLocalDate": "2026-08-14",
+                "availableActions": ["withdrawUnderstood", "stopLearning"]
             })
         );
     }
@@ -968,6 +1134,24 @@ mod tests {
 
         assert!(uri.starts_with("obsidian://open?path="));
         assert!(uri.contains("A+note.md") || uri.contains("A%20note.md"));
+        let decoded_path = url::Url::parse(&uri)
+            .expect("valid Obsidian URI")
+            .query_pairs()
+            .find_map(|(key, value)| (key == "path").then(|| value.into_owned()))
+            .expect("path query parameter");
+        assert!(!decoded_path.starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn obsidian_uri_path_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            normalize_windows_verbatim_path(r"\\?\E:\ACM-Obsidian\题目笔记\CF-2256-C.md"),
+            r"E:\ACM-Obsidian\题目笔记\CF-2256-C.md"
+        );
+        assert_eq!(
+            normalize_windows_verbatim_path(r"\\?\UNC\server\share\Vault\Problems\A.md"),
+            r"\\server\share\Vault\Problems\A.md"
+        );
     }
 
     #[test]

@@ -25,6 +25,16 @@ const readyFoundation = {
   state: "ready",
   foundation: { status: "ready", core: "acm-os" },
 };
+const lightweightLifecycle = {
+  learningStatus: "unstarted",
+  learningStatusSinceUtc: "2026-08-11T00:00:00.000Z",
+  nextReviewDueLocalDate: null,
+  availableActions: [],
+};
+const personalUnstartedLifecycle = {
+  ...lightweightLifecycle,
+  availableActions: ["joinUpsolve"],
+};
 
 async function render(component) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
@@ -35,6 +45,10 @@ async function render(component) {
     document: dom.window.document,
     navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    HTMLImageElement: dom.window.HTMLImageElement,
+    DOMParser: dom.window.DOMParser,
+    NodeFilter: dom.window.NodeFilter,
   };
   const previous = Object.fromEntries(
     Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
@@ -64,7 +78,7 @@ async function settle() {
   });
 }
 
-async function renderApp(ipc, pathname = "/") {
+async function renderApp(ipc, pathname = "/", strict = false) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     url: `https://acm-os.test${pathname}`,
   });
@@ -73,6 +87,10 @@ async function renderApp(ipc, pathname = "/") {
     document: dom.window.document,
     navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    HTMLImageElement: dom.window.HTMLImageElement,
+    DOMParser: dom.window.DOMParser,
+    NodeFilter: dom.window.NodeFilter,
   };
   const previous = Object.fromEntries(
     Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
@@ -88,7 +106,8 @@ async function renderApp(ipc, pathname = "/") {
   });
   const { App } = await vite.ssrLoadModule("/src/app/App.tsx");
   const root = createRoot(dom.window.document.getElementById("root"));
-  await act(async () => root.render(React.createElement(App)));
+  const app = React.createElement(App);
+  await act(async () => root.render(strict ? React.createElement(React.StrictMode, null, app) : app));
   await settle();
   return {
     document: dom.window.document,
@@ -222,13 +241,46 @@ test("Normal navigation pushes and popstate enters Review focus with isolated ch
     const contests = [...view.document.querySelectorAll("a")].find((link) => link.textContent === "Contests");
     await act(async () => contests.dispatchEvent(new view.window.MouseEvent("click", { bubbles: true, button: 0 })));
     assert.equal(view.window.location.pathname, "/contests");
-    assert.equal(view.document.querySelector("h1")?.textContent, "Contests");
+    assert.equal(view.document.querySelector("h1")?.textContent, "比赛");
     view.window.history.pushState(null, "", "/review/018f0d8e-4a5b-7c6d-8e9f-0123456789ab");
     await act(async () => view.window.dispatchEvent(new view.window.PopStateEvent("popstate")));
     await settle();
     assert.equal(view.document.querySelector("nav"), null);
     assert.equal(view.document.querySelector("h1")?.textContent, "Isolated review workspace");
     assert.equal(view.document.activeElement?.tagName, "MAIN");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Contest import exposes a specific Chinese error instead of swallowing the IPC code", { concurrency: false }, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") {
+      return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    }
+    if (command === "contest_shelf") return [];
+    if (command === "import_codeforces_contest") throw new Error("unsupported_contest_url");
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    const input = view.document.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "https://codeforces.com");
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      view.document.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    assert.match(view.document.body.textContent, /比赛网址格式不正确/);
+    assert.match(view.document.body.textContent, /https:\/\/codeforces\.com\/contest\/1979/);
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "https://codeforces.com/contest/2256");
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    assert.doesNotMatch(view.document.body.textContent, /比赛网址格式不正确/);
   } finally {
     await view.cleanup();
   }
@@ -262,6 +314,7 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
         statement: { state: "pending" },
         identityType: personal ? "personal" : "lightweight",
         personalNote: personal ? { vaultRelativePath: "Problems/CF-1979-A.md" } : null,
+        lifecycle: personal ? personalUnstartedLifecycle : lightweightLifecycle,
       };
     }
     if (command === "create_personal_note") {
@@ -310,6 +363,127 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
   }
 });
 
+test("StrictMode keeps the ready Personal Markdown projection and exposes the Obsidian editor entry", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: personalUnstartedLifecycle,
+    };
+    if (command === "personal_note_projection") return {
+      state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false,
+      projection: { contentDigest: "fresh", knownSections: ["题解"], solutionRoutes: [], warnings: [] },
+    };
+    if (command === "plugin:event|listen") return 1;
+    if (command === "plugin:event|unlisten") return null;
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A", true);
+  try {
+    await settle();
+    const openButton = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "在 Obsidian 中打开并编辑题解");
+    assert.ok(openButton);
+    assert.match(view.document.body.textContent, /Personal Markdown:.*Problems\/CF-1979-A\.md/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Problem statement renders Codeforces LaTeX locally while preserving code blocks", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 2256, index: "A", title: "Formula", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/2256/problem/A",
+      statement: {
+        state: "ready",
+        sanitizedHtml: "<div class=\"problem-statement\"><p>For $$$a^2+b^2=c^2$$$.</p><p>$$$\\frac{1}{2}$$$</p><pre>$$$keep_raw$$$</pre></div>",
+      },
+      identityType: "lightweight", personalNote: null, lifecycle: lightweightLifecycle,
+    };
+    if (command === "statement_assets") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/2256/A");
+  try {
+    await settle();
+    assert.equal(view.document.querySelectorAll(".statement-view .katex").length, 2);
+    assert.ok(view.document.querySelector(".statement-view .katex-display"));
+    assert.match(view.document.querySelector(".statement-view pre")?.textContent ?? "", /\$\$\$keep_raw\$\$\$/);
+    assert.doesNotMatch(view.document.querySelector(".statement-view p")?.textContent ?? "", /\$\$\$/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Problem lifecycle actions and personal-note consequence preview use authoritative IPC results", {
+  concurrency: false,
+}, async () => {
+  let lifecycle = personalUnstartedLifecycle;
+  let transitionCalls = 0;
+  let deleteCalls = 0;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" }, lifecycle,
+    };
+    if (command === "personal_note_projection") return {
+      state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false,
+      projection: { contentDigest: "fresh", knownSections: [], solutionRoutes: [], warnings: [] },
+    };
+    if (command === "transition_problem_lifecycle") {
+      transitionCalls += 1;
+      assert.equal(args.input.action, "joinUpsolve");
+      lifecycle = {
+        ...personalUnstartedLifecycle,
+        learningStatus: "upsolvePending",
+        availableActions: ["startLearning", "stopLearning"],
+      };
+      return lifecycle;
+    }
+    if (command === "delete_personal_note") {
+      deleteCalls += 1;
+      return lightweightLifecycle;
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const join = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "加入补题");
+    assert.ok(join);
+    await act(async () => join.click());
+    await settle();
+    assert.equal(transitionCalls, 1);
+    assert.match(view.document.body.textContent, /待补/);
+
+    const beginDelete = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Delete my personal note…");
+    await act(async () => beginDelete.click());
+    assert.match(view.document.body.textContent, /Contest history, completed Review history/);
+    const confirmDelete = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Delete personal note");
+    await act(async () => confirmDelete.click());
+    await settle();
+    assert.equal(deleteCalls, 1);
+    assert.match(view.document.body.textContent, /Lightweight Problem/);
+    assert.match(view.document.body.textContent, /historical facts were preserved/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("Problem detail preserves Personal identity when the Vault is unavailable", {
   concurrency: false,
 }, async () => {
@@ -334,6 +508,7 @@ test("Problem detail preserves Personal identity when the Vault is unavailable",
         statement: { state: "pending" },
         identityType: "personal",
         personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+        lifecycle: personalUnstartedLifecycle,
       };
     }
     if (command === "personal_note_projection") {
@@ -368,6 +543,7 @@ test("Problem detail performs a Fresh Read when the window regains focus", {
       sourceUrl: "https://codeforces.com/contest/1979/problem/A",
       statement: { state: "pending" }, identityType: "personal",
       personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: personalUnstartedLifecycle,
     };
     if (command === "personal_note_projection") {
       projectionReads += 1;
@@ -402,13 +578,14 @@ test("Obsidian open failure is scoped and exposes recovery actions", {
       sourceUrl: "https://codeforces.com/contest/1979/problem/A",
       statement: { state: "pending" }, identityType: "personal",
       personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: personalUnstartedLifecycle,
     };
     if (command === "personal_note_projection") return { state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false, projection: { contentDigest: "fresh", knownSections: [], solutionRoutes: [], warnings: [] } };
     if (command === "open_personal_note_in_obsidian") throw "obsidian_open_failed";
     throw new Error(`unexpected command ${command}`);
   }, "/problems/1979/A");
   try {
-    const openButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Open in Obsidian");
+    const openButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "在 Obsidian 中打开并编辑题解");
     assert.ok(openButton);
     await act(async () => openButton.click());
     await settle();

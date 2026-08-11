@@ -29,6 +29,9 @@ dependencies = [
 [[package]]
 name = "acm-os-domain"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "acm-os-infrastructure"
@@ -36,6 +39,7 @@ version = "0.1.0"
 dependencies = [
  "acm-os-application",
  "acm-os-domain",
+ "chrono",
  "pulldown-cmark",
  "reqwest",
  "rustls",
@@ -46,6 +50,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -7,9 +7,12 @@ import {
   useRef,
   useState,
 } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
   createPersonalNote,
+  deletePersonalNote,
   getContestDetail,
   getContestShelf,
   getLightweightProblemDetail,
@@ -18,11 +21,13 @@ import {
   getStatementAssets,
   importCodeforcesContest,
   openPersonalNoteInObsidian,
+  transitionProblemLifecycle,
   type ContestDetailDto,
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
+  type ProblemLifecycleActionDto,
 } from "../ipc/contest";
 import { onPersonalNoteInvalidated } from "../ipc/personal-note-events";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
@@ -329,10 +334,10 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     setImporting(true); setImportMessage(null);
     try {
       const result = await importCodeforcesContest(contestUrl);
-      setImportMessage(result.importStatus === "complete" ? "Contest imported completely." : `Contest saved; ${result.missingSnapshotProblems.length} statements remain missing.`);
+      setImportMessage(result.importStatus === "complete" ? "比赛已完整导入。" : `比赛已保存，仍有 ${result.missingSnapshotProblems.length} 道题的题面尚未导入。`);
       setItems(await getContestShelf());
-    } catch {
-      setImportMessage("Import could not complete. The existing local import state was preserved.");
+    } catch (error) {
+      setImportMessage(contestImportErrorMessage(error));
     } finally { setImporting(false); }
   };
   const retryMissing = async (contestId: number) => {
@@ -340,28 +345,42 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     setImporting(true); setImportMessage(null);
     try {
       const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`);
-      setImportMessage(result.importStatus === "complete" ? "Missing statements were captured; contest is complete." : `Retry preserved the import; ${result.missingSnapshotProblems.length} statements remain missing.`);
+      setImportMessage(result.importStatus === "complete" ? "缺失题面已补齐，比赛导入完成。" : `重试完成，仍有 ${result.missingSnapshotProblems.length} 道题的题面尚未导入。`);
       setItems(await getContestShelf());
-    } catch {
-      setImportMessage("Retry could not complete. Existing snapshots and manifest were preserved.");
+    } catch (error) {
+      setImportMessage(contestImportErrorMessage(error));
     } finally { setImporting(false); }
   };
   return (
     <>
-      <PageHeader eyebrow="M1 · Contest import" headingRef={headingRef} title="Contests" />
+      <PageHeader eyebrow="M1 · 比赛导入" headingRef={headingRef} title="比赛" />
       <form className="content-panel" onSubmit={submitImport}>
-        <label>Codeforces public contest URL
-          <input autoComplete="off" disabled={importing} onChange={(event) => setContestUrl(event.currentTarget.value)} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} />
+        <label>Codeforces 公开比赛网址
+          <input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} />
         </label>
-        <button className="primary-action" disabled={importing} type="submit">{importing ? "Importing…" : "Import contest"}</button>
+        <button className="primary-action" disabled={importing} type="submit">{importing ? "导入中…" : "导入比赛"}</button>
         {importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}
       </form>
-      {failed ? <section className="empty-state" role="alert"><h2>Contest data is unavailable</h2><p>System Facts could not be read. No import state was changed.</p></section> : null}
-      {items?.length === 0 ? <section className="empty-state"><h2>No contests imported</h2><p>Import becomes available when the Codeforces adapter is connected.</p></section> : null}
-      {items?.length ? <section className="content-panel" aria-label="Imported contests"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.importStatus === "complete" ? "complete" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">Retry missing statements</button> : null}</li>)}</ul></section> : null}
-      {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>Loading local contests…</p></section> : null}
+      {failed ? <section className="empty-state" role="alert"><h2>比赛数据暂不可用</h2><p>无法读取本地系统事实，任何导入状态都没有改变。</p></section> : null}
+      {items?.length === 0 ? <section className="empty-state"><h2>尚未导入比赛</h2><p>请输入完整的 Codeforces 比赛网址，例如 https://codeforces.com/contest/1979。</p></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="已导入比赛"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} 道题 · {item.importStatus === "complete" ? "导入完整" : `${item.missingSnapshotCount} 道题面缺失`}</span></button>{item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">重试缺失题面</button> : null}</li>)}</ul></section> : null}
+      {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>正在读取本地比赛…</p></section> : null}
     </>
   );
+}
+
+function contestImportErrorMessage(error: unknown): string {
+  const code = error instanceof Error ? error.message : String(error);
+  if (code.includes("unsupported_contest_url")) {
+    return "比赛网址格式不正确。请输入完整地址，例如 https://codeforces.com/contest/1979。";
+  }
+  if (code.includes("invalid_remote_data")) {
+    return "Codeforces 返回的比赛数据无法识别，本地已有导入数据保持不变。";
+  }
+  if (code.includes("adapter_unavailable")) {
+    return "Codeforces 导入组件无法启动，请重新启动 ACM-OS 后再试。";
+  }
+  return "连接或读取 Codeforces 失败，请检查网络后重试；本地已有导入数据保持不变。";
 }
 
 function ProblemIndex({ navigate }: { navigate: Navigate }) {
@@ -406,6 +425,10 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   const [openingNote, setOpeningNote] = useState(false);
   const [openNoteFailed, setOpenNoteFailed] = useState(false);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [lifecycleAction, setLifecycleAction] = useState<ProblemLifecycleActionDto | null>(null);
+  const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
+  const [showDeletePreview, setShowDeletePreview] = useState(false);
+  const [deletingNote, setDeletingNote] = useState(false);
   const noteReadSequence = useRef(0);
   const mounted = useRef(true);
   const displayedNotePath = noteReadState?.state === "ready"
@@ -425,7 +448,10 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setNoteReadFailed(true);
     }
   }, [contestId, index]);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   useEffect(() => {
     let active = true;
     const objectUrls: string[] = [];
@@ -516,6 +542,41 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setCopyMessage(`Copy this note path: ${displayedNotePath}`);
     }
   };
+  const runLifecycleAction = async (action: ProblemLifecycleActionDto) => {
+    if (lifecycleAction) return;
+    setLifecycleAction(action);
+    setLifecycleMessage(null);
+    try {
+      const lifecycle = await transitionProblemLifecycle(contestId, index, action);
+      setDetail((current) => current ? { ...current, lifecycle } : current);
+      setLifecycleMessage("Learning status updated and persisted.");
+    } catch {
+      setLifecycleMessage("Learning status could not be changed. The previous state was preserved.");
+    } finally {
+      setLifecycleAction(null);
+    }
+  };
+  const confirmDeletePersonalNote = async () => {
+    if (deletingNote) return;
+    setDeletingNote(true);
+    setNoteMessage(null);
+    try {
+      const lifecycle = await deletePersonalNote(contestId, index);
+      setDetail((current) => current ? {
+        ...current,
+        identityType: "lightweight",
+        personalNote: null,
+        lifecycle,
+      } : current);
+      setNoteReadState(null);
+      setShowDeletePreview(false);
+      setNoteMessage("Personal Markdown deleted. Contest and historical facts were preserved.");
+    } catch {
+      setNoteMessage("Personal Markdown was not deleted. The Personal Problem and its history were preserved.");
+    } finally {
+      setDeletingNote(false);
+    }
+  };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
   return <>
@@ -538,7 +599,7 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
           </p>
           {noteReadState?.state === "ready" ? (
             <button className="secondary-action" disabled={openingNote} onClick={openInObsidian} type="button">
-              {openingNote ? "Opening..." : "Open in Obsidian"}
+              {openingNote ? "正在打开…" : "在 Obsidian 中打开并编辑题解"}
             </button>
           ) : null}
           {openNoteFailed ? (
@@ -556,6 +617,53 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       ) : null}
       {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
     </section>
+    {detail.identityType === "personal" ? (
+      <section className="content-panel" aria-labelledby="learning-lifecycle-heading">
+        <h2 id="learning-lifecycle-heading">Learning lifecycle</h2>
+        <p><strong>Current status:</strong> {learningStatusLabel(detail.lifecycle.learningStatus)}</p>
+        {detail.lifecycle.nextReviewDueLocalDate ? (
+          <p><strong>First cold-start due:</strong> {detail.lifecycle.nextReviewDueLocalDate}</p>
+        ) : null}
+        <div className="action-row">
+          {detail.lifecycle.availableActions.map((action) => (
+            <button
+              className={action === "markUnderstood" || action === "startLearning" || action === "joinUpsolve" ? "primary-action" : "secondary-action"}
+              disabled={lifecycleAction !== null}
+              key={action}
+              onClick={() => void runLifecycleAction(action)}
+              type="button"
+            >
+              {lifecycleAction === action ? "Updating…" : lifecycleActionLabel(action)}
+            </button>
+          ))}
+        </div>
+        {lifecycleMessage ? <p aria-live="polite" className="system-caption">{lifecycleMessage}</p> : null}
+      </section>
+    ) : null}
+    {detail.identityType === "personal" ? (
+      <section className="content-panel" aria-labelledby="personal-note-danger-heading">
+        <h2 id="personal-note-danger-heading">Personal note actions</h2>
+        {!showDeletePreview ? (
+          <button className="secondary-action" onClick={() => setShowDeletePreview(true)} type="button">
+            Delete my personal note…
+          </button>
+        ) : (
+          <div role="alertdialog" aria-labelledby="delete-note-preview-title" aria-describedby="delete-note-preview-description">
+            <h3 id="delete-note-preview-title">Delete this Personal Markdown?</h3>
+            <div id="delete-note-preview-description">
+              <p>This will delete the bound Markdown, downgrade the Problem to Lightweight, exit its current learning lifecycle, and cancel its active Review schedule.</p>
+              <p>Contest history, completed Review history, and historical highest evidence will be preserved.</p>
+            </div>
+            <div className="action-row">
+              <button disabled={deletingNote} onClick={() => setShowDeletePreview(false)} type="button">Cancel</button>
+              <button disabled={deletingNote} onClick={() => void confirmDeletePersonalNote()} type="button">
+                {deletingNote ? "Deleting…" : "Delete personal note"}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+    ) : null}
     {detail.identityType === "personal" ? (
       noteReadFailed ? (
         <section className="empty-state" role="alert"><h2>Personal Markdown is unavailable</h2><p>The current bound file could not be read. System Facts were preserved.</p></section>
@@ -579,6 +687,31 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     ) : null}
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
+}
+
+function learningStatusLabel(status: LightweightProblemDetailDto["lifecycle"]["learningStatus"]): string {
+  const labels = {
+    unstarted: "未进入学习",
+    upsolvePending: "待补",
+    learning: "补题中",
+    waitingColdStart: "已补懂，等待冷启动验证",
+    relearning: "回炉中",
+    longTermReview: "长期复习",
+  } satisfies Record<LightweightProblemDetailDto["lifecycle"]["learningStatus"], string>;
+  return labels[status];
+}
+
+function lifecycleActionLabel(action: ProblemLifecycleActionDto): string {
+  const labels = {
+    joinUpsolve: "加入补题",
+    startLearning: "开始学习",
+    returnToPending: "放回待补",
+    markUnderstood: "我已经补懂",
+    withdrawUnderstood: "撤回补懂",
+    startRelearning: "重新学习",
+    stopLearning: "停止学习此题",
+  } satisfies Record<ProblemLifecycleActionDto, string>;
+  return labels[action];
 }
 
 function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string, string>): string {
@@ -609,7 +742,46 @@ function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string,
       element.rel = "noreferrer noopener";
     }
   }
+  renderCodeforcesMath(document);
   return document.body.innerHTML;
+}
+
+function renderCodeforcesMath(document: Document): void {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (node.data.includes("$$$") && !node.parentElement?.closest("pre, code, .katex")) {
+      textNodes.push(node);
+    }
+  }
+
+  for (const node of textNodes) {
+    const source = node.data;
+    const pattern = /\$\$\$([\s\S]+?)\$\$\$/g;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let rendered = false;
+    for (const match of source.matchAll(pattern)) {
+      const start = match.index ?? 0;
+      fragment.append(source.slice(cursor, start));
+      const formula = document.createElement("span");
+      formula.className = "codeforces-math";
+      formula.innerHTML = katex.renderToString(match[1], {
+        displayMode: source.trim() === match[0],
+        strict: "ignore",
+        throwOnError: false,
+        trust: false,
+      });
+      fragment.append(formula);
+      cursor = start + match[0].length;
+      rendered = true;
+    }
+    if (rendered) {
+      fragment.append(source.slice(cursor));
+      node.replaceWith(fragment);
+    }
+  }
 }
 
 function NotFoundContent({ pathname, navigate }: { pathname: string; navigate: Navigate }) {

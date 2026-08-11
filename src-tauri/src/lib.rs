@@ -40,6 +40,8 @@ pub fn run() {
             ipc::lightweight_problems,
             ipc::lightweight_problem_detail,
             ipc::create_personal_note,
+            ipc::transition_problem_lifecycle,
+            ipc::delete_personal_note,
             ipc::personal_note_projection,
             ipc::open_personal_note_in_obsidian,
             ipc::statement_assets,

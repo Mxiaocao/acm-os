@@ -226,12 +226,94 @@ pub struct LightweightProblemDetail {
     pub statement: StatementReadState,
     pub identity_type: ProblemIdentityType,
     pub personal_note: Option<PersonalNoteBinding>,
+    pub lifecycle: ProblemLifecycleState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProblemIdentityType {
     Lightweight,
     Personal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveReviewCycle {
+    pub cycle_number: u32,
+    pub stage: u32,
+    pub schedule_rule_version: u32,
+    pub next_due_local_date: acm_os_domain::LocalDate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemLifecycleState {
+    pub identity_type: ProblemIdentityType,
+    pub learning_status: acm_os_domain::LearningStatus,
+    pub learning_status_since_utc: String,
+    pub active_review_cycle: Option<ActiveReviewCycle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemLifecycleError {
+    ProblemNotFound,
+    NotPersonal,
+    InvalidTransition,
+    InvalidLocalDate,
+    IntegrityViolation,
+    PersistenceUnavailable,
+}
+
+impl ProblemLifecycleError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::InvalidTransition => "invalid_lifecycle_transition",
+            Self::InvalidLocalDate => "invalid_local_date",
+            Self::IntegrityViolation => "lifecycle_integrity_violation",
+            Self::PersistenceUnavailable => "lifecycle_persistence_unavailable",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ProblemLifecyclePort {
+    async fn load_problem_lifecycle(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
+
+    async fn commit_problem_lifecycle_decision(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        decision: acm_os_domain::ProblemLifecycleDecision,
+        first_due: Option<acm_os_domain::LocalDate>,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
+}
+
+pub async fn transition_problem_lifecycle<P: ProblemLifecyclePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    action: acm_os_domain::ProblemLifecycleAction,
+    today: acm_os_domain::LocalDate,
+) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+    if action == acm_os_domain::ProblemLifecycleAction::DeletePersonalNote {
+        return Err(ProblemLifecycleError::InvalidTransition);
+    }
+    let current = port.load_problem_lifecycle(problem).await?;
+    if current.identity_type != ProblemIdentityType::Personal {
+        return Err(ProblemLifecycleError::NotPersonal);
+    }
+    let decision = acm_os_domain::ProblemLifecycleEngine::decide(current.learning_status, action)
+        .map_err(|_| ProblemLifecycleError::InvalidTransition)?;
+    let first_due = match decision.review_cycle {
+        acm_os_domain::ReviewCycleDirective::StartFirstColdStart => Some(
+            acm_os_domain::ReviewSchedulingEngine::first_cold_start_due(today)
+                .map_err(|_| ProblemLifecycleError::InvalidLocalDate)?,
+        ),
+        acm_os_domain::ReviewCycleDirective::None
+        | acm_os_domain::ReviewCycleDirective::CancelActive => None,
+    };
+    port.commit_problem_lifecycle_decision(problem, decision, first_due)
+        .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -489,6 +571,79 @@ pub async fn create_personal_note<P: PersonalNotePort>(
         Err(error) => match port.discard_created_personal_note(&file).await {
             Ok(()) => Err(error),
             Err(_) => Err(PersonalNoteError::CompensationFailed),
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPersonalNoteDeletion {
+    pub vault_relative_path: String,
+    pub content_digest: String,
+    pub recovery_copy_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalNoteDeletionError {
+    ProblemNotFound,
+    NotPersonal,
+    BindingUnavailable,
+    LocationAnomaly,
+    VaultUnavailable,
+    ConcurrentModification,
+    RecoveryCopyFailed,
+    FileDeleteFailed,
+    PersistenceUnavailable,
+    CompensationFailed,
+    IntegrityViolation,
+}
+
+impl PersonalNoteDeletionError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::BindingUnavailable => "note_binding_unavailable",
+            Self::LocationAnomaly => "note_location_anomaly",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::ConcurrentModification => "markdown_concurrent_modification",
+            Self::RecoveryCopyFailed => "markdown_recovery_copy_failed",
+            Self::FileDeleteFailed => "note_delete_failed",
+            Self::PersistenceUnavailable => "note_persistence_unavailable",
+            Self::CompensationFailed => "note_delete_compensation_failed",
+            Self::IntegrityViolation => "note_delete_integrity_violation",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PersonalNoteDeletionPort {
+    async fn prepare_personal_note_deletion(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError>;
+
+    async fn commit_personal_note_deletion(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError>;
+
+    async fn restore_deleted_personal_note(
+        &self,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<(), PersonalNoteDeletionError>;
+}
+
+pub async fn delete_personal_note<P: PersonalNoteDeletionPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+    let prepared = port.prepare_personal_note_deletion(problem).await?;
+    match port.commit_personal_note_deletion(problem, &prepared).await {
+        Ok(state) => Ok(state),
+        Err(error) => match port.restore_deleted_personal_note(&prepared).await {
+            Ok(()) => Err(error),
+            Err(_) => Err(PersonalNoteDeletionError::CompensationFailed),
         },
     }
 }
@@ -955,6 +1110,39 @@ mod tests {
         discarded: Cell<bool>,
     }
 
+    struct FailingPersonalNoteDeletionCommit {
+        restored: Cell<bool>,
+    }
+
+    impl PersonalNoteDeletionPort for FailingPersonalNoteDeletionCommit {
+        async fn prepare_personal_note_deletion(
+            &self,
+            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+        ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
+            Ok(PreparedPersonalNoteDeletion {
+                vault_relative_path: "Problems/CF-1979-A.md".to_owned(),
+                content_digest: "0".repeat(64),
+                recovery_copy_path: "private/recovery.md".to_owned(),
+            })
+        }
+
+        async fn commit_personal_note_deletion(
+            &self,
+            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _prepared: &PreparedPersonalNoteDeletion,
+        ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+            Err(PersonalNoteDeletionError::PersistenceUnavailable)
+        }
+
+        async fn restore_deleted_personal_note(
+            &self,
+            _prepared: &PreparedPersonalNoteDeletion,
+        ) -> Result<(), PersonalNoteDeletionError> {
+            self.restored.set(true);
+            Ok(())
+        }
+    }
+
     impl PersonalNotePort for FailingPersonalNoteCommit {
         async fn personal_note_creation_context(
             &self,
@@ -1112,6 +1300,20 @@ mod tests {
             Err(PersonalNoteError::PersistenceUnavailable)
         );
         assert!(port.discarded.get());
+    }
+
+    #[test]
+    fn personal_note_deletion_restores_the_file_when_system_fact_commit_fails() {
+        let port = FailingPersonalNoteDeletionCommit {
+            restored: Cell::new(false),
+        };
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest_identity(), "A")
+            .expect("problem");
+        assert_eq!(
+            run_ready(delete_personal_note(&port, &problem)),
+            Err(PersonalNoteDeletionError::PersistenceUnavailable)
+        );
+        assert!(port.restored.get());
     }
 
     fn test_path(windows: &str, unix: &str) -> String {

@@ -44,6 +44,31 @@ export interface LightweightProblemDetailDto {
   statement: StatementReadStateDto;
   identityType: "lightweight" | "personal";
   personalNote: PersonalNoteBindingDto | null;
+  lifecycle: ProblemLifecycleStateDto;
+}
+
+export type LearningStatusDto =
+  | "unstarted"
+  | "upsolvePending"
+  | "learning"
+  | "waitingColdStart"
+  | "relearning"
+  | "longTermReview";
+
+export type ProblemLifecycleActionDto =
+  | "joinUpsolve"
+  | "startLearning"
+  | "returnToPending"
+  | "markUnderstood"
+  | "withdrawUnderstood"
+  | "startRelearning"
+  | "stopLearning";
+
+export interface ProblemLifecycleStateDto {
+  learningStatus: LearningStatusDto;
+  learningStatusSinceUtc: string;
+  nextReviewDueLocalDate: string | null;
+  availableActions: ProblemLifecycleActionDto[];
 }
 
 export interface PersonalNoteBindingDto {
@@ -115,6 +140,22 @@ export function getLightweightProblemDetail(contestId: number, index: string): P
 
 export function createPersonalNote(contestId: number, index: string): Promise<PersonalNoteBindingDto> {
   return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
+}
+
+export function transitionProblemLifecycle(
+  contestId: number,
+  index: string,
+  action: ProblemLifecycleActionDto,
+): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("transition_problem_lifecycle", {
+    input: { contestId, index, action },
+  });
+}
+
+export function deletePersonalNote(contestId: number, index: string): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("delete_personal_note", {
+    input: { contestId, index },
+  });
 }
 
 export function getPersonalNoteProjection(contestId: number, index: string): Promise<PersonalNoteReadStateDto> {

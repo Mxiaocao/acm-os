@@ -14,9 +14,11 @@ pub fn locate_public_contest(url: &str) -> Result<CodeforcesContestIdentity, Cod
         .strip_prefix("https://codeforces.com/contest/")
         .or_else(|| trimmed.strip_prefix("https://www.codeforces.com/contest/"))
         .ok_or(CodeforcesLocatorError::UnsupportedUrl)?;
-    let contest_id = rest
-        .strip_suffix('/')
-        .filter(|value| !value.is_empty() && !value.contains('/') && value.bytes().all(|byte| byte.is_ascii_digit()))
+    let contest_id_text = rest.strip_suffix('/').unwrap_or(rest);
+    let contest_id = (!contest_id_text.is_empty()
+        && !contest_id_text.contains('/')
+        && contest_id_text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(contest_id_text)
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or(CodeforcesLocatorError::UnsupportedUrl)?;
     CodeforcesContestIdentity::new(contest_id).map_err(|_| CodeforcesLocatorError::UnsupportedUrl)
@@ -31,6 +33,10 @@ mod tests {
         assert_eq!(
             locate_public_contest(" https://codeforces.com/contest/1979/ "),
             Ok(CodeforcesContestIdentity::new(1979).expect("valid id"))
+        );
+        assert_eq!(
+            locate_public_contest("https://codeforces.com/contest/2256"),
+            Ok(CodeforcesContestIdentity::new(2256).expect("valid id"))
         );
         for value in [
             "http://codeforces.com/contest/1979",

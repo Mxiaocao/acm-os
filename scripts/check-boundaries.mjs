@@ -5,12 +5,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const EXPECTED_RUST_DEPENDENCIES = {
-  "acm-os-domain": [],
+  "acm-os-domain": ["normal:chrono"],
   "acm-os-application": ["normal:acm-os-domain"],
   "acm-os-infrastructure": [
     "dev:tokio",
     "normal:acm-os-application",
     "normal:acm-os-domain",
+    "normal:chrono",
     "normal:pulldown-cmark",
     "normal:reqwest",
     "normal:rustls",
@@ -21,6 +22,7 @@ const EXPECTED_RUST_DEPENDENCIES = {
     "normal:sqlx",
     "normal:tempfile",
     "normal:tokio",
+    "normal:uuid",
   ],
   "acm-os": [
     "build:tauri-build",
@@ -44,7 +46,7 @@ const REQUIRED_LOCAL_RUST_DEPENDENCIES = {
 };
 
 const EXPECTED_FRONTEND_DEPENDENCIES = {
-  dependencies: ["@tauri-apps/api", "react", "react-dom"],
+  dependencies: ["@tauri-apps/api", "katex", "react", "react-dom"],
   devDependencies: [
     "@tauri-apps/cli",
     "@types/react",

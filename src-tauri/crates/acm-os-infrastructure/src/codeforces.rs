@@ -34,6 +34,7 @@ pub struct FixtureAsset {
 
 const STATEMENT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const ASSET_MAX_BYTES: usize = 4 * 1024 * 1024;
+const CONTEST_METADATA_MAX_BYTES: usize = 512 * 1024;
 const CODEFORCES_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The real network adapter accepts strong identities only. It constructs each
@@ -71,7 +72,19 @@ impl CodeforcesHttpAdapter {
         &self,
         contest: &CodeforcesContestIdentity,
     ) -> Result<String, CodeforcesHttpError> {
-        self.fetch_text(&contest_api_url(contest), STATEMENT_MAX_BYTES).await
+        let mut response = self.send(&contest_api_url(contest)).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| CodeforcesHttpError::RequestFailed)? {
+            let next_size = body.len().checked_add(chunk.len()).ok_or(CodeforcesHttpError::ResponseTooLarge)?;
+            if next_size > CONTEST_METADATA_MAX_BYTES {
+                return Err(CodeforcesHttpError::ResponseTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+            if let Some(metadata) = standings_metadata_without_rows(&body) {
+                return String::from_utf8(metadata).map_err(|_| CodeforcesHttpError::InvalidUtf8);
+            }
+        }
+        String::from_utf8(body).map_err(|_| CodeforcesHttpError::InvalidUtf8)
     }
 
     pub async fn fetch_problem_statement(
@@ -97,6 +110,18 @@ impl CodeforcesHttpAdapter {
     }
 
     async fn fetch_bytes(&self, url: &str, maximum: usize) -> Result<Vec<u8>, CodeforcesHttpError> {
+        let response = self.send(url).await?;
+        if response.content_length().is_some_and(|size| size > maximum as u64) {
+            return Err(CodeforcesHttpError::ResponseTooLarge);
+        }
+        let bytes = response.bytes().await.map_err(|_| CodeforcesHttpError::RequestFailed)?;
+        if bytes.len() > maximum {
+            return Err(CodeforcesHttpError::ResponseTooLarge);
+        }
+        Ok(bytes.to_vec())
+    }
+
+    async fn send(&self, url: &str) -> Result<reqwest::Response, CodeforcesHttpError> {
         let response = self.client.get(url).send().await.map_err(|_| CodeforcesHttpError::RequestFailed)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -107,15 +132,66 @@ impl CodeforcesHttpAdapter {
                 .unwrap_or_else(|_| "response body unavailable".to_owned());
             return Err(CodeforcesHttpError::UnexpectedStatus { status, diagnostic });
         }
-        if response.content_length().is_some_and(|size| size > maximum as u64) {
-            return Err(CodeforcesHttpError::ResponseTooLarge);
-        }
-        let bytes = response.bytes().await.map_err(|_| CodeforcesHttpError::RequestFailed)?;
-        if bytes.len() > maximum {
-            return Err(CodeforcesHttpError::ResponseTooLarge);
-        }
-        Ok(bytes.to_vec())
+        Ok(response)
     }
+}
+
+/// Codeforces places `contest` and `problems` before an unbounded `rows` array.
+/// ACM-OS needs only the manifest fields, so stop at that top-level result key
+/// instead of downloading every participant's standings row.
+fn standings_metadata_without_rows(body: &[u8]) -> Option<Vec<u8>> {
+    let mut object_depth = 0usize;
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        match body[cursor] {
+            b'{' => {
+                object_depth += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                object_depth = object_depth.checked_sub(1)?;
+                cursor += 1;
+            }
+            b'"' => {
+                let start = cursor + 1;
+                cursor = start;
+                let mut escaped = false;
+                while cursor < body.len() {
+                    let byte = body[cursor];
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                if cursor == body.len() {
+                    return None;
+                }
+                if object_depth == 2 && &body[start..cursor] == b"rows" {
+                    let mut colon = cursor + 1;
+                    while colon < body.len() && body[colon].is_ascii_whitespace() {
+                        colon += 1;
+                    }
+                    if colon == body.len() {
+                        return None;
+                    }
+                    if body[colon] != b':' {
+                        cursor += 1;
+                        continue;
+                    }
+                    let mut metadata = body[..=colon].to_vec();
+                    metadata.extend_from_slice(b"[]}}");
+                    return Some(metadata);
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
 }
 
 impl ContestImportSource for CodeforcesHttpAdapter {
@@ -351,7 +427,10 @@ fn trusted_asset_url(source: &str) -> Result<String, FixtureAdapterError> {
     if source.starts_with('/') {
         return Ok(format!("https://codeforces.com{source}"));
     }
-    if source.starts_with("https://codeforces.com/") || source.starts_with("https://www.codeforces.com/") {
+    if source.starts_with("https://codeforces.com/")
+        || source.starts_with("https://www.codeforces.com/")
+        || source.starts_with("https://espresso.codeforces.com/")
+    {
         return Ok(source.to_owned());
     }
     Err(FixtureAdapterError::UnsafeAssetUrl(source.to_owned()))
@@ -361,7 +440,10 @@ fn trusted_asset_url_http(source: &str) -> Result<String, CodeforcesHttpError> {
     if source.starts_with('/') {
         return Ok(format!("https://codeforces.com{source}"));
     }
-    if source.starts_with("https://codeforces.com/") || source.starts_with("https://www.codeforces.com/") {
+    if source.starts_with("https://codeforces.com/")
+        || source.starts_with("https://www.codeforces.com/")
+        || source.starts_with("https://espresso.codeforces.com/")
+    {
         return Ok(source.to_owned());
     }
     Err(CodeforcesHttpError::UnsafeAssetUrl(source.to_owned()))
@@ -478,6 +560,14 @@ mod tests {
             Ok("https://codeforces.com/predownloaded/asset.png".to_owned())
         );
         assert_eq!(
+            trusted_asset_url_http("https://espresso.codeforces.com/asset.png"),
+            Ok("https://espresso.codeforces.com/asset.png".to_owned())
+        );
+        assert_eq!(
+            trusted_asset_url_http("https://espresso.codeforces.com.evil.example/asset.png"),
+            Err(CodeforcesHttpError::UnsafeAssetUrl("https://espresso.codeforces.com.evil.example/asset.png".to_owned()))
+        );
+        assert_eq!(
             trusted_asset_url_http("https://evil.example/asset.png"),
             Err(CodeforcesHttpError::UnsafeAssetUrl("https://evil.example/asset.png".to_owned()))
         );
@@ -485,8 +575,8 @@ mod tests {
 
     #[test]
     fn statement_asset_urls_normalize_and_deduplicate_codeforces_sources() {
-        let html = "<div class=\"problem-statement\"><img src=\"/x.png\"><img src=\"/x.png\"></div>";
-        assert_eq!(statement_asset_urls(html), vec!["https://codeforces.com/x.png"]);
+        let html = "<div class=\"problem-statement\"><img src=\"/x.png\"><img src=\"/x.png\"><img src=\"https://espresso.codeforces.com/y.png\"></div>";
+        assert_eq!(statement_asset_urls(html), vec!["https://codeforces.com/x.png", "https://espresso.codeforces.com/y.png"]);
         assert!(statement_asset_urls("<img src=\"https://evil.example/x.png\">").is_empty());
     }
 
@@ -499,15 +589,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn standings_metadata_stops_before_unbounded_participant_rows() {
+        let prefix = br#"{"status":"OK","result":{"contest":{"id":1979,"name":"Round","startTimeSeconds":1710000000},"problems":[{"contestId":1979,"index":"A","name":"Arrow rows are harmless","rating":800}],"ro"#;
+        assert_eq!(standings_metadata_without_rows(prefix), None);
+
+        let response = br#"{"status":"OK","result":{"contest":{"id":1979,"name":"Round","startTimeSeconds":1710000000},"problems":[{"contestId":1979,"index":"A","name":"Arrow rows are harmless","rating":800}],"rows":[{"party":{"contestId":1979},"points":1},{"party":{"contestId":1979},"points":2}]}}"#;
+        let metadata = standings_metadata_without_rows(response).expect("manifest prefix");
+        let metadata = String::from_utf8(metadata).expect("UTF-8 metadata");
+        assert!(!metadata.contains("party"));
+        let manifest = manifest_from_api_json(contest(), &metadata).expect("manifest");
+        assert_eq!(manifest.slots.len(), 1);
+        assert_eq!(manifest.slots[0].problem.index(), "A");
+    }
+
     #[tokio::test]
     #[ignore = "release-only real Codeforces smoke; requires live network"]
     async fn real_codeforces_metadata_smoke() {
         let adapter = CodeforcesHttpAdapter::new().expect("HTTP adapter");
-        // Contest 1 is a long-lived public contest used only for this release
-        // smoke. Fixture contracts intentionally keep their own stable ID.
-        let contest = CodeforcesContestIdentity::new(1).expect("contest identity");
+        // Contest 2256 reproduces the large unbounded standings response that
+        // must be truncated after the manifest fields during release smoke.
+        let contest = CodeforcesContestIdentity::new(2256).expect("contest identity");
         let metadata = adapter.fetch_contest_metadata(&contest).await.expect("Codeforces metadata");
         assert!(metadata.contains("\"status\":\"OK\""));
-        assert!(metadata.contains("\"contestId\":1"));
+        assert!(metadata.contains("\"contestId\":2256"));
+        assert!(!metadata.contains("\"party\""));
+
+        let problem = CodeforcesProblemIdentity::new(contest, "C").expect("problem identity");
+        let snapshot = adapter.fetch_snapshot(&problem).await.expect("Codeforces 2256C snapshot");
+        assert!(snapshot.sanitized_html.contains("acm-os-asset://codeforces/2256/C/1"));
+        assert!(!snapshot.assets.is_empty());
     }
 }

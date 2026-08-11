@@ -13,7 +13,9 @@ use acm_os_application::{
     ExtraProblemLinkTarget, PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError,
     PersonalNotePatchError, PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError,
     PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
-    ProblemIdentityType, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
+    PersonalNoteDeletionError, PersonalNoteDeletionPort, PreparedPersonalNoteDeletion,
+    ProblemIdentityType, ActiveReviewCycle, ProblemLifecycleError, ProblemLifecyclePort,
+    ProblemLifecycleState, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
     StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
@@ -142,6 +144,469 @@ fn resolved_binding(resolved: &ResolvedNoteFile) -> PersonalNoteBinding {
         vault_relative_path: resolved.relative_path.clone(),
         content_digest: resolved.content_digest.clone(),
         windows_file_key: resolved.windows_file_key.clone(),
+    }
+}
+
+impl ProblemLifecyclePort for DatabaseRuntime {
+    async fn load_problem_lifecycle(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        let row: Option<(
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT p.identity_type, pls.learning_status, pls.learning_status_since_utc, \
+                    rc.cycle_number, rc.stage, rc.schedule_rule_version, rc.next_due_local_date \
+             FROM problems p \
+             LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+             WHERE p.platform = 'codeforces' \
+               AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(ProblemLifecycleError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        let (identity_type, status, since, cycle_number, stage, rule_version, due) =
+            row.ok_or(ProblemLifecycleError::ProblemNotFound)?;
+        let identity_type = parse_problem_identity_type(&identity_type)
+            .map_err(|_| ProblemLifecycleError::IntegrityViolation)?;
+        let learning_status = parse_learning_status(&status)?;
+        if since.is_empty() {
+            return Err(ProblemLifecycleError::IntegrityViolation);
+        }
+        let active_review_cycle = match (cycle_number, stage, rule_version, due) {
+            (None, None, None, None) => None,
+            (Some(cycle_number), Some(stage), Some(rule_version), Some(due)) => {
+                Some(ActiveReviewCycle {
+                    cycle_number: u32::try_from(cycle_number)
+                        .map_err(|_| ProblemLifecycleError::IntegrityViolation)?,
+                    stage: u32::try_from(stage)
+                        .map_err(|_| ProblemLifecycleError::IntegrityViolation)?,
+                    schedule_rule_version: u32::try_from(rule_version)
+                        .map_err(|_| ProblemLifecycleError::IntegrityViolation)?,
+                    next_due_local_date: acm_os_domain::LocalDate::parse_iso(&due)
+                        .map_err(|_| ProblemLifecycleError::IntegrityViolation)?,
+                })
+            }
+            _ => return Err(ProblemLifecycleError::IntegrityViolation),
+        };
+        if (learning_status == acm_os_domain::LearningStatus::WaitingColdStart)
+            != active_review_cycle.is_some()
+        {
+            return Err(ProblemLifecycleError::IntegrityViolation);
+        }
+        Ok(ProblemLifecycleState {
+            identity_type,
+            learning_status,
+            learning_status_since_utc: since,
+            active_review_cycle,
+        })
+    }
+
+    async fn commit_problem_lifecycle_decision(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        decision: acm_os_domain::ProblemLifecycleDecision,
+        first_due: Option<acm_os_domain::LocalDate>,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        use acm_os_domain::ReviewCycleDirective::{CancelActive, None, StartFirstColdStart};
+
+        if (decision.review_cycle == StartFirstColdStart) != first_due.is_some() {
+            return Err(ProblemLifecycleError::IntegrityViolation);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemLifecycleError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        let row: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, pls.learning_status \
+             FROM problems p \
+             LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             WHERE p.platform = 'codeforces' \
+               AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        let (problem_id, identity_type, current_status) =
+            row.ok_or(ProblemLifecycleError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(ProblemLifecycleError::NotPersonal);
+        }
+        if parse_learning_status(&current_status)? != decision.previous_status {
+            return Err(ProblemLifecycleError::InvalidTransition);
+        }
+
+        match decision.review_cycle {
+            StartFirstColdStart => {
+                let cycle_number: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(cycle_number), 0) + 1 FROM review_cycles WHERE problem_id = ?1",
+                )
+                .bind(problem_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+                sqlx::query(
+                    "INSERT INTO review_cycles \
+                        (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) \
+                     VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(problem_id)
+                .bind(cycle_number)
+                .bind(i64::from(acm_os_domain::ReviewSchedulingEngine::SCHEDULE_RULE_VERSION))
+                .bind(first_due.expect("validated first due").to_iso_string())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+                        ProblemLifecycleError::IntegrityViolation
+                    } else {
+                        ProblemLifecycleError::PersistenceUnavailable
+                    }
+                })?;
+            }
+            CancelActive => {
+                let result = sqlx::query(
+                    "UPDATE review_cycles \
+                     SET cycle_status = 'cancelled', next_due_local_date = NULL, \
+                         ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE problem_id = ?1 AND cycle_status = 'active'",
+                )
+                .bind(problem_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+                if decision.previous_status == acm_os_domain::LearningStatus::WaitingColdStart
+                    && result.rows_affected() != 1
+                {
+                    return Err(ProblemLifecycleError::IntegrityViolation);
+                }
+            }
+            None => {}
+        }
+
+        let update = sqlx::query(
+            "UPDATE problem_learning_states \
+             SET learning_status = ?1, \
+                 learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?2 AND learning_status = ?3",
+        )
+        .bind(learning_status_value(decision.next_status))
+        .bind(problem_id)
+        .bind(learning_status_value(decision.previous_status))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        if update.rows_affected() != 1 {
+            return Err(ProblemLifecycleError::InvalidTransition);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        self.load_problem_lifecycle(problem).await
+    }
+}
+
+fn parse_learning_status(value: &str) -> Result<acm_os_domain::LearningStatus, ProblemLifecycleError> {
+    match value {
+        "unstarted" => Ok(acm_os_domain::LearningStatus::Unstarted),
+        "upsolve_pending" => Ok(acm_os_domain::LearningStatus::UpsolvePending),
+        "learning" => Ok(acm_os_domain::LearningStatus::Learning),
+        "waiting_cold_start" => Ok(acm_os_domain::LearningStatus::WaitingColdStart),
+        "relearning" => Ok(acm_os_domain::LearningStatus::Relearning),
+        "long_term_review" => Ok(acm_os_domain::LearningStatus::LongTermReview),
+        _ => Err(ProblemLifecycleError::IntegrityViolation),
+    }
+}
+
+fn learning_status_value(value: acm_os_domain::LearningStatus) -> &'static str {
+    match value {
+        acm_os_domain::LearningStatus::Unstarted => "unstarted",
+        acm_os_domain::LearningStatus::UpsolvePending => "upsolve_pending",
+        acm_os_domain::LearningStatus::Learning => "learning",
+        acm_os_domain::LearningStatus::WaitingColdStart => "waiting_cold_start",
+        acm_os_domain::LearningStatus::Relearning => "relearning",
+        acm_os_domain::LearningStatus::LongTermReview => "long_term_review",
+    }
+}
+
+impl PersonalNoteDeletionPort for DatabaseRuntime {
+    async fn prepare_personal_note_deletion(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
+        let binding = match self.read_personal_note_projection(problem).await {
+            Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
+            Ok(PersonalNoteReadState::LocationAnomaly { .. }) => {
+                return Err(PersonalNoteDeletionError::LocationAnomaly)
+            }
+            Ok(PersonalNoteReadState::VaultUnavailable { .. }) => {
+                return Err(PersonalNoteDeletionError::VaultUnavailable)
+            }
+            Err(PersonalNoteReadError::ProblemNotFound) => {
+                return Err(PersonalNoteDeletionError::ProblemNotFound)
+            }
+            Err(PersonalNoteReadError::NotPersonal) => {
+                return Err(PersonalNoteDeletionError::NotPersonal)
+            }
+            Err(PersonalNoteReadError::BindingUnavailable) => {
+                return Err(PersonalNoteDeletionError::BindingUnavailable)
+            }
+            Err(PersonalNoteReadError::FileReadFailed) => {
+                return Err(PersonalNoteDeletionError::VaultUnavailable)
+            }
+            Err(PersonalNoteReadError::InvalidUtf8) => {
+                return Err(PersonalNoteDeletionError::IntegrityViolation)
+            }
+            Err(PersonalNoteReadError::PersistenceUnavailable) => {
+                return Err(PersonalNoteDeletionError::PersistenceUnavailable)
+            }
+        };
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?
+            .ok_or(PersonalNoteDeletionError::VaultUnavailable)?;
+        let vault = std::fs::canonicalize(workspace.active_vault_path())
+            .map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        let target = std::fs::canonicalize(vault.join(&binding.vault_relative_path))
+            .map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        if !target.starts_with(&vault) || !target.is_file() {
+            return Err(PersonalNoteDeletionError::BindingUnavailable);
+        }
+        let bytes = std::fs::read(&target)
+            .map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        if sha256_hex(&bytes) != binding.content_digest {
+            return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+
+        let recovery_root = self
+            .recovery_root
+            .as_ref()
+            .ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let recovery_key = format!(
+            "{}:{}:{}",
+            problem.contest().platform(),
+            problem.contest().contest_id(),
+            problem.index()
+        );
+        let bucket = recovery_root
+            .join("deleted-personal-notes")
+            .join(sha256_hex(recovery_key.as_bytes()));
+        std::fs::create_dir_all(&bucket)
+            .map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?
+            .as_nanos();
+        let recovery_copy = bucket.join(format!("{timestamp}-{}.md", binding.content_digest));
+        let mut copy = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&recovery_copy)
+            .map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+        copy.write_all(&bytes)
+            .and_then(|_| copy.sync_all())
+            .map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+
+        let final_bytes = std::fs::read(&target)
+            .map_err(|_| PersonalNoteDeletionError::ConcurrentModification)?;
+        if sha256_hex(&final_bytes) != binding.content_digest {
+            return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+        std::fs::remove_file(&target)
+            .map_err(|_| PersonalNoteDeletionError::FileDeleteFailed)?;
+        match target.try_exists() {
+            Ok(false) => {}
+            Ok(true) => return Err(PersonalNoteDeletionError::ConcurrentModification),
+            Err(_) => {
+                restore_exact_file(&target, &bytes)
+                    .map_err(|_| PersonalNoteDeletionError::CompensationFailed)?;
+                return Err(PersonalNoteDeletionError::FileDeleteFailed);
+            }
+        }
+        Ok(PreparedPersonalNoteDeletion {
+            vault_relative_path: binding.vault_relative_path,
+            content_digest: binding.content_digest,
+            recovery_copy_path: recovery_copy.to_string_lossy().into_owned(),
+        })
+    }
+
+    async fn commit_personal_note_deletion(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let row: Option<(i64, String, String, String, String)> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, pls.learning_status, \
+                    fb.vault_relative_path, fb.content_digest \
+             FROM problems p \
+             LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             WHERE p.platform = 'codeforces' \
+               AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let (problem_id, identity_type, status, relative_path, digest) =
+            row.ok_or(PersonalNoteDeletionError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(PersonalNoteDeletionError::NotPersonal);
+        }
+        if relative_path != prepared.vault_relative_path || digest != prepared.content_digest {
+            return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+        let status = parse_learning_status(&status).map_err(map_lifecycle_to_deletion_error)?;
+        let decision = acm_os_domain::ProblemLifecycleEngine::decide(
+            status,
+            acm_os_domain::ProblemLifecycleAction::DeletePersonalNote,
+        )
+        .map_err(|_| PersonalNoteDeletionError::IntegrityViolation)?;
+
+        sqlx::query(
+            "UPDATE review_cycles \
+             SET cycle_status = 'cancelled', next_due_local_date = NULL, \
+                 ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?1 AND cycle_status = 'active'",
+        )
+        .bind(problem_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let learning_status_since_utc: Option<String> = sqlx::query_scalar(
+            "UPDATE problem_learning_states \
+             SET learning_status = 'unstarted', \
+                 learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?1 AND learning_status = ?2 \
+             RETURNING learning_status_since_utc",
+        )
+        .bind(problem_id)
+        .bind(learning_status_value(decision.previous_status))
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let learning_status_since_utc = learning_status_since_utc
+            .ok_or(PersonalNoteDeletionError::ConcurrentModification)?;
+        let binding_delete = sqlx::query(
+            "DELETE FROM file_bindings \
+             WHERE problem_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3",
+        )
+        .bind(problem_id)
+        .bind(&prepared.vault_relative_path)
+        .bind(&prepared.content_digest)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if binding_delete.rows_affected() != 1 {
+            return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+        let identity_update = sqlx::query(
+            "UPDATE problems SET identity_type = 'lightweight' \
+             WHERE id = ?1 AND identity_type = 'personal'",
+        )
+        .bind(problem_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if identity_update.rows_affected() != 1 {
+            return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        Ok(ProblemLifecycleState {
+            identity_type: ProblemIdentityType::Lightweight,
+            learning_status: acm_os_domain::LearningStatus::Unstarted,
+            learning_status_since_utc,
+            active_review_cycle: None,
+        })
+    }
+
+    async fn restore_deleted_personal_note(
+        &self,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<(), PersonalNoteDeletionError> {
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| PersonalNoteDeletionError::CompensationFailed)?
+            .ok_or(PersonalNoteDeletionError::CompensationFailed)?;
+        let vault = std::fs::canonicalize(workspace.active_vault_path())
+            .map_err(|_| PersonalNoteDeletionError::CompensationFailed)?;
+        let target = vault.join(&prepared.vault_relative_path);
+        if !target.starts_with(&vault)
+            || target
+                .try_exists()
+                .map_err(|_| PersonalNoteDeletionError::CompensationFailed)?
+        {
+            return Err(PersonalNoteDeletionError::CompensationFailed);
+        }
+        let bytes = std::fs::read(&prepared.recovery_copy_path)
+            .map_err(|_| PersonalNoteDeletionError::CompensationFailed)?;
+        if sha256_hex(&bytes) != prepared.content_digest {
+            return Err(PersonalNoteDeletionError::CompensationFailed);
+        }
+        restore_exact_file(&target, &bytes)
+            .map_err(|_| PersonalNoteDeletionError::CompensationFailed)
+    }
+}
+
+fn restore_exact_file(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut restored = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(target)?;
+    restored.write_all(bytes)?;
+    restored.sync_all()
+}
+
+fn map_lifecycle_to_deletion_error(error: ProblemLifecycleError) -> PersonalNoteDeletionError {
+    match error {
+        ProblemLifecycleError::ProblemNotFound => PersonalNoteDeletionError::ProblemNotFound,
+        ProblemLifecycleError::NotPersonal => PersonalNoteDeletionError::NotPersonal,
+        ProblemLifecycleError::InvalidTransition
+        | ProblemLifecycleError::InvalidLocalDate
+        | ProblemLifecycleError::IntegrityViolation => {
+            PersonalNoteDeletionError::IntegrityViolation
+        }
+        ProblemLifecycleError::PersistenceUnavailable => {
+            PersonalNoteDeletionError::PersistenceUnavailable
+        }
     }
 }
 
@@ -787,6 +1252,14 @@ impl ContestImportPort for DatabaseRuntime {
                     .await
                     .map_err(|_| ContestImportPersistenceError::Unavailable)?;
                     sqlx::query(
+                        "INSERT INTO problem_learning_states (problem_id) VALUES (?1) \
+                         ON CONFLICT(problem_id) DO NOTHING",
+                    )
+                    .bind(problem_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                    sqlx::query(
                         "INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) VALUES (?1, ?2, ?3, 'pending_snapshot')",
                     )
                     .bind(id)
@@ -980,6 +1453,16 @@ impl ContestReadPort for DatabaseRuntime {
         if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
             return Err(ContestReadError::Unavailable);
         }
+        let lifecycle = self
+            .load_problem_lifecycle(problem)
+            .await
+            .map_err(|error| match error {
+                ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
+                _ => ContestReadError::Unavailable,
+            })?;
+        if lifecycle.identity_type != identity_type {
+            return Err(ContestReadError::Unavailable);
+        }
         Ok(LightweightProblemDetail {
             problem: problem.clone(),
             title,
@@ -991,6 +1474,7 @@ impl ContestReadPort for DatabaseRuntime {
             },
             identity_type,
             personal_note,
+            lifecycle,
         })
     }
 
@@ -1265,7 +1749,7 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2 | 3 | 4) {
+    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
@@ -1329,6 +1813,26 @@ async fn validate_schema_contract(
         ));
         expected_objects.sort();
     }
+    if schema_version >= 5 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "one_active_review_cycle_per_problem".to_owned(),
+                "review_cycles".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_learning_states".to_owned(),
+                "problem_learning_states".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "review_cycles".to_owned(),
+                "review_cycles".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
     if objects != expected_objects {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
@@ -1375,6 +1879,9 @@ async fn validate_schema_contract(
     if schema_version >= 4 {
         validate_personal_note_contract(pool).await?;
     }
+    if schema_version >= 5 {
+        validate_learning_lifecycle_contract(pool).await?;
+    }
 
     Ok(())
 }
@@ -1420,6 +1927,45 @@ async fn validate_personal_note_contract(
     .await
 }
 
+async fn validate_learning_lifecycle_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "problem_learning_states",
+        &["problem_id", "learning_status", "learning_status_since_utc"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "review_cycles",
+        &[
+            "id",
+            "problem_id",
+            "cycle_number",
+            "cycle_status",
+            "stage",
+            "schedule_rule_version",
+            "next_due_local_date",
+            "created_at_utc",
+            "ended_at_utc",
+        ],
+    )
+    .await?;
+    let missing_states: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM problems p \
+         LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+         WHERE pls.problem_id IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if missing_states != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -1432,6 +1978,8 @@ async fn validate_table_columns(
         "problem_statement_snapshots" => "PRAGMA table_xinfo('problem_statement_snapshots')",
         "problem_statement_assets" => "PRAGMA table_xinfo('problem_statement_assets')",
         "file_bindings" => "PRAGMA table_xinfo('file_bindings')",
+        "problem_learning_states" => "PRAGMA table_xinfo('problem_learning_states')",
+        "review_cycles" => "PRAGMA table_xinfo('review_cycles')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -1730,14 +2278,15 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        add_extra_problem_link, configure_workspace, create_personal_note,
+        add_extra_problem_link, configure_workspace, create_personal_note, delete_personal_note,
         import_codeforces_contest,
         query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
         StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
         PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
         WorkspaceConfigurationStatus, WorkspacePathField,
-        ProblemIdentityType, INITIAL_PROBLEM_MARKDOWN,
+        ProblemIdentityType, ProblemLifecyclePort, transition_problem_lifecycle,
+        INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
     use tempfile::TempDir;
@@ -1911,14 +2460,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 4 }
+            &StartupGateStatus::Ready { schema_version: 5 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 4);
+        assert_eq!(ledger_count, 5);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -2038,6 +2587,213 @@ mod tests {
         .await
         .expect("personal note counts");
         assert_eq!(counts, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn learning_lifecycle_persists_first_due_and_survives_restart() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+
+        let initial = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("initial lifecycle");
+        assert_eq!(initial.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert!(initial.active_review_cycle.is_none());
+
+        let pending = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            today,
+        )
+        .await
+        .expect("join upsolve");
+        assert_eq!(pending.learning_status, acm_os_domain::LearningStatus::UpsolvePending);
+
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            today,
+        )
+        .await
+        .expect("start learning");
+        let waiting = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+            today,
+        )
+        .await
+        .expect("mark understood");
+        assert_eq!(
+            waiting.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
+        let cycle = waiting.active_review_cycle.expect("active first cycle");
+        assert_eq!(cycle.cycle_number, 1);
+        assert_eq!(cycle.stage, 0);
+        assert_eq!(cycle.schedule_rule_version, 1);
+        assert_eq!(cycle.next_due_local_date.to_iso_string(), "2026-08-14");
+
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let restored = restarted
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("restored lifecycle");
+        assert_eq!(restored.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+        assert_eq!(
+            restored
+                .active_review_cycle
+                .expect("restored active cycle")
+                .next_due_local_date
+                .to_iso_string(),
+            "2026-08-14"
+        );
+    }
+
+    #[tokio::test]
+    async fn withdraw_and_stop_cancel_schedule_without_touching_personal_identity() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("lifecycle transition");
+        }
+        let learning = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::WithdrawUnderstood,
+            today,
+        )
+        .await
+        .expect("withdraw understood");
+        assert_eq!(learning.learning_status, acm_os_domain::LearningStatus::Learning);
+        assert!(learning.active_review_cycle.is_none());
+
+        let stopped = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StopLearning,
+            today,
+        )
+        .await
+        .expect("stop learning");
+        assert_eq!(stopped.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert_eq!(stopped.identity_type, ProblemIdentityType::Personal);
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contest_problems), \
+                    (SELECT COUNT(*) FROM file_bindings), \
+                    (SELECT COUNT(*) FROM review_cycles WHERE cycle_status = 'cancelled')",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("preserved facts");
+        assert_eq!(counts, (2, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn lightweight_problem_cannot_enter_learning_lifecycle() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        let result = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date"),
+        )
+        .await;
+        assert_eq!(result, Err(ProblemLifecycleError::NotPersonal));
+    }
+
+    #[tokio::test]
+    async fn delete_personal_note_downgrades_problem_and_preserves_history_relations() {
+        let (_directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let note_path = problems.join("CF-1979-A.md");
+        let user_markdown = b"# User-owned title\n\n## \xe9\xa2\x98\xe8\xa7\xa3\n\nMy durable explanation.\n";
+        fs::write(&note_path, user_markdown).expect("external user edit");
+        runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("refresh binding evidence");
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("lifecycle transition");
+        }
+
+        let deleted = delete_personal_note(&runtime, &problem)
+            .await
+            .expect("delete personal note");
+        assert_eq!(deleted.identity_type, ProblemIdentityType::Lightweight);
+        assert_eq!(deleted.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert!(deleted.active_review_cycle.is_none());
+        assert!(!note_path.exists());
+
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contest_problems), \
+                    (SELECT COUNT(*) FROM file_bindings), \
+                    (SELECT COUNT(*) FROM review_cycles), \
+                    (SELECT COUNT(*) FROM review_cycles WHERE cycle_status = 'cancelled')",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("preserved history counts");
+        assert_eq!(counts, (2, 0, 1, 1));
+        let recovery_files = files_under(
+            &runtime
+                .recovery_root
+                .as_ref()
+                .expect("recovery root")
+                .join("deleted-personal-notes"),
+        );
+        assert_eq!(recovery_files.len(), 1);
+        assert_eq!(fs::read(&recovery_files[0]).expect("recovery copy"), user_markdown);
+
+        let recreated = create_personal_note(&runtime, &problem)
+            .await
+            .expect("recreate personal note after explicit deletion");
+        assert_eq!(recreated.vault_relative_path, "Problems/CF-1979-A.md");
+        assert_eq!(
+            fs::read_to_string(note_path).expect("recreated note"),
+            INITIAL_PROBLEM_MARKDOWN
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_personal_note_refuses_vault_unavailable_without_downgrade() {
+        let (_directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        fs::rename(&vault, vault.with_extension("offline")).expect("make vault unavailable");
+
+        let result = delete_personal_note(&runtime, &problem).await;
+        assert_eq!(result, Err(PersonalNoteDeletionError::VaultUnavailable));
+        let detail = runtime
+            .lightweight_problem_detail(&problem)
+            .await
+            .expect("system facts remain available");
+        assert_eq!(detail.identity_type, ProblemIdentityType::Personal);
+        assert_eq!(detail.lifecycle.learning_status, acm_os_domain::LearningStatus::Unstarted);
     }
 
     #[tokio::test]
@@ -2668,13 +3424,13 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 5), \
+                        CHECK (schema_generation < 6), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
             )
-            .await
-            .expect("recreate metadata with hidden constraint");
+                .await
+                .expect("recreate metadata with hidden constraint");
             pool.execute(
                 "INSERT INTO app_metadata SELECT singleton, schema_generation, created_at_utc \
                  FROM app_metadata_old",
@@ -2772,7 +3528,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 4 }
+            &StartupGateStatus::Ready { schema_version: 5 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -2804,7 +3560,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 4 }
+            &StartupGateStatus::Ready { schema_version: 5 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 =
@@ -3130,7 +3886,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 4 }
+            &StartupGateStatus::Ready { schema_version: 5 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

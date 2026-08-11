@@ -9,7 +9,7 @@ import {
 } from "./check-boundaries.mjs";
 
 const validRustPackages = () => [
-  { name: "acm-os-domain", dependencies: [] },
+  { name: "acm-os-domain", dependencies: [{ name: "chrono", kind: null }] },
   {
     name: "acm-os-application",
     dependencies: [{ name: "acm-os-domain", kind: null, path: "local/domain" }],
@@ -19,6 +19,7 @@ const validRustPackages = () => [
     dependencies: [
       { name: "acm-os-application", kind: null, path: "local/application" },
       { name: "acm-os-domain", kind: null, path: "local/domain" },
+      { name: "chrono", kind: null },
       { name: "pulldown-cmark", kind: null },
       { name: "reqwest", kind: null },
       { name: "rustls", kind: null },
@@ -28,6 +29,7 @@ const validRustPackages = () => [
       { name: "sha2", kind: null },
       { name: "sqlx", kind: null },
       { name: "tokio", kind: null },
+      { name: "uuid", kind: null },
       { name: "tempfile", kind: null },
       { name: "tokio", kind: "dev" },
     ],
@@ -53,6 +55,7 @@ const validRustPackages = () => [
 const validFrontendPackage = () => ({
   dependencies: {
     "@tauri-apps/api": "^2",
+    katex: "^0.18.1",
     react: "^19.1.0",
     "react-dom": "^19.1.0",
   },
