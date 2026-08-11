@@ -1,4 +1,4 @@
-# ACM-OS BUILD Handoff — M2.5 implemented / M2 checkpoint pending
+# ACM-OS BUILD Handoff — M2 checkpoint complete
 
 > 更新时间：2026-08-11（Asia/Shanghai）
 >
@@ -36,7 +36,9 @@ M2.1 handoff checkpoint: cec7d6f docs: record M2.1 handoff
 M2.2 checkpoint: 8edc301 build: complete M2.2 fresh markdown read
 M2.3 checkpoint: 6ae1cbf build: complete M2.3 binding resolution
 M2.4 checkpoint: 6b80394 build: complete M2.4 revalidation and Obsidian open
-Working tree: verified M2.5 implementation and handoff changes, pending commit
+M2.5 checkpoint: 091b525 build: complete M2.5 safe patch foundation
+M2 tag:     acm-os-m2-vault-binding → 091b525
+Working tree: clean at M2.5 code checkpoint
 origin/main: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
 M1 tag:     acm-os-m1-contest-import
 Remote tag: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
@@ -56,6 +58,7 @@ cec7d6f docs: record M2.1 handoff
 8edc301 build: complete M2.2 fresh markdown read
 6ae1cbf build: complete M2.3 binding resolution
 6b80394 build: complete M2.4 revalidation and Obsidian open
+091b525 build: complete M2.5 safe patch foundation
 ```
 
 标签：
@@ -63,9 +66,10 @@ cec7d6f docs: record M2.1 handoff
 ```text
 acm-os-m0-foundation    → 42815a8
 acm-os-m1-contest-import → 4e25359
+acm-os-m2-vault-binding → 091b525
 ```
 
-M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2/M2.3/M2.4 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.4。
+M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2/M2.3/M2.4/M2.5 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.5。
 
 ## 3. Current BUILD position
 
@@ -76,12 +80,12 @@ Completed: M2.1 — Create Personal Note + File Binding
 Completed: M2.2 — Fresh Read + Markdown Parser
 Completed: M2.3 — Binding Resolution + Vault Availability
 Completed: M2.4 — Revalidation Triggers + Open in Obsidian
-Completed: M2.5 — Safe Patch + Recovery Copy Foundation (pending commit)
-Next:      commit M2.5 → create acm-os-m2-vault-binding checkpoint → M3 planning
-M2 state:  CODE COMPLETE / CHECKPOINT PENDING
+Completed: M2.5 — Safe Patch + Recovery Copy Foundation
+Next:      M3 planning
+M2 state:  COMPLETE / CHECKPOINT TAGGED
 ```
 
-不要重复实现 M1/M2.1/M2.2/M2.3/M2.4/M2.5。M2.5 未提交且 M2 checkpoint 未确认前，不得进入 M3+。
+不要重复实现 M1/M2.1/M2.2/M2.3/M2.4/M2.5。M2 checkpoint 已由 `acm-os-m2-vault-binding` 封存，下一步进入 M3 planning。
 
 ## 4. M1 closure record
 
@@ -207,7 +211,7 @@ M2.4 没有实现 Safe Patch、Recovery Copy 产品行为或任何 M3 lifecycle�
 
 ## 5.5 M2.5 closure record
 
-M2.5 已实现并完成验证，尚待用户明确允许后 commit：
+M2.5 已实现、完成验证并由提交 `091b525` 封存：
 
 - Application 只暴露 `AddExtraProblemLink` 语义命令；调用者不能传 path、offset、完整 Markdown 或 generic write；
 - link target 在 Application 入口验证，拒绝空值、首尾空白、控制字符、嵌套 `[[...]]` 和 alias 注入；
@@ -231,7 +235,7 @@ M2.5 已实现并完成验证，尚待用户明确允许后 commit：
 - Tauri Debug executable（no bundle）：PASS；
 - `git diff --check`：PASS。
 
-M2.5 没有实现 Candidate 接受 UI、自动 Undo UI、任何 Learning Status/Review/Today 行为或 M3 lifecycle。完整 M2 代码已完成；提交 M2.5 后才可由用户明确决定创建 `acm-os-m2-vault-binding` tag。
+M2.5 没有实现 Candidate 接受 UI、自动 Undo UI、任何 Learning Status/Review/Today 行为或 M3 lifecycle。完整 M2 代码已完成，并由 `acm-os-m2-vault-binding` tag 封存。
 
 ## 6. Frozen M2 outcome and scope
 
@@ -275,6 +279,8 @@ M2 blocking evidence：
 M2 checkpoint 仅在完整 DoD 后创建：
 
 `acm-os-m2-vault-binding`
+
+该 checkpoint 已创建并指向提交 `091b525`。
 
 ## 7. Frozen Markdown and Authority constraints
 
@@ -329,17 +335,17 @@ git tag --points-at HEAD
 1. 完整阅读四份权威文档；
 2. 检查顶层目录、manifests、lockfiles、toolchain 与当前测试入口；
 3. 检查 `4e25359` 和 `27f785f` 的实际 change surface；
-4. 明确报告 M1/M2.1/M2.2/M2.3/M2.4 checkpoint 是否仍完整、M2.5 工作树是否只有已知改动；
+4. 明确报告 M1/M2.1/M2.2/M2.3/M2.4/M2.5 checkpoint 是否仍完整、工作树是否只有已知改动；
 5. 核对 Safe Patch / Recovery Copy 的真实 diff 与最后验证证据；
 6. 未经用户明确允许，不 commit、tag、push；
-7. M2.5 commit 后，再由用户明确决定是否创建 `acm-os-m2-vault-binding`；
-8. checkpoint 未确认前不进入 M3；
+7. 核对 M2.5 commit 与 `acm-os-m2-vault-binding` 是否仍指向 `091b525`；
+8. checkpoint 完整后从 M3 planning 继续；
 9. 后续继续按“最小 Slice → focused verification → broader verification → diff review → status”执行；
 10. 当前 Slice 失败时不叠加下一 Slice。
 
 建议的首个动作不是写代码，而是：
 
-`审阅 M2.5 staged/unstaged diff、Safe Patch transaction tests 与 recovery retention evidence；确认提交后再处理 M2 checkpoint tag。`
+`核对 M2 checkpoint tag 与工作树状态；然后按冻结文档进入 M3 planning。`
 
 ## 10. Git and safety rules
 
@@ -354,7 +360,7 @@ git tag --points-at HEAD
 - 未经允许安装大型或系统级工具；
 - 未经允许 commit、tag、push；
 - M2.5 未提交或验证未通过就创建 `acm-os-m2-vault-binding`；
-- M2 checkpoint 未确认就进入 M3+。
+- 未核对 `acm-os-m2-vault-binding` 指向与工作树状态就进入 M3+。
 
 ## 11. Durable recovery prompt
 

@@ -27,11 +27,13 @@ git tag --points-at HEAD
 - M2.2 commit: 8edc301 build: complete M2.2 fresh markdown read
 - M2.3 commit: 6ae1cbf build: complete M2.3 binding resolution
 - M2.4 commit: 6b80394 build: complete M2.4 revalidation and Obsidian open
+- M2.5 commit: 091b525 build: complete M2.5 safe patch foundation
 - tag: acm-os-m1-contest-import
+- M2 tag: acm-os-m2-vault-binding → 091b525
 - origin: https://github.com/Mxiaocao/acm-os.git
 - 2026-08-10 已确认远程 main 与远程 M1 tag 均指向该 commit
-- M1、M2.1、M2.2、M2.3、M2.4 已提交；M2.5 已实现并验证，当前尚待 commit
-- M2.1/M2.2/M2.3/M2.4 目前仅在本地 main，origin/main 仍为 M1
+- M1、M2.1、M2.2、M2.3、M2.4、M2.5 已提交；M2 checkpoint tag 已创建
+- M2.1/M2.2/M2.3/M2.4/M2.5 目前仅在本地 main，origin/main 仍为 M1
 
 如果路径不正确、出现 acm-os\acm-os 嵌套、当前目录属于其他项目、存在未知用户文件、分支或 HEAD 不符、工作树有无法解释的改动，立即停止并报告。不要覆盖、merge、reset、clean 或 checkout 丢弃任何内容。
 
@@ -55,17 +57,18 @@ git show --stat 27f785f
 git show --stat 8edc301
 git show --stat 6ae1cbf
 git show --stat 6b80394
+git show --stat 091b525
 git show acm-os-m1-contest-import:ACM-OS_BUILD_HANDOFF.md
 git diff
 git status
 
-当前已完成但尚待提交的切片是：
+当前已完成并提交的切片是：
 
 M2.5 — Safe Patch + Recovery Copy Foundation
 
-提交 M2.5 后的下一步是：
+M2 checkpoint 已完成。下一步是：
 
-创建 `acm-os-m2-vault-binding` checkpoint（必须由用户明确允许），然后才进入 M3 planning。
+核对 `acm-os-m2-vault-binding` 仍指向 `091b525`，然后进入 M3 planning。
 
 冻结 Outcome：Lightweight Problem 创建真实 Personal Markdown；用户在外部 Obsidian 修改后，ACM-OS 必须 Fresh Read 最新内容。
 
@@ -98,7 +101,7 @@ M2 范围包括：
 - Vault 暂时不可用只阻塞受影响 scope，不自动等于全局 Recovery；
 - 文件或网络 I/O 不进入长 SQLite transaction。
 
-若 M2.5 工作树仍存在，本轮先不要直接写代码或重复实现。先检查：
+恢复工作时，先不要直接写代码或重复实现。先检查：
 
 - 顶层目录与 Git 状态；
 - package/Cargo manifests；
@@ -108,7 +111,7 @@ M2 范围包括：
 - 当前 Application/Infrastructure/Tauri/React Authority 边界；
 - 与 M2 直接相关的现有 schema、ports、tests、UI 入口。
 
-先核对 M2.5 的真实 diff 与测试结果；未经用户明确允许不得 commit。M2.5 只包含语义 Safe Patch、byte-preserving/atomic write、concurrency guard、App Private Recovery Copy 与 binding evidence refresh；不包含 Candidate UI、Undo UI 或 M3 learning lifecycle。M2.5 提交后，仍须用户明确允许才能创建 `acm-os-m2-vault-binding` tag；checkpoint 未确认前不得进入 M3。
+先核对 M2.5 提交 `091b525` 的真实 diff、测试结果，以及 `acm-os-m2-vault-binding` tag 指向。M2.5 只包含语义 Safe Patch、byte-preserving/atomic write、concurrency guard、App Private Recovery Copy 与 binding evidence refresh；不包含 Candidate UI、Undo UI 或 M3 learning lifecycle。M2 checkpoint 已完成，后续从 M3 planning 继续。
 
 执行原则：
 
