@@ -274,6 +274,57 @@ pub async fn personal_note_projection(
         .map_err(acm_os_application::PersonalNoteReadError::code)
 }
 
+#[tauri::command]
+pub async fn open_personal_note_in_obsidian(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    app: tauri::AppHandle,
+    input: LightweightProblemDetailInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::{
+        PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort,
+    };
+    use tauri_plugin_opener::OpenerExt;
+
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    let state = database
+        .read_personal_note_projection(&problem)
+        .await
+        .map_err(acm_os_application::PersonalNoteReadError::code)?;
+    let binding = match state {
+        PersonalNoteReadState::Ready { binding, .. } => binding,
+        PersonalNoteReadState::LocationAnomaly { .. } => return Err("note_location_anomaly"),
+        PersonalNoteReadState::VaultUnavailable { .. } => return Err("vault_unavailable"),
+    };
+    let workspace = database
+        .load_workspace_configuration()
+        .await
+        .map_err(|_| "workspace_unavailable")?
+        .ok_or("workspace_unavailable")?;
+    let uri = obsidian_open_uri(
+        workspace.active_vault_path(),
+        &binding.vault_relative_path,
+    )?;
+    app.opener()
+        .open_url(uri, None::<&str>)
+        .map_err(|_| "obsidian_open_failed")
+}
+
+fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, &'static str> {
+    let vault = std::fs::canonicalize(active_vault).map_err(|_| "vault_unavailable")?;
+    let target = std::fs::canonicalize(vault.join(relative_path))
+        .map_err(|_| "note_open_failed")?;
+    if !target.starts_with(&vault) || !target.is_file() {
+        return Err("note_open_failed");
+    }
+    let mut uri = url::Url::parse("obsidian://open").map_err(|_| "note_open_failed")?;
+    uri.query_pairs_mut()
+        .append_pair("path", target.to_str().ok_or("note_open_failed")?);
+    Ok(uri.into())
+}
+
 fn personal_note_read_state_dto(
     state: acm_os_application::PersonalNoteReadState,
 ) -> PersonalNoteReadStateDto {
@@ -567,6 +618,8 @@ pub async fn workspace_status(
 #[tauri::command]
 pub async fn configure_workspace(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    watcher: tauri::State<'_, crate::vault_watcher::VaultWatcher>,
+    app: tauri::AppHandle,
     draft: WorkspaceConfigurationInput,
 ) -> Result<WorkspaceStatusDto, WorkspaceConfigurationErrorDto> {
     let configuration = acm_os_application::configure_workspace(
@@ -579,6 +632,8 @@ pub async fn configure_workspace(
     )
     .await
     .map_err(workspace_error_dto)?;
+
+    let _ = watcher.watch(configuration.active_vault_path(), app);
 
     Ok(workspace_status_dto(
         acm_os_application::WorkspaceConfigurationStatus::Configured(configuration),
@@ -626,7 +681,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, personal_note_read_state_dto, startup_status_dto,
+        app_shell_status_dto, obsidian_open_uri, personal_note_read_state_dto, startup_status_dto,
         workspace_error_dto, workspace_status_dto, LightweightProblemDetailDto,
         StatementReadStateDto,
     };
@@ -895,6 +950,37 @@ mod tests {
                     "knowledgeRootPath": knowledge_root
                 }
             })
+        );
+    }
+
+    #[test]
+    fn obsidian_uri_uses_a_canonical_file_inside_the_active_vault() {
+        let vault = tempfile::tempdir().expect("temporary vault");
+        let problems = vault.path().join("Problems");
+        std::fs::create_dir(&problems).expect("problem directory");
+        std::fs::write(problems.join("A note.md"), "# Problem\n").expect("personal note");
+
+        let uri = obsidian_open_uri(
+            vault.path().to_str().expect("utf-8 vault"),
+            "Problems/A note.md",
+        )
+        .expect("safe Obsidian URI");
+
+        assert!(uri.starts_with("obsidian://open?path="));
+        assert!(uri.contains("A+note.md") || uri.contains("A%20note.md"));
+    }
+
+    #[test]
+    fn obsidian_uri_rejects_a_binding_outside_the_active_vault() {
+        let parent = tempfile::tempdir().expect("temporary parent");
+        let vault = parent.path().join("Vault");
+        std::fs::create_dir(&vault).expect("vault");
+        std::fs::write(parent.path().join("outside.md"), "# Outside\n")
+            .expect("outside note");
+
+        assert_eq!(
+            obsidian_open_uri(vault.to_str().expect("utf-8 vault"), "../outside.md"),
+            Err("note_open_failed")
         );
     }
 }

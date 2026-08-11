@@ -2,6 +2,7 @@ import {
   type FormEvent,
   type MouseEvent,
   type RefObject,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -16,12 +17,14 @@ import {
   getPersonalNoteProjection,
   getStatementAssets,
   importCodeforcesContest,
+  openPersonalNoteInObsidian,
   type ContestDetailDto,
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
 } from "../ipc/contest";
+import { onPersonalNoteInvalidated } from "../ipc/personal-note-events";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -234,7 +237,7 @@ export function NormalAppShell({
         ) : route.kind === "contestDetail" ? (
           <ContestDetail contestId={route.contestId} navigate={navigate} />
         ) : route.kind === "problemDetail" ? (
-          <ProblemDetail contestId={route.contestId} index={route.index} />
+          <ProblemDetail contestId={route.contestId} index={route.index} navigate={navigate} />
         ) : (
           <NotFoundContent pathname={route.pathname} navigate={navigate} />
         )}
@@ -391,7 +394,7 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   </>;
 }
 
-function ProblemDetail({ contestId, index }: { contestId: number; index: string }) {
+function ProblemDetail({ contestId, index, navigate }: { contestId: number; index: string; navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [detail, setDetail] = useState<LightweightProblemDetailDto | null>(null);
   const [renderedHtml, setRenderedHtml] = useState<string | null>(null);
@@ -400,6 +403,29 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [noteReadState, setNoteReadState] = useState<PersonalNoteReadStateDto | null>(null);
   const [noteReadFailed, setNoteReadFailed] = useState(false);
+  const [openingNote, setOpeningNote] = useState(false);
+  const [openNoteFailed, setOpenNoteFailed] = useState(false);
+  const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const noteReadSequence = useRef(0);
+  const mounted = useRef(true);
+  const displayedNotePath = noteReadState?.state === "ready"
+    ? noteReadState.vaultRelativePath
+    : noteReadState?.state === "locationAnomaly" || noteReadState?.state === "vaultUnavailable"
+      ? noteReadState.lastKnownPath
+      : detail?.personalNote?.vaultRelativePath;
+  const refreshPersonalNote = useCallback(async () => {
+    const sequence = ++noteReadSequence.current;
+    try {
+      const readState = await getPersonalNoteProjection(contestId, index);
+      if (!mounted.current || sequence !== noteReadSequence.current) return;
+      setNoteReadState(readState);
+      setNoteReadFailed(false);
+    } catch {
+      if (!mounted.current || sequence !== noteReadSequence.current) return;
+      setNoteReadFailed(true);
+    }
+  }, [contestId, index]);
+  useEffect(() => () => { mounted.current = false; }, []);
   useEffect(() => {
     let active = true;
     const objectUrls: string[] = [];
@@ -409,12 +435,7 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       if (!active) return;
       setDetail(nextDetail);
       if (nextDetail.identityType === "personal") {
-        try {
-          const readState = await getPersonalNoteProjection(contestId, index);
-          if (active) setNoteReadState(readState);
-        } catch {
-          if (active) setNoteReadFailed(true);
-        }
+        await refreshPersonalNote();
       }
       if (nextDetail.statement.state !== "ready") return;
       const assets = await getStatementAssets(contestId, index);
@@ -429,9 +450,28 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
     }).catch(() => { if (active) setFailed(true); });
     return () => {
       active = false;
+      noteReadSequence.current += 1;
       for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
     };
-  }, [contestId, index]);
+  }, [contestId, index, refreshPersonalNote]);
+  useEffect(() => {
+    if (detail?.identityType !== "personal") return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const revalidate = () => { void refreshPersonalNote(); };
+    window.addEventListener("focus", revalidate);
+    onPersonalNoteInvalidated(revalidate)
+      .then((nextUnlisten) => {
+        if (disposed) nextUnlisten();
+        else unlisten = nextUnlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", revalidate);
+      unlisten?.();
+    };
+  }, [detail?.identityType, refreshPersonalNote]);
   const createNote = async () => {
     if (creatingNote) return;
     setCreatingNote(true);
@@ -442,12 +482,7 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       setDetail(nextDetail);
       setNoteMessage("Personal Markdown created and verified.");
       if (nextDetail.identityType === "personal") {
-        try {
-          setNoteReadState(await getPersonalNoteProjection(contestId, index));
-          setNoteReadFailed(false);
-        } catch {
-          setNoteReadFailed(true);
-        }
+        await refreshPersonalNote();
       }
     } catch (error) {
       setNoteMessage(
@@ -459,13 +494,30 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
       setCreatingNote(false);
     }
   };
+  const openInObsidian = async () => {
+    if (openingNote) return;
+    setOpeningNote(true);
+    setOpenNoteFailed(false);
+    setCopyMessage(null);
+    try {
+      await openPersonalNoteInObsidian(contestId, index);
+    } catch {
+      setOpenNoteFailed(true);
+    } finally {
+      setOpeningNote(false);
+    }
+  };
+  const copyNotePath = async () => {
+    if (!displayedNotePath) return;
+    try {
+      await navigator.clipboard.writeText(displayedNotePath);
+      setCopyMessage("Note path copied.");
+    } catch {
+      setCopyMessage(`Copy this note path: ${displayedNotePath}`);
+    }
+  };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
-  const displayedNotePath = noteReadState?.state === "ready"
-    ? noteReadState.vaultRelativePath
-    : noteReadState?.state === "locationAnomaly" || noteReadState?.state === "vaultUnavailable"
-      ? noteReadState.lastKnownPath
-      : detail.personalNote?.vaultRelativePath;
   return <>
     <PageHeader eyebrow="M1 local statement snapshot" headingRef={headingRef} title={detail.index + ". " + detail.title} />
     <section className="content-panel">
@@ -480,9 +532,27 @@ function ProblemDetail({ contestId, index }: { contestId: number; index: string 
         </button>
       ) : null}
       {detail.personalNote ? (
-        <p className="safe-note">
-          Personal Markdown: <code>{displayedNotePath}</code>
-        </p>
+        <>
+          <p className="safe-note">
+            Personal Markdown: <code>{displayedNotePath}</code>
+          </p>
+          {noteReadState?.state === "ready" ? (
+            <button className="secondary-action" disabled={openingNote} onClick={openInObsidian} type="button">
+              {openingNote ? "Opening..." : "Open in Obsidian"}
+            </button>
+          ) : null}
+          {openNoteFailed ? (
+            <div className="external-open-error" role="alert">
+              <p>Obsidian could not open this note. Your Personal Problem and learning state were not changed.</p>
+              <div className="action-row">
+                <button onClick={openInObsidian} type="button">Retry</button>
+                <button onClick={copyNotePath} type="button">Copy path</button>
+                <button onClick={() => navigate("/settings")} type="button">Check settings</button>
+              </div>
+              {copyMessage ? <p aria-live="polite" className="system-caption">{copyMessage}</p> : null}
+            </div>
+          ) : null}
+        </>
       ) : null}
       {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
     </section>

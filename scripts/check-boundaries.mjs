@@ -25,11 +25,15 @@ const EXPECTED_RUST_DEPENDENCIES = {
   "acm-os": [
     "build:tauri-build",
     "dev:serde_json",
+    "dev:tempfile",
     "normal:acm-os-application",
     "normal:acm-os-domain",
     "normal:acm-os-infrastructure",
+    "normal:notify",
     "normal:serde",
     "normal:tauri",
+    "normal:tauri-plugin-opener",
+    "normal:url",
   ],
 };
 

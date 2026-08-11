@@ -1,4 +1,4 @@
-# ACM-OS BUILD Handoff — M2.3 closed / M2.4 next
+# ACM-OS BUILD Handoff — M2.4 implemented / M2.5 next
 
 > 更新时间：2026-08-11（Asia/Shanghai）
 >
@@ -34,7 +34,8 @@ Branch:      main
 M2.1 code checkpoint: 27f785f build: complete M2.1 personal note binding
 M2.1 handoff checkpoint: cec7d6f docs: record M2.1 handoff
 M2.2 checkpoint: 8edc301 build: complete M2.2 fresh markdown read
-Working tree: verified M2.3 implementation and handoff changes, pending commit
+M2.3 checkpoint: 6ae1cbf build: complete M2.3 binding resolution
+Working tree: verified M2.4 implementation and handoff changes, pending commit
 origin/main: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
 M1 tag:     acm-os-m1-contest-import
 Remote tag: 4e253590fd0eee8d5d7af61bb14529bff4cd6e6b
@@ -52,6 +53,7 @@ f140316 build: complete B0.3 workspace configuration
 27f785f build: complete M2.1 personal note binding
 cec7d6f docs: record M2.1 handoff
 8edc301 build: complete M2.2 fresh markdown read
+6ae1cbf build: complete M2.3 binding resolution
 ```
 
 标签：
@@ -61,7 +63,7 @@ acm-os-m0-foundation    → 42815a8
 acm-os-m1-contest-import → 4e25359
 ```
 
-M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.2。
+M1 的 `main` 与标签均已在 GitHub 远程确认存在。M2.1/M2.2/M2.3 提交目前只在本地 `main`，尚未 push。因此远程只能恢复到 M1，本地 Git 历史可恢复到 M2.3。
 
 ## 3. Current BUILD position
 
@@ -71,11 +73,12 @@ Completed: M1 — Real Contest Import → Lightweight Problems
 Completed: M2.1 — Create Personal Note + File Binding
 Completed: M2.2 — Fresh Read + Markdown Parser
 Completed: M2.3 — Binding Resolution + Vault Availability
-Next:      M2.4 — Revalidation Triggers + Open in Obsidian
+Completed: M2.4 — Revalidation Triggers + Open in Obsidian (pending commit)
+Next:      M2.5 — Safe Patch + Recovery Copy Foundation
 M2 state:  IN PROGRESS
 ```
 
-不要重复实现 M1/M2.1/M2.2/M2.3，也不要跳过 M2.4 或进入 M3+。
+不要重复实现 M1/M2.1/M2.2/M2.3/M2.4，也不要跳过 M2.5 或进入 M3+。
 
 ## 4. M1 closure record
 
@@ -152,7 +155,7 @@ M2.2 没有实现 relocation、watcher、window-focus revalidation、Open in Obs
 
 ## 5.3 M2.3 closure record
 
-M2.3 已实现并完成验证，尚待用户明确允许后 commit：
+M2.3 已实现并由提交 `6ae1cbf` 封存：
 
 - 确定性 binding resolution：原路径 → 唯一 Windows file key → 唯一完整内容 digest；
 - relocation 成功后以短 SQL optimistic guard 更新 path、file key、digest 与 `linked` 状态；
@@ -172,6 +175,32 @@ M2.3 已实现并完成验证，尚待用户明确允许后 commit：
 - `git diff --check`：PASS。
 
 M2.3 没有实现 watcher、window-focus revalidation、Open in Obsidian、Safe Patch、Recovery Copy 或 M3 lifecycle。M2.4 应只增加 revalidation triggers 与 external open，不得让 watcher 成为事实源。
+
+## 5.4 M2.4 closure record
+
+M2.4 已实现并完成验证，尚待用户明确允许后 commit：
+
+- 使用 `notify` native watcher 递归监听 Active Vault 中的 Markdown 变更；事件只发出 `personal-note-invalidated` 信号，不携带或注入正文事实；
+- watcher 在应用启动和首次 workspace 配置完成后挂载，150ms 去抖；watcher 不可用时 window-focus Fresh Read 仍保证正确性；
+- Problem Detail 将 initial/create/focus/watcher 统一到同一个 authoritative `personal_note_projection` 刷新函数；
+- 窗口重新获得 focus 时必定重新调用 projection IPC，竞态结果按 sequence 丢弃，组件卸载后不更新状态；
+- `Open in Obsidian` 只在 Ready Personal binding 上出现；后端再次 Fresh Read、解析 relocation、canonicalize 并验证目标仍在 Active Vault 内，再构造编码后的 `obsidian://open?path=...` URI；
+- external open 失败只显示局部错误，并提供 Retry、Copy path、Check settings；Personal identity 与学习状态不变；
+- Review Focus DOM 中不存在普通 `Open in Obsidian` 入口；
+- architecture dependency allowlist 只授权 root Tauri adapter 使用 `notify`、`tauri-plugin-opener`、`url`，没有向 Domain/Application/Infrastructure 或 React 下放 filesystem authority。
+
+验证证据：
+
+- Rust workspace：67 passed，2 个真实网络 smoke ignored；
+- native watcher temporary-Vault integration smoke：PASS；
+- Obsidian canonical path / path escape tests：PASS；
+- startup / boundary / DOM：21 passed；
+- TypeScript type-check 与 Vite production build：PASS；
+- `cargo check --workspace`：PASS；
+- Tauri Debug executable（no bundle）：PASS；
+- `git diff --check`：PASS。
+
+M2.4 没有实现 Safe Patch、Recovery Copy 产品行为或任何 M3 lifecycle。下一切片 M2.5 应实现冻结的 Fresh Read → unique target → minimal patch → concurrent digest check → recovery copy → write → re-read/re-parse/semantic verify 事务链。
 
 ## 6. Frozen M2 outcome and scope
 

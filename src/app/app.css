@@ -143,6 +143,11 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 
 .secondary-action:hover { background: var(--surface-muted); }
 
+.external-open-error { margin-top: 16px; padding: 14px; border-left: 3px solid var(--danger); background: var(--surface-muted); }
+.external-open-error p { margin-top: 0; }
+.action-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.action-row button { min-height: 40px; padding: 7px 11px; border: 1px solid var(--line-strong); background: var(--surface); color: inherit; cursor: pointer; }
+
 .detail-list {
   display: grid;
   grid-template-columns: minmax(150px, 0.35fr) minmax(0, 1fr);

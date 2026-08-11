@@ -81,7 +81,11 @@ async function renderApp(ipc, pathname = "/") {
     Object.defineProperty(globalThis, key, { configurable: true, value, writable: true });
   }
   const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
-  mockIPC(ipc);
+  mockIPC((command, args) => {
+    if (command === "plugin:event|listen") return 1;
+    if (command === "plugin:event|unlisten") return null;
+    return ipc(command, args);
+  });
   const { App } = await vite.ssrLoadModule("/src/app/App.tsx");
   const root = createRoot(dom.window.document.getElementById("root"));
   await act(async () => root.render(React.createElement(App)));
@@ -155,6 +159,7 @@ test("Review focus is isolated and Return to Today requests the normal route", {
   try {
     assert.equal(view.document.querySelector("nav"), null);
     assert.equal(view.document.activeElement?.tagName, "MAIN");
+    assert.doesNotMatch(view.document.body.textContent, /Open in Obsidian/);
     await act(async () => view.document.querySelector("button").click());
     assert.deepEqual(navigations, ["/today"]);
   } finally {
@@ -346,6 +351,72 @@ test("Problem detail preserves Personal identity when the Vault is unavailable",
         .some((button) => button.textContent === "Create my note"),
       false,
     );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Problem detail performs a Fresh Read when the window regains focus", {
+  concurrency: false,
+}, async () => {
+  let projectionReads = 0;
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+    };
+    if (command === "personal_note_projection") {
+      projectionReads += 1;
+      const name = projectionReads === 1 ? "Before focus" : "After external edit";
+      return { state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false, projection: {
+        contentDigest: String(projectionReads), knownSections: [],
+        solutionRoutes: [{ name, startOffset: 0, endOffset: 1 }], warnings: [],
+      } };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    assert.match(view.document.body.textContent, /Before focus/);
+    await act(async () => window.dispatchEvent(new window.Event("focus")));
+    await settle();
+    assert.equal(projectionReads, 2);
+    assert.match(view.document.body.textContent, /After external edit/);
+    assert.doesNotMatch(view.document.body.textContent, /Before focus/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Obsidian open failure is scoped and exposes recovery actions", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+    };
+    if (command === "personal_note_projection") return { state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false, projection: { contentDigest: "fresh", knownSections: [], solutionRoutes: [], warnings: [] } };
+    if (command === "open_personal_note_in_obsidian") throw "obsidian_open_failed";
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const openButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Open in Obsidian");
+    assert.ok(openButton);
+    await act(async () => openButton.click());
+    await settle();
+    assert.match(view.document.body.textContent, /learning state were not changed/);
+    assert.match(view.document.body.textContent, /Retry/);
+    assert.match(view.document.body.textContent, /Copy path/);
+    assert.match(view.document.body.textContent, /Check settings/);
+    assert.match(view.document.body.textContent, /Personal Problem/);
   } finally {
     await view.cleanup();
   }

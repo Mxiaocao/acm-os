@@ -121,6 +121,10 @@ export function getPersonalNoteProjection(contestId: number, index: string): Pro
   return invoke<PersonalNoteReadStateDto>("personal_note_projection", { input: { contestId, index } });
 }
 
+export function openPersonalNoteInObsidian(contestId: number, index: string): Promise<void> {
+  return invoke<void>("open_personal_note_in_obsidian", { input: { contestId, index } });
+}
+
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {
   return invoke<LocalStatementAssetDto[]>("statement_assets", { input: { contestId, index } });
 }
