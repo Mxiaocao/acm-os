@@ -261,6 +261,42 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 
 .review-stage p { max-width: 64ch; color: var(--ink-muted); }
 
+.review-help-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 20;
+  width: min(520px, 100%);
+  padding: 28px;
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: -18px 0 45px rgb(34 26 27 / 18%);
+}
+
+.review-help-drawer__header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+.review-help-drawer__header h2 { margin-top: 0; }
+.review-help-levels { display: grid; gap: 12px; padding: 0; list-style: none; }
+.review-help-levels li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.review-help-levels li div { display: grid; gap: 4px; text-align: left; }
+.review-help-levels li span { color: var(--ink-muted); font-size: .88rem; }
+.review-help-confirm { margin-top: 20px; padding: 18px; border: 2px solid var(--accent); border-radius: var(--radius-sm); background: var(--surface-muted); }
+.review-help-content { place-content: initial; text-align: left; min-height: 0; }
+.review-help-content pre { max-width: 100%; overflow: auto; padding: 18px; white-space: pre-wrap; background: var(--surface-muted); }
+.review-facts-form { place-content: initial; gap: 22px; text-align: left; }
+.review-facts-form fieldset { display: grid; gap: 12px; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.review-facts-form label { display: grid; gap: 6px; }
+.review-facts-form label:has(input[type="checkbox"]) { grid-template-columns: auto 1fr; align-items: center; }
+.review-facts-form input:not([type="checkbox"]), .review-facts-form select, .modal-backdrop input { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.review-evidence-card { place-content: initial; text-align: left; min-height: 0; }
+.review-history-list { display: grid; gap: 10px; padding-left: 22px; }
+.review-history-list li { padding: 10px; }
+.review-history-list span { display: block; color: var(--ink-muted); }
+.mastery-evidence { margin-block: 18px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.mastery-evidence fieldset { display: grid; gap: 9px; margin-block: 12px; border: 1px solid var(--line); }
+.mastery-evidence label { display: flex; align-items: flex-start; gap: 9px; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgb(24 18 19 / 55%); }
+.modal-backdrop > div { width: min(560px, 100%); padding: 26px; border-radius: var(--radius-md); background: var(--surface); box-shadow: 0 24px 70px rgb(0 0 0 / 28%); }
+
 @media (max-width: 760px) {
   .normal-shell { grid-template-columns: 1fr; }
   .app-sidebar { position: static; height: auto; padding: 18px; }

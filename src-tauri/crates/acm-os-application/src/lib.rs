@@ -317,6 +317,427 @@ pub async fn transition_problem_lifecycle<P: ProblemLifecyclePort>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewAttempt {
+    pub attempt_id: String,
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub attempt_type: acm_os_domain::ReviewAttemptType,
+    pub scheduled_due_local_date: acm_os_domain::LocalDate,
+    pub started_early: bool,
+    pub judgement_rule_version: u32,
+    pub started_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFocusView {
+    pub attempt: ReviewAttempt,
+    pub title: String,
+    pub source_url: String,
+    pub statement_sanitized_html: String,
+    pub statement_assets: Vec<LocalStatementAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHelpItem {
+    pub level: acm_os_domain::ReviewHelpLevel,
+    pub available: bool,
+    pub revealed_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHelpDrawerView {
+    pub attempt_id: String,
+    pub items: Vec<ReviewHelpItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevealedReviewHelp {
+    pub event_id: String,
+    pub attempt_id: String,
+    pub level: acm_os_domain::ReviewHelpLevel,
+    pub title: String,
+    pub content_markdown: String,
+    pub source_digest: String,
+    pub revealed_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionFact {
+    pub result: acm_os_domain::SubmissionResult,
+    pub other_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCompletionInput {
+    pub final_ac: bool,
+    pub first_submission: SubmissionFact,
+    pub final_submission: SubmissionFact,
+    pub total_submissions: u32,
+    pub idea_independent: bool,
+    pub implementation_independent: bool,
+    pub debug_independence: acm_os_domain::DebugIndependence,
+    pub external_help: acm_os_domain::ExternalHelpLevel,
+    pub failure_reasons: Vec<ReviewFailureReason>,
+}
+
+impl ReviewCompletionInput {
+    pub fn domain_facts(&self) -> acm_os_domain::ReviewCompletionFacts {
+        acm_os_domain::ReviewCompletionFacts {
+            final_ac: self.final_ac,
+            first_submission_result: self.first_submission.result,
+            final_result: self.final_submission.result,
+            total_submissions: self.total_submissions,
+            idea_independent: self.idea_independent,
+            implementation_independent: self.implementation_independent,
+            debug_independence: self.debug_independence,
+            external_help: self.external_help,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewFailureReason {
+    NoIdea,
+    KeyPropertyBlocked,
+    DerivationBlocked,
+    CannotImplement,
+    ImplementationError,
+    BoundaryError,
+    ComplexityError,
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCompletionContext {
+    pub attempt: ReviewAttempt,
+    pub learning_status: acm_os_domain::LearningStatus,
+    pub current_stage: u32,
+    pub highest_help_level: Option<acm_os_domain::ReviewHelpLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedReviewAttempt {
+    pub attempt: ReviewAttempt,
+    pub judgement: acm_os_domain::ReviewJudgement,
+    pub evidence_codes: Vec<String>,
+    pub failure_reasons: Vec<ReviewFailureReason>,
+    pub completed_at_utc: String,
+    pub completed_local_date: acm_os_domain::LocalDate,
+    pub lifecycle: ProblemLifecycleState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewAttemptStatus {
+    InProgress,
+    Completed,
+    Void,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHistoryItem {
+    pub attempt: ReviewAttempt,
+    pub status: ReviewAttemptStatus,
+    pub judgement: Option<acm_os_domain::ReviewJudgement>,
+    pub completion_input: Option<ReviewCompletionInput>,
+    pub evidence_codes: Vec<String>,
+    pub failure_reasons: Vec<ReviewFailureReason>,
+    pub help_levels: Vec<acm_os_domain::ReviewHelpLevel>,
+    pub completed_at_utc: Option<String>,
+    pub completed_local_date: Option<acm_os_domain::LocalDate>,
+    pub void_reason: Option<String>,
+    pub voided_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHistoryView {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub historical_best_review: Option<acm_os_domain::ReviewJudgement>,
+    pub mastery: ProblemMasteryProjection,
+    pub attempts: Vec<ReviewHistoryItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemMasteryProjection {
+    pub current: acm_os_domain::ProblemMasteryEvidence,
+    pub historical_thoroughly_digested: bool,
+    pub first_thoroughly_digested_local_date: Option<acm_os_domain::LocalDate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewAttemptError {
+    ProblemNotFound,
+    AttemptNotFound,
+    NotPersonal,
+    NotEligible,
+    ScheduleMissing,
+    StatementMissing,
+    HelpContentUnavailable,
+    HelpConfirmationRequired,
+    NoteUnavailable,
+    InvalidMarkdown,
+    InvalidCompletionFacts,
+    FailureReasonRequired,
+    AttemptAlreadyFinished,
+    InvalidVoidReason,
+    IntegrityViolation,
+    PersistenceUnavailable,
+}
+
+impl ReviewAttemptError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::AttemptNotFound => "review_attempt_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::NotEligible => "review_not_eligible",
+            Self::ScheduleMissing => "review_schedule_missing",
+            Self::StatementMissing => "review_statement_missing",
+            Self::HelpContentUnavailable => "review_help_content_unavailable",
+            Self::HelpConfirmationRequired => "review_help_confirmation_required",
+            Self::NoteUnavailable => "review_note_unavailable",
+            Self::InvalidMarkdown => "review_note_invalid_utf8",
+            Self::InvalidCompletionFacts => "review_completion_facts_invalid",
+            Self::FailureReasonRequired => "review_failure_reason_required",
+            Self::AttemptAlreadyFinished => "review_attempt_already_finished",
+            Self::InvalidVoidReason => "review_void_reason_invalid",
+            Self::IntegrityViolation => "review_integrity_violation",
+            Self::PersistenceUnavailable => "review_persistence_unavailable",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ReviewAttemptPort {
+    async fn load_in_progress_review_attempt(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Option<ReviewAttempt>, ReviewAttemptError>;
+
+    async fn create_or_resume_review_attempt(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        eligibility: acm_os_domain::ReviewEligibilityDecision,
+    ) -> Result<ReviewAttempt, ReviewAttemptError>;
+
+    async fn load_review_focus(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewFocusView, ReviewAttemptError>;
+
+    async fn load_review_help_drawer(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewHelpDrawerView, ReviewAttemptError>;
+
+    async fn reveal_review_help(
+        &self,
+        attempt_id: &str,
+        level: acm_os_domain::ReviewHelpLevel,
+        impact_acknowledged: bool,
+    ) -> Result<RevealedReviewHelp, ReviewAttemptError>;
+
+    async fn load_review_completion_context(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewCompletionContext, ReviewAttemptError>;
+
+    async fn commit_review_completion(
+        &self,
+        context: &ReviewCompletionContext,
+        input: &ReviewCompletionInput,
+        judgement: &acm_os_domain::ReviewJudgementDecision,
+        scheduling: acm_os_domain::ReviewCompletionDecision,
+        completed_on: acm_os_domain::LocalDate,
+    ) -> Result<CompletedReviewAttempt, ReviewAttemptError>;
+
+    async fn void_review_attempt(
+        &self,
+        attempt_id: &str,
+        reason: &str,
+    ) -> Result<ReviewHistoryItem, ReviewAttemptError>;
+
+    async fn load_review_attempt_history_item(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewHistoryItem, ReviewAttemptError>;
+
+    async fn load_review_history(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ReviewHistoryView, ReviewAttemptError>;
+
+    async fn update_problem_mastery_evidence(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        evidence: acm_os_domain::ProblemMasteryEvidence,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<ProblemMasteryProjection, ReviewAttemptError>;
+}
+
+pub async fn start_or_resume_review<P: ProblemLifecyclePort + ReviewAttemptPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    today: acm_os_domain::LocalDate,
+) -> Result<ReviewAttempt, ReviewAttemptError> {
+    if let Some(attempt) = port.load_in_progress_review_attempt(problem).await? {
+        return Ok(attempt);
+    }
+    let lifecycle = port
+        .load_problem_lifecycle(problem)
+        .await
+        .map_err(|error| match error {
+            ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
+            ProblemLifecycleError::NotPersonal => ReviewAttemptError::NotPersonal,
+            ProblemLifecycleError::IntegrityViolation => ReviewAttemptError::IntegrityViolation,
+            ProblemLifecycleError::PersistenceUnavailable => {
+                ReviewAttemptError::PersistenceUnavailable
+            }
+            ProblemLifecycleError::InvalidTransition | ProblemLifecycleError::InvalidLocalDate => {
+                ReviewAttemptError::NotEligible
+            }
+        })?;
+    if lifecycle.identity_type != ProblemIdentityType::Personal {
+        return Err(ReviewAttemptError::NotPersonal);
+    }
+    let cycle = lifecycle
+        .active_review_cycle
+        .ok_or(ReviewAttemptError::ScheduleMissing)?;
+    let eligibility = acm_os_domain::ReviewEligibilityEngine::decide(
+        lifecycle.learning_status,
+        cycle.next_due_local_date,
+        today,
+    )
+    .map_err(|_| ReviewAttemptError::NotEligible)?;
+    port.create_or_resume_review_attempt(problem, eligibility)
+        .await
+}
+
+pub async fn review_focus<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+) -> Result<ReviewFocusView, ReviewAttemptError> {
+    port.load_review_focus(attempt_id).await
+}
+
+pub async fn review_help_drawer<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+) -> Result<ReviewHelpDrawerView, ReviewAttemptError> {
+    port.load_review_help_drawer(attempt_id).await
+}
+
+pub async fn reveal_review_help<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+    level: acm_os_domain::ReviewHelpLevel,
+    impact_acknowledged: bool,
+) -> Result<RevealedReviewHelp, ReviewAttemptError> {
+    port.reveal_review_help(attempt_id, level, impact_acknowledged)
+        .await
+}
+
+pub async fn complete_review<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+    input: ReviewCompletionInput,
+    completed_on: acm_os_domain::LocalDate,
+) -> Result<CompletedReviewAttempt, ReviewAttemptError> {
+    validate_completion_text(&input)?;
+    let context = port.load_review_completion_context(attempt_id).await?;
+    let judgement = acm_os_domain::ReviewJudgementEngine::judge(
+        &input.domain_facts(),
+        context.highest_help_level,
+    )
+    .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
+    if judgement.judgement != acm_os_domain::ReviewJudgement::Mastered
+        && input.failure_reasons.is_empty()
+    {
+        return Err(ReviewAttemptError::FailureReasonRequired);
+    }
+    if judgement.judgement == acm_os_domain::ReviewJudgement::Mastered
+        && !input.failure_reasons.is_empty()
+    {
+        return Err(ReviewAttemptError::InvalidCompletionFacts);
+    }
+    let scheduling = acm_os_domain::ReviewSchedulingEngine::complete_review(
+        context.learning_status,
+        context.attempt.attempt_type,
+        judgement.judgement,
+        context.current_stage,
+        completed_on,
+    )
+    .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    port.commit_review_completion(&context, &input, &judgement, scheduling, completed_on)
+        .await
+}
+
+fn validate_completion_text(input: &ReviewCompletionInput) -> Result<(), ReviewAttemptError> {
+    for submission in [&input.first_submission, &input.final_submission] {
+        match (submission.result, submission.other_text.as_deref()) {
+            (acm_os_domain::SubmissionResult::Other, Some(text))
+                if !text.trim().is_empty() && text.len() <= 120 => {}
+            (acm_os_domain::SubmissionResult::Other, _) => {
+                return Err(ReviewAttemptError::InvalidCompletionFacts);
+            }
+            (_, None) => {}
+            (_, Some(_)) => return Err(ReviewAttemptError::InvalidCompletionFacts),
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for reason in &input.failure_reasons {
+        let key = match reason {
+            ReviewFailureReason::NoIdea => "no_idea",
+            ReviewFailureReason::KeyPropertyBlocked => "key_property_blocked",
+            ReviewFailureReason::DerivationBlocked => "derivation_blocked",
+            ReviewFailureReason::CannotImplement => "cannot_implement",
+            ReviewFailureReason::ImplementationError => "implementation_error",
+            ReviewFailureReason::BoundaryError => "boundary_error",
+            ReviewFailureReason::ComplexityError => "complexity_error",
+            ReviewFailureReason::Other(text) if !text.trim().is_empty() && text.len() <= 500 => "other",
+            ReviewFailureReason::Other(_) => return Err(ReviewAttemptError::InvalidCompletionFacts),
+        };
+        if !seen.insert(key) {
+            return Err(ReviewAttemptError::InvalidCompletionFacts);
+        }
+    }
+    Ok(())
+}
+
+pub async fn void_review<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+    reason: &str,
+) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+    if reason.trim().is_empty() || reason.len() > 500 {
+        return Err(ReviewAttemptError::InvalidVoidReason);
+    }
+    port.void_review_attempt(attempt_id, reason.trim()).await
+}
+
+pub async fn review_attempt_history_item<P: ReviewAttemptPort>(
+    port: &P,
+    attempt_id: &str,
+) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+    port.load_review_attempt_history_item(attempt_id).await
+}
+
+pub async fn review_history<P: ReviewAttemptPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<ReviewHistoryView, ReviewAttemptError> {
+    port.load_review_history(problem).await
+}
+
+pub async fn update_problem_mastery_evidence<P: ReviewAttemptPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    evidence: acm_os_domain::ProblemMasteryEvidence,
+    confirmed_on: acm_os_domain::LocalDate,
+) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+    port.update_problem_mastery_evidence(problem, evidence, confirmed_on)
+        .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonalNoteBinding {
     pub vault_relative_path: String,
     pub content_digest: String,
@@ -590,6 +1011,7 @@ pub enum PersonalNoteDeletionError {
     LocationAnomaly,
     VaultUnavailable,
     ConcurrentModification,
+    ReviewInProgress,
     RecoveryCopyFailed,
     FileDeleteFailed,
     PersistenceUnavailable,
@@ -606,6 +1028,7 @@ impl PersonalNoteDeletionError {
             Self::LocationAnomaly => "note_location_anomaly",
             Self::VaultUnavailable => "vault_unavailable",
             Self::ConcurrentModification => "markdown_concurrent_modification",
+            Self::ReviewInProgress => "review_in_progress",
             Self::RecoveryCopyFailed => "markdown_recovery_copy_failed",
             Self::FileDeleteFailed => "note_delete_failed",
             Self::PersistenceUnavailable => "note_persistence_unavailable",

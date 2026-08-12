@@ -15,6 +15,12 @@ struct Heading {
     heading_end: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewHelpContent {
+    pub title: String,
+    pub markdown: String,
+}
+
 pub(crate) fn parse_problem_markdown(
     markdown: &str,
     content_digest: String,
@@ -113,6 +119,108 @@ fn direct_parent_h2(headings: &[Heading], index: usize) -> Option<&str> {
         .map(|heading| heading.name.as_str())
 }
 
+pub(crate) fn review_help_content(
+    markdown: &str,
+    level: acm_os_domain::ReviewHelpLevel,
+) -> Option<ReviewHelpContent> {
+    match level {
+        acm_os_domain::ReviewHelpLevel::PrerequisiteNames => {
+            let targets = prerequisite_targets(markdown)?;
+            Some(ReviewHelpContent {
+                title: "Prerequisite names".to_owned(),
+                markdown: targets
+                    .iter()
+                    .map(|target| format!("- {target}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+        }
+        acm_os_domain::ReviewHelpLevel::Hints => {
+            unique_h2_section(markdown, "Hints")?;
+            let headings = collect_headings(markdown);
+            let hints = headings
+                .iter()
+                .enumerate()
+                .filter(|(index, heading)| {
+                    heading.level == HeadingLevel::H3
+                        && direct_parent_h2(&headings, *index).is_some_and(|name| name == "Hints")
+                })
+                .map(|(index, heading)| {
+                    markdown[heading.start..section_end(&headings, index, markdown.len())].trim()
+                })
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            (!hints.is_empty()).then(|| ReviewHelpContent {
+                title: "Hints".to_owned(),
+                markdown: hints.join("\n\n"),
+            })
+        }
+        acm_os_domain::ReviewHelpLevel::PrerequisiteContent => None,
+        acm_os_domain::ReviewHelpLevel::OldIdeaOrCode => {
+            let sections = ["思路", "代码"]
+                .iter()
+                .filter_map(|name| unique_h2_section(markdown, name))
+                .collect::<Vec<_>>();
+            (!sections.is_empty()).then(|| ReviewHelpContent {
+                title: "Old idea / code".to_owned(),
+                markdown: sections.join("\n\n"),
+            })
+        }
+        acm_os_domain::ReviewHelpLevel::FullSolution => unique_h2_section(markdown, "题解")
+            .map(|section| ReviewHelpContent {
+                title: "Full solution".to_owned(),
+                markdown: section.to_owned(),
+            }),
+    }
+}
+
+pub(crate) fn prerequisite_targets(markdown: &str) -> Option<Vec<String>> {
+    let section = unique_h2_section(markdown, "前置知识")?;
+    let bytes = section.as_bytes();
+    let mut targets = Vec::new();
+    let mut cursor = 0;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'[' && bytes[cursor + 1] == b'[' {
+            let content_start = cursor + 2;
+            let Some(relative_end) = section[content_start..].find("]]" ) else {
+                break;
+            };
+            let raw = &section[content_start..content_start + relative_end];
+            let target = raw
+                .split('|')
+                .next()
+                .unwrap_or_default()
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches(".md");
+            if !target.is_empty() && !targets.iter().any(|known| known == target) {
+                targets.push(target.to_owned());
+            }
+            cursor = content_start + relative_end + 2;
+        } else {
+            cursor += 1;
+        }
+    }
+    (!targets.is_empty()).then_some(targets)
+}
+
+fn unique_h2_section<'a>(markdown: &'a str, name: &str) -> Option<&'a str> {
+    let headings = collect_headings(markdown);
+    let matches = headings
+        .iter()
+        .enumerate()
+        .filter(|(_, heading)| heading.level == HeadingLevel::H2 && heading.name == name)
+        .collect::<Vec<_>>();
+    let [(index, heading)] = matches.as_slice() else {
+        return None;
+    };
+    let end = section_end(&headings, *index, markdown.len());
+    let body = markdown[heading.heading_end..end].trim();
+    (!body.is_empty()).then(|| markdown[heading.start..end].trim())
+}
+
 pub(crate) fn section_contains_wikilink_item(
     markdown: &str,
     start: usize,
@@ -147,7 +255,10 @@ pub(crate) fn section_contains_wikilink_item(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_problem_markdown, section_contains_wikilink_item};
+    use super::{
+        parse_problem_markdown, prerequisite_targets, review_help_content,
+        section_contains_wikilink_item,
+    };
     use acm_os_application::MarkdownParseWarning;
 
     #[test]
@@ -214,5 +325,45 @@ mod tests {
             markdown.len(),
             "CF-2000-B",
         ));
+    }
+
+    #[test]
+    fn resolves_only_explicit_review_help_sections() {
+        let markdown = "# P\n\n## 前置知识\n- [[Graphs#DFS|Graph traversal]]\n\n## Hints\n### Hint 1\nTry a stack.\n\n### Hint 2\nTrack colors.\n\n## 思路\nSecret idea.\n\n## 代码\n```cpp\nsolve();\n```\n\n## 题解\nComplete proof.\n";
+        assert_eq!(prerequisite_targets(markdown), Some(vec!["Graphs".to_owned()]));
+        let names = review_help_content(
+            markdown,
+            acm_os_domain::ReviewHelpLevel::PrerequisiteNames,
+        )
+        .expect("prerequisite names");
+        assert_eq!(names.markdown, "- Graphs");
+        let hints = review_help_content(markdown, acm_os_domain::ReviewHelpLevel::Hints)
+            .expect("hints");
+        assert!(hints.markdown.contains("### Hint 1"));
+        assert!(hints.markdown.contains("### Hint 2"));
+        let old = review_help_content(
+            markdown,
+            acm_os_domain::ReviewHelpLevel::OldIdeaOrCode,
+        )
+        .expect("old idea/code");
+        assert!(old.markdown.contains("Secret idea."));
+        assert!(old.markdown.contains("solve();"));
+        let solution = review_help_content(
+            markdown,
+            acm_os_domain::ReviewHelpLevel::FullSolution,
+        )
+        .expect("solution");
+        assert!(solution.markdown.contains("Complete proof."));
+    }
+
+    #[test]
+    fn duplicate_or_empty_sections_are_not_revealable() {
+        let markdown = "## Hints\n\n## Hints\n### One\nDo this\n\n## 题解\n";
+        assert!(review_help_content(markdown, acm_os_domain::ReviewHelpLevel::Hints).is_none());
+        assert!(review_help_content(
+            markdown,
+            acm_os_domain::ReviewHelpLevel::FullSolution
+        )
+        .is_none());
     }
 }

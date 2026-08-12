@@ -40,6 +40,8 @@ async function render(component) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     url: "https://acm-os.test/today",
   });
+  dom.window.HTMLElement.prototype.attachEvent ??= () => {};
+  dom.window.HTMLElement.prototype.detachEvent ??= () => {};
   const globals = {
     window: dom.window,
     document: dom.window.document,
@@ -82,6 +84,8 @@ async function renderApp(ipc, pathname = "/", strict = false) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     url: `https://acm-os.test${pathname}`,
   });
+  dom.window.HTMLElement.prototype.attachEvent ??= () => {};
+  dom.window.HTMLElement.prototype.detachEvent ??= () => {};
   const globals = {
     window: dom.window,
     document: dom.window.document,
@@ -484,6 +488,254 @@ test("Problem lifecycle actions and personal-note consequence preview use author
   }
 });
 
+test("Due Review starts once and Focus renders only statement, OJ, and Attempt metadata", {
+  concurrency: false,
+}, async () => {
+  const attemptId = "018f0d8e-4a5b-7c6d-8e9f-0123456789ab";
+  let startCalls = 0;
+  let focusCalls = 0;
+  let drawerCalls = 0;
+  const revealCalls = [];
+  const completeCalls = [];
+  const waitingLifecycle = {
+    learningStatus: "waitingColdStart",
+    learningStatusSinceUtc: "2026-08-11T00:00:00.000Z",
+    nextReviewDueLocalDate: "2026-08-14",
+    availableActions: ["withdrawUnderstood", "stopLearning"],
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: waitingLifecycle, reviewAction: "startReview",
+    };
+    if (command === "personal_note_projection") return {
+      state: "ready", vaultRelativePath: "Problems/CF-1979-A.md", relocated: false,
+      projection: {
+        contentDigest: "secret-note-digest",
+        knownSections: [{ name: "题解", startOffset: 1, endOffset: 10 }],
+        solutionRoutes: [{ name: "SECRET SOLUTION", startOffset: 2, endOffset: 9 }],
+        warnings: [],
+      },
+    };
+    if (command === "start_or_resume_review") {
+      startCalls += 1;
+      return {
+        attemptId, contestId: 1979, index: "A", attemptType: "firstColdStart",
+        scheduledDueLocalDate: "2026-08-14", startedEarly: false,
+        judgementRuleVersion: 1, startedAtUtc: "2026-08-14T00:00:00.000Z",
+      };
+    }
+    if (command === "review_focus") {
+      focusCalls += 1;
+      return {
+        attempt: {
+          attemptId, contestId: 1979, index: "A", attemptType: "firstColdStart",
+          scheduledDueLocalDate: "2026-08-14", startedEarly: false,
+          judgementRuleVersion: 1, startedAtUtc: "2026-08-14T00:00:00.000Z",
+        },
+        title: "Problem A",
+        sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+        statementSanitizedHtml: "<div class=\"problem-statement\"><p>SAFE STATEMENT</p></div>",
+        statementAssets: [],
+      };
+    }
+    if (command === "review_help_drawer") {
+      drawerCalls += 1;
+      return {
+        attemptId,
+        items: [
+          { level: 1, consequence: "partial_at_best", available: false, revealedAtUtc: null },
+          { level: 2, consequence: "partial_at_best", available: true, revealedAtUtc: null },
+          { level: 3, consequence: "partial_at_best", available: false, revealedAtUtc: null },
+          { level: 4, consequence: "partial_at_best", available: false, revealedAtUtc: null },
+          { level: 5, consequence: "fail_only", available: true, revealedAtUtc: null },
+        ],
+      };
+    }
+    if (command === "reveal_review_help") {
+      revealCalls.push(args.input);
+      return {
+        eventId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ac",
+        attemptId,
+        level: args.input.level,
+        consequence: args.input.level === 5 ? "fail_only" : "partial_at_best",
+        title: args.input.level === 5 ? "Full solution" : "Hints",
+        contentMarkdown: args.input.level === 5
+          ? "## 题解\nFULL SOLUTION AFTER EVIDENCE"
+          : "### Hint 1\nREVEALED ONLY AFTER EVIDENCE",
+        sourceDigest: "a".repeat(64),
+        revealedAtUtc: "2026-08-14T00:05:00.000Z",
+      };
+    }
+    if (command === "complete_review") {
+      completeCalls.push(args.input);
+      if (args.input.failureReasons.length === 0) {
+        return Promise.reject("review_failure_reason_required");
+      }
+      return {
+        attempt: {
+          attemptId, contestId: 1979, index: "A", attemptType: "firstColdStart",
+          scheduledDueLocalDate: "2026-08-14", startedEarly: false,
+          judgementRuleVersion: 1, startedAtUtc: "2026-08-14T00:00:00.000Z",
+        },
+        judgement: "partial",
+        evidenceCodes: ["final_ac", "controlled_help_l2", "debug_not_needed"],
+        failureReasons: [{ code: "keyPropertyBlocked", otherText: null }],
+        completedAtUtc: "2026-08-14T00:10:00.000Z",
+        completedLocalDate: "2026-08-14",
+        lifecycle: {
+          learningStatus: "relearning",
+          learningStatusSinceUtc: "2026-08-14T00:10:00.000Z",
+          nextReviewDueLocalDate: null,
+          availableActions: ["startRelearning", "stopLearning"],
+        },
+      };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const start = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Start Review");
+    assert.ok(start);
+    await act(async () => start.click());
+    await settle();
+    assert.equal(startCalls, 1);
+    assert.equal(focusCalls, 1);
+    assert.equal(view.window.location.pathname, `/review/${attemptId}`);
+    assert.equal(view.document.querySelector("nav"), null);
+    assert.match(view.document.body.textContent, /SAFE STATEMENT/);
+    assert.match(view.document.body.textContent, /Open original OJ/);
+    assert.doesNotMatch(view.document.body.textContent, /SECRET SOLUTION/);
+    assert.doesNotMatch(view.document.body.textContent, /Obsidian/);
+    const openHelp = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Open controlled help");
+    await act(async () => openHelp.click());
+    await settle();
+    assert.equal(drawerCalls, 1);
+    assert.match(view.document.body.textContent, /Opening this drawer records nothing/);
+    assert.equal(view.document.activeElement?.textContent, "Controlled help");
+    assert.doesNotMatch(view.document.body.textContent, /REVEALED ONLY AFTER EVIDENCE/);
+    assert.equal(revealCalls.length, 0);
+    const hintRow = [...view.document.querySelectorAll(".review-help-levels li")]
+      .find((row) => row.textContent.includes("Level 2"));
+    await act(async () => hintRow.querySelector("button").click());
+    assert.match(view.document.body.textContent, /Partial at best/);
+    assert.equal(view.document.activeElement?.textContent, "Confirm and reveal");
+    assert.equal(revealCalls.length, 0, "confirmation precedes reveal IPC");
+    const confirm = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Confirm and reveal");
+    await act(async () => confirm.click());
+    await settle();
+    assert.deepEqual(revealCalls, [{ attemptId, level: 2, impactAcknowledged: true }]);
+    assert.match(view.document.body.textContent, /REVEALED ONLY AFTER EVIDENCE/);
+    const solutionRow = [...view.document.querySelectorAll(".review-help-levels li")]
+      .find((row) => row.textContent.includes("Level 5"));
+    await act(async () => solutionRow.querySelector("button").click());
+    assert.match(view.document.body.textContent, /can only be judged Not passed/);
+    assert.equal(revealCalls.length, 1, "Level 5 needs its own confirmation");
+    const cancel = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Cancel");
+    await act(async () => cancel.click());
+    assert.doesNotMatch(view.document.body.textContent, /FULL SOLUTION AFTER EVIDENCE/);
+    assert.equal(view.document.activeElement?.textContent, "Controlled help");
+    const closeHelp = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Close");
+    await act(async () => closeHelp.click());
+    assert.equal(view.document.activeElement, openHelp);
+    const voidTrigger = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Void mistaken Attempt");
+    await act(async () => voidTrigger.click());
+    const voidDialog = view.document.querySelector('[aria-labelledby="void-review-title"]');
+    const voidReason = voidDialog.querySelector("input");
+    assert.equal(view.document.activeElement, voidReason);
+    const voidCancel = [...voidDialog.querySelectorAll("button")]
+      .find((button) => button.textContent === "Cancel");
+    voidCancel.focus();
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
+    assert.equal(view.document.activeElement, voidReason, "Tab stays inside the modal");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    assert.equal(view.document.querySelector('[aria-labelledby="void-review-title"]'), null);
+    assert.equal(view.document.activeElement, voidTrigger);
+    const complete = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Complete from facts");
+    await act(async () => complete.click());
+    await settle();
+    assert.equal(completeCalls.length, 1);
+    assert.match(view.document.body.textContent, /Select at least one failure reason/);
+    const reason = [...view.document.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Direction found, key property blocked"));
+    await act(async () => reason.querySelector("input").click());
+    await act(async () => complete.click());
+    await settle();
+    assert.equal(completeCalls.length, 2);
+    assert.deepEqual(completeCalls[1].failureReasons, [{ code: "keyPropertyBlocked", otherText: null }]);
+    assert.match(view.document.body.textContent, /Completed Review/);
+    assert.match(view.document.body.textContent, /Partial/);
+    assert.match(view.document.body.textContent, /回炉中/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Review history preserves an earlier Mastered result after a later Partial result", {
+  concurrency: false,
+}, async () => {
+  const attempt = (attemptId, startedAtUtc) => ({
+    attemptId, contestId: 1979, index: "A", attemptType: "longTermReview",
+    scheduledDueLocalDate: "2026-08-24", startedEarly: false,
+    judgementRuleVersion: 1, startedAtUtc,
+  });
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "lightweight", personalNote: null,
+      lifecycle: lightweightLifecycle, reviewAction: null,
+    };
+    if (command === "review_history") return {
+      contestId: 1979,
+      index: "A",
+      historicalBestReview: "mastered",
+      attempts: [
+        {
+          attempt: attempt("018f0d8e-4a5b-7c6d-8e9f-0123456789ad", "2026-08-24T00:00:00.000Z"),
+          status: "completed", judgement: "partial", completionFacts: null,
+          evidenceCodes: ["final_ac", "external_solving_hint"],
+          failureReasons: [{ code: "keyPropertyBlocked", otherText: null }], helpLevels: [],
+          completedAtUtc: "2026-08-24T01:00:00.000Z", completedLocalDate: "2026-08-24",
+          voidReason: null, voidedAtUtc: null,
+        },
+        {
+          attempt: attempt("018f0d8e-4a5b-7c6d-8e9f-0123456789ab", "2026-08-14T00:00:00.000Z"),
+          status: "completed", judgement: "mastered", completionFacts: null,
+          evidenceCodes: ["final_ac"], failureReasons: [], helpLevels: [],
+          completedAtUtc: "2026-08-14T01:00:00.000Z", completedLocalDate: "2026-08-14",
+          voidReason: null, voidedAtUtc: null,
+        },
+      ],
+    };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const load = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Load Review history");
+    await act(async () => load.click());
+    await settle();
+    assert.match(view.document.body.textContent, /Historical best Review evidence:\s*Mastered/);
+    assert.match(view.document.body.textContent, /Partial/);
+    assert.match(view.document.body.textContent, /Direction found, key property blocked/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("Problem detail preserves Personal identity when the Vault is unavailable", {
   concurrency: false,
 }, async () => {
@@ -526,6 +778,67 @@ test("Problem detail preserves Personal identity when the Vault is unavailable",
         .some((button) => button.textContent === "Create my note"),
       false,
     );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("six mastery evidence items preserve historical thorough digestion after current regression", {
+  concurrency: false,
+}, async () => {
+  const updates = [];
+  const blank = {
+    recallsProblem: false, multipleSolutionsClear: false, knowledgeUnderstood: false,
+    implementationFluent: false, canAdaptOrCreate: false, transferSolvedIndependently: false,
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "lightweight", personalNote: null,
+      lifecycle: { ...lightweightLifecycle, learningStatus: "relearning" }, reviewAction: null,
+    };
+    if (command === "review_history") return {
+      contestId: 1979, index: "A", historicalBestReview: null, attempts: [],
+      mastery: { current: blank, historicalThoroughlyDigested: false, firstThoroughlyDigestedLocalDate: null },
+    };
+    if (command === "update_problem_mastery_evidence") {
+      updates.push(args.input.evidence);
+      const all = Object.values(args.input.evidence).every(Boolean);
+      return {
+        current: args.input.evidence,
+        historicalThoroughlyDigested: true,
+        firstThoroughlyDigestedLocalDate: "2026-08-12",
+        ...(all ? {} : {}),
+      };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    const load = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Load Review history");
+    await act(async () => load.click());
+    await settle();
+    const checks = [...view.document.querySelectorAll(".mastery-evidence input[type='checkbox']")];
+    assert.equal(checks.length, 6);
+    for (const check of checks) await act(async () => check.click());
+    const save = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Save current evidence");
+    await act(async () => save.click());
+    await settle();
+    assert.equal(updates.length, 1);
+    assert.ok(Object.values(updates[0]).every(Boolean));
+    assert.match(view.document.body.textContent, /Historical highest:\s*Thoroughly digested · first reached 2026-08-12/);
+    await act(async () => checks[5].click());
+    await act(async () => save.click());
+    await settle();
+    assert.equal(updates.length, 2);
+    assert.equal(updates[1].transferSolvedIndependently, false);
+    assert.match(view.document.body.textContent, /Current:\s*5\/6 evidence criteria/);
+    assert.match(view.document.body.textContent, /Historical highest:\s*Thoroughly digested/);
+    assert.match(view.document.body.textContent, /回炉中|鍥炵倝涓?/);
   } finally {
     await view.cleanup();
   }

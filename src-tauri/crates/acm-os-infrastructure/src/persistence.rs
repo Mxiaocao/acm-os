@@ -15,7 +15,11 @@ use acm_os_application::{
     PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
     PersonalNoteDeletionError, PersonalNoteDeletionPort, PreparedPersonalNoteDeletion,
     ProblemIdentityType, ActiveReviewCycle, ProblemLifecycleError, ProblemLifecyclePort,
-    ProblemLifecycleState, CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
+    CompletedReviewAttempt, ProblemLifecycleState, RevealedReviewHelp, ReviewAttempt,
+    ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus, ReviewCompletionContext,
+    ReviewCompletionInput, ReviewFailureReason, ReviewFocusView, ReviewHelpDrawerView,
+    ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, ProblemMasteryProjection, SubmissionFact,
+    CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
     StatementSnapshotDraft, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
@@ -63,6 +67,64 @@ impl DatabaseRuntime {
         self._pool
             .as_ref()
             .ok_or(WorkspacePersistenceError::Unavailable)
+    }
+
+    async fn review_help_sources(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<(acm_os_domain::ReviewHelpLevel, Option<crate::markdown::ReviewHelpContent>)>, ReviewAttemptError> {
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT p.external_contest_key, p.external_problem_key \
+             FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+             WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
+        )
+        .bind(attempt_id)
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let (contest_id, index) = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(
+            u64::try_from(contest_id).map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        )
+        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        let binding = match self.read_personal_note_projection(&problem).await {
+            Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
+            Ok(PersonalNoteReadState::LocationAnomaly { .. })
+            | Ok(PersonalNoteReadState::VaultUnavailable { .. })
+            | Err(PersonalNoteReadError::BindingUnavailable)
+            | Err(PersonalNoteReadError::FileReadFailed) => {
+                return Err(ReviewAttemptError::NoteUnavailable);
+            }
+            Err(PersonalNoteReadError::InvalidUtf8) => {
+                return Err(ReviewAttemptError::InvalidMarkdown);
+            }
+            Err(PersonalNoteReadError::ProblemNotFound)
+            | Err(PersonalNoteReadError::NotPersonal) => {
+                return Err(ReviewAttemptError::IntegrityViolation);
+            }
+            Err(PersonalNoteReadError::PersistenceUnavailable) => {
+                return Err(ReviewAttemptError::PersistenceUnavailable);
+            }
+        };
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?
+            .ok_or(ReviewAttemptError::NoteUnavailable)?;
+        let vault = workspace.active_vault_path().to_owned();
+        let note_relative_path = binding.vault_relative_path;
+        let knowledge_root = workspace.knowledge_root_path().to_owned();
+        tokio::task::spawn_blocking(move || {
+            build_review_help_sources(&vault, &note_relative_path, &knowledge_root)
+        })
+        .await
+        .map_err(|_| ReviewAttemptError::NoteUnavailable)?
     }
 
     async fn update_binding_state(
@@ -203,8 +265,11 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             }
             _ => return Err(ProblemLifecycleError::IntegrityViolation),
         };
-        if (learning_status == acm_os_domain::LearningStatus::WaitingColdStart)
-            != active_review_cycle.is_some()
+        if matches!(
+            learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+                | acm_os_domain::LearningStatus::LongTermReview
+        ) != active_review_cycle.is_some()
         {
             return Err(ProblemLifecycleError::IntegrityViolation);
         }
@@ -254,6 +319,17 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             return Err(ProblemLifecycleError::NotPersonal);
         }
         if parse_learning_status(&current_status)? != decision.previous_status {
+            return Err(ProblemLifecycleError::InvalidTransition);
+        }
+        let in_progress_review: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts \
+             WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(problem_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        if in_progress_review != 0 {
             return Err(ProblemLifecycleError::InvalidTransition);
         }
 
@@ -352,6 +428,1242 @@ fn learning_status_value(value: acm_os_domain::LearningStatus) -> &'static str {
     }
 }
 
+fn build_review_help_sources(
+    active_vault: &str,
+    note_relative_path: &str,
+    knowledge_root: &str,
+) -> Result<
+    Vec<(acm_os_domain::ReviewHelpLevel, Option<crate::markdown::ReviewHelpContent>)>,
+    ReviewAttemptError,
+> {
+    let vault = std::fs::canonicalize(active_vault)
+        .map_err(|_| ReviewAttemptError::NoteUnavailable)?;
+    let note = std::fs::canonicalize(vault.join(note_relative_path))
+        .map_err(|_| ReviewAttemptError::NoteUnavailable)?;
+    if !note.starts_with(&vault) {
+        return Err(ReviewAttemptError::NoteUnavailable);
+    }
+    let bytes = std::fs::read(&note).map_err(|_| ReviewAttemptError::NoteUnavailable)?;
+    let markdown = std::str::from_utf8(&bytes)
+        .map_err(|_| ReviewAttemptError::InvalidMarkdown)?;
+    let mut sources = Vec::new();
+    for level_number in 1..=5 {
+        let level = acm_os_domain::ReviewHelpLevel::from_number(level_number)
+            .ok_or(ReviewAttemptError::IntegrityViolation)?;
+        let content = if level == acm_os_domain::ReviewHelpLevel::PrerequisiteContent {
+            resolve_prerequisite_content(markdown, knowledge_root)
+        } else {
+            crate::markdown::review_help_content(markdown, level)
+        };
+        sources.push((level, content));
+    }
+    Ok(sources)
+}
+
+fn resolve_prerequisite_content(
+    problem_markdown: &str,
+    knowledge_root: &str,
+) -> Option<crate::markdown::ReviewHelpContent> {
+    let targets = crate::markdown::prerequisite_targets(problem_markdown)?;
+    let root = std::fs::canonicalize(knowledge_root).ok()?;
+    let files = markdown_files_under(&root).ok()?;
+    let mut sections = Vec::new();
+    for target in targets {
+        let normalized = target.replace('\\', "/");
+        let matches = files
+            .iter()
+            .filter(|path| knowledge_target_matches(&root, path, &normalized))
+            .collect::<Vec<_>>();
+        let [path] = matches.as_slice() else {
+            return None;
+        };
+        let resolved = std::fs::canonicalize(path).ok()?;
+        if !resolved.starts_with(&root) {
+            return None;
+        }
+        let content = std::fs::read_to_string(resolved).ok()?;
+        sections.push(format!("# {target}\n\n{content}"));
+    }
+    Some(crate::markdown::ReviewHelpContent {
+        title: "Prerequisite content".to_owned(),
+        markdown: sections.join("\n\n---\n\n"),
+    })
+}
+
+fn markdown_files_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit(&entry.path(), files)?;
+            } else if file_type.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            {
+                files.push(entry.path());
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, &mut files)?;
+    Ok(files)
+}
+
+fn knowledge_target_matches(root: &Path, path: &Path, target: &str) -> bool {
+    let relative = match path.strip_prefix(root) {
+        Ok(relative) => relative,
+        Err(_) => return false,
+    };
+    let without_extension = relative.with_extension("");
+    let relative_target = without_extension.to_string_lossy().replace('\\', "/");
+    if target.contains('/') {
+        relative_target.eq_ignore_ascii_case(target)
+    } else {
+        without_extension
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(target))
+    }
+}
+
+type ReviewAttemptRow = (String, i64, String, String, String, i64, i64, String);
+
+#[derive(sqlx::FromRow)]
+struct ReviewHistoryRow {
+    id: String,
+    contest_id: i64,
+    problem_index: String,
+    attempt_type: String,
+    scheduled_due_local_date: String,
+    started_early: i64,
+    judgement_rule_version: i64,
+    started_at_utc: String,
+    attempt_status: String,
+    judgement: Option<String>,
+    completed_at_utc: Option<String>,
+    completed_local_date: Option<String>,
+    final_ac: Option<i64>,
+    first_submission_result: Option<String>,
+    final_result: Option<String>,
+    total_submissions: Option<i64>,
+    idea_independent: Option<i64>,
+    implementation_independent: Option<i64>,
+    debug_independence: Option<String>,
+    external_help: Option<String>,
+    evidence_codes_json: Option<String>,
+    void_reason: Option<String>,
+    voided_at_utc: Option<String>,
+}
+
+fn submission_fact_value(fact: &SubmissionFact) -> String {
+    match fact.result {
+        acm_os_domain::SubmissionResult::Accepted => "accepted".to_owned(),
+        acm_os_domain::SubmissionResult::WrongAnswer => "wrong_answer".to_owned(),
+        acm_os_domain::SubmissionResult::TimeLimitExceeded => "time_limit_exceeded".to_owned(),
+        acm_os_domain::SubmissionResult::MemoryLimitExceeded => "memory_limit_exceeded".to_owned(),
+        acm_os_domain::SubmissionResult::RuntimeError => "runtime_error".to_owned(),
+        acm_os_domain::SubmissionResult::CompilationError => "compilation_error".to_owned(),
+        acm_os_domain::SubmissionResult::Other => {
+            format!("other:{}", fact.other_text.as_deref().unwrap_or_default())
+        }
+    }
+}
+
+fn parse_submission_fact(value: &str) -> Result<SubmissionFact, ReviewAttemptError> {
+    let (result, other_text) = match value {
+        "accepted" => (acm_os_domain::SubmissionResult::Accepted, None),
+        "wrong_answer" => (acm_os_domain::SubmissionResult::WrongAnswer, None),
+        "time_limit_exceeded" => (acm_os_domain::SubmissionResult::TimeLimitExceeded, None),
+        "memory_limit_exceeded" => (acm_os_domain::SubmissionResult::MemoryLimitExceeded, None),
+        "runtime_error" => (acm_os_domain::SubmissionResult::RuntimeError, None),
+        "compilation_error" => (acm_os_domain::SubmissionResult::CompilationError, None),
+        value if value.starts_with("other:") && value.len() > 6 => (
+            acm_os_domain::SubmissionResult::Other,
+            Some(value[6..].to_owned()),
+        ),
+        _ => return Err(ReviewAttemptError::IntegrityViolation),
+    };
+    Ok(SubmissionFact { result, other_text })
+}
+
+fn debug_independence_value(value: acm_os_domain::DebugIndependence) -> &'static str {
+    match value {
+        acm_os_domain::DebugIndependence::NotNeeded => "not_needed",
+        acm_os_domain::DebugIndependence::Independent => "independent",
+        acm_os_domain::DebugIndependence::UsedSolvingHelp => "used_solving_help",
+    }
+}
+
+fn parse_debug_independence(value: &str) -> Result<acm_os_domain::DebugIndependence, ReviewAttemptError> {
+    match value {
+        "not_needed" => Ok(acm_os_domain::DebugIndependence::NotNeeded),
+        "independent" => Ok(acm_os_domain::DebugIndependence::Independent),
+        "used_solving_help" => Ok(acm_os_domain::DebugIndependence::UsedSolvingHelp),
+        _ => Err(ReviewAttemptError::IntegrityViolation),
+    }
+}
+
+fn external_help_value(value: acm_os_domain::ExternalHelpLevel) -> &'static str {
+    match value {
+        acm_os_domain::ExternalHelpLevel::None => "none",
+        acm_os_domain::ExternalHelpLevel::SolvingHint => "solving_hint",
+        acm_os_domain::ExternalHelpLevel::FullSolution => "full_solution",
+    }
+}
+
+fn parse_external_help(value: &str) -> Result<acm_os_domain::ExternalHelpLevel, ReviewAttemptError> {
+    match value {
+        "none" => Ok(acm_os_domain::ExternalHelpLevel::None),
+        "solving_hint" => Ok(acm_os_domain::ExternalHelpLevel::SolvingHint),
+        "full_solution" => Ok(acm_os_domain::ExternalHelpLevel::FullSolution),
+        _ => Err(ReviewAttemptError::IntegrityViolation),
+    }
+}
+
+fn judgement_value(value: acm_os_domain::ReviewJudgement) -> &'static str {
+    match value {
+        acm_os_domain::ReviewJudgement::Mastered => "mastered",
+        acm_os_domain::ReviewJudgement::Partial => "partial",
+        acm_os_domain::ReviewJudgement::Fail => "fail",
+    }
+}
+
+fn parse_judgement(value: &str) -> Result<acm_os_domain::ReviewJudgement, ReviewAttemptError> {
+    match value {
+        "mastered" => Ok(acm_os_domain::ReviewJudgement::Mastered),
+        "partial" => Ok(acm_os_domain::ReviewJudgement::Partial),
+        "fail" => Ok(acm_os_domain::ReviewJudgement::Fail),
+        _ => Err(ReviewAttemptError::IntegrityViolation),
+    }
+}
+
+fn failure_reason_value(reason: &ReviewFailureReason) -> (&'static str, Option<&str>) {
+    match reason {
+        ReviewFailureReason::NoIdea => ("no_idea", None),
+        ReviewFailureReason::KeyPropertyBlocked => ("key_property_blocked", None),
+        ReviewFailureReason::DerivationBlocked => ("derivation_blocked", None),
+        ReviewFailureReason::CannotImplement => ("cannot_implement", None),
+        ReviewFailureReason::ImplementationError => ("implementation_error", None),
+        ReviewFailureReason::BoundaryError => ("boundary_error", None),
+        ReviewFailureReason::ComplexityError => ("complexity_error", None),
+        ReviewFailureReason::Other(text) => ("other", Some(text.as_str())),
+    }
+}
+
+fn parse_failure_reason(code: &str, other: Option<String>) -> Result<ReviewFailureReason, ReviewAttemptError> {
+    match (code, other) {
+        ("no_idea", None) => Ok(ReviewFailureReason::NoIdea),
+        ("key_property_blocked", None) => Ok(ReviewFailureReason::KeyPropertyBlocked),
+        ("derivation_blocked", None) => Ok(ReviewFailureReason::DerivationBlocked),
+        ("cannot_implement", None) => Ok(ReviewFailureReason::CannotImplement),
+        ("implementation_error", None) => Ok(ReviewFailureReason::ImplementationError),
+        ("boundary_error", None) => Ok(ReviewFailureReason::BoundaryError),
+        ("complexity_error", None) => Ok(ReviewFailureReason::ComplexityError),
+        ("other", Some(text)) if !text.trim().is_empty() => Ok(ReviewFailureReason::Other(text)),
+        _ => Err(ReviewAttemptError::IntegrityViolation),
+    }
+}
+
+async fn load_review_history_item_from_pool(
+    pool: &SqlitePool,
+    attempt_id: &str,
+) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+    let row: Option<ReviewHistoryRow> = sqlx::query_as(
+        "SELECT ra.id, p.external_contest_key AS contest_id, \
+                p.external_problem_key AS problem_index, ra.attempt_type, \
+                ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                ra.started_at_utc, ra.attempt_status, ra.judgement, ra.completed_at_utc, \
+                ra.completed_local_date, ra.final_ac, ra.first_submission_result, \
+                ra.final_result, ra.total_submissions, ra.idea_independent, \
+                ra.implementation_independent, ra.debug_independence, ra.external_help, \
+                ra.evidence_codes_json, rve.reason AS void_reason, rve.voided_at_utc \
+         FROM review_attempts ra \
+         JOIN problems p ON p.id = ra.problem_id \
+         LEFT JOIN review_void_events rve ON rve.review_attempt_id = ra.id \
+         WHERE ra.id = ?1",
+    )
+    .bind(attempt_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let row = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
+    let attempt = review_attempt_from_row((
+        row.id,
+        row.contest_id,
+        row.problem_index,
+        row.attempt_type,
+        row.scheduled_due_local_date,
+        row.started_early,
+        row.judgement_rule_version,
+        row.started_at_utc,
+    ))?;
+    let reason_rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT reason_code, other_text FROM review_failure_reasons \
+         WHERE review_attempt_id = ?1 ORDER BY reason_code",
+    )
+    .bind(attempt_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let failure_reasons = reason_rows
+        .into_iter()
+        .map(|(code, other)| parse_failure_reason(&code, other))
+        .collect::<Result<Vec<_>, _>>()?;
+    let help_numbers: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT help_level FROM review_help_usage_events \
+         WHERE review_attempt_id = ?1 ORDER BY help_level",
+    )
+    .bind(attempt_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let help_levels = help_numbers
+        .into_iter()
+        .map(|number| {
+            u8::try_from(number)
+                .ok()
+                .and_then(acm_os_domain::ReviewHelpLevel::from_number)
+                .ok_or(ReviewAttemptError::IntegrityViolation)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let status = match row.attempt_status.as_str() {
+        "in_progress" => ReviewAttemptStatus::InProgress,
+        "completed" => ReviewAttemptStatus::Completed,
+        "void" => ReviewAttemptStatus::Void,
+        _ => return Err(ReviewAttemptError::IntegrityViolation),
+    };
+    let judgement = row.judgement.as_deref().map(parse_judgement).transpose()?;
+    let evidence_codes: Vec<String> = match row.evidence_codes_json {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        None => Vec::new(),
+    };
+    let completion_input = match status {
+        ReviewAttemptStatus::Completed => Some(ReviewCompletionInput {
+            final_ac: match row.final_ac {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err(ReviewAttemptError::IntegrityViolation),
+            },
+            first_submission: parse_submission_fact(
+                row.first_submission_result
+                    .as_deref()
+                    .ok_or(ReviewAttemptError::IntegrityViolation)?,
+            )?,
+            final_submission: parse_submission_fact(
+                row.final_result
+                    .as_deref()
+                    .ok_or(ReviewAttemptError::IntegrityViolation)?,
+            )?,
+            total_submissions: u32::try_from(
+                row.total_submissions
+                    .ok_or(ReviewAttemptError::IntegrityViolation)?,
+            )
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+            idea_independent: match row.idea_independent {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err(ReviewAttemptError::IntegrityViolation),
+            },
+            implementation_independent: match row.implementation_independent {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err(ReviewAttemptError::IntegrityViolation),
+            },
+            debug_independence: parse_debug_independence(
+                row.debug_independence
+                    .as_deref()
+                    .ok_or(ReviewAttemptError::IntegrityViolation)?,
+            )?,
+            external_help: parse_external_help(
+                row.external_help
+                    .as_deref()
+                    .ok_or(ReviewAttemptError::IntegrityViolation)?,
+            )?,
+            failure_reasons: failure_reasons.clone(),
+        }),
+        ReviewAttemptStatus::InProgress | ReviewAttemptStatus::Void => None,
+    };
+    if (status == ReviewAttemptStatus::Completed)
+        != (judgement.is_some()
+            && row.completed_local_date.is_some()
+            && row.completed_at_utc.is_some()
+            && completion_input.is_some())
+        || (status == ReviewAttemptStatus::Void)
+            != (row.void_reason.is_some() && row.voided_at_utc.is_some())
+    {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    Ok(ReviewHistoryItem {
+        attempt,
+        status,
+        judgement,
+        completion_input,
+        evidence_codes,
+        failure_reasons,
+        help_levels,
+        completed_at_utc: row.completed_at_utc,
+        completed_local_date: row
+            .completed_local_date
+            .as_deref()
+            .map(acm_os_domain::LocalDate::parse_iso)
+            .transpose()
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        void_reason: row.void_reason,
+        voided_at_utc: row.voided_at_utc,
+    })
+}
+
+fn review_attempt_from_row(row: ReviewAttemptRow) -> Result<ReviewAttempt, ReviewAttemptError> {
+    let (attempt_id, contest_id, index, attempt_type, due, started_early, rule_version, started_at) =
+        row;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(
+        u64::try_from(contest_id).map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+    )
+    .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    let attempt_type = match attempt_type.as_str() {
+        "first_cold_start" => acm_os_domain::ReviewAttemptType::FirstColdStart,
+        "long_term_review" => acm_os_domain::ReviewAttemptType::LongTermReview,
+        "early_check" => acm_os_domain::ReviewAttemptType::EarlyCheck,
+        _ => return Err(ReviewAttemptError::IntegrityViolation),
+    };
+    let started_early = match started_early {
+        0 => false,
+        1 => true,
+        _ => return Err(ReviewAttemptError::IntegrityViolation),
+    };
+    if (attempt_type == acm_os_domain::ReviewAttemptType::EarlyCheck) != started_early {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    Ok(ReviewAttempt {
+        attempt_id,
+        problem,
+        attempt_type,
+        scheduled_due_local_date: acm_os_domain::LocalDate::parse_iso(&due)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        started_early,
+        judgement_rule_version: u32::try_from(rule_version)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        started_at_utc: started_at,
+    })
+}
+
+fn review_attempt_type_value(value: acm_os_domain::ReviewAttemptType) -> &'static str {
+    match value {
+        acm_os_domain::ReviewAttemptType::FirstColdStart => "first_cold_start",
+        acm_os_domain::ReviewAttemptType::LongTermReview => "long_term_review",
+        acm_os_domain::ReviewAttemptType::EarlyCheck => "early_check",
+    }
+}
+
+impl ReviewAttemptPort for DatabaseRuntime {
+    async fn load_in_progress_review_attempt(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Option<ReviewAttempt>, ReviewAttemptError> {
+        let row: Option<ReviewAttemptRow> = sqlx::query_as(
+            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                    ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                    ra.started_at_utc \
+             FROM review_attempts ra \
+             JOIN problems p ON p.id = ra.problem_id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        row.map(review_attempt_from_row).transpose()
+    }
+
+    async fn create_or_resume_review_attempt(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        eligibility: acm_os_domain::ReviewEligibilityDecision,
+    ) -> Result<ReviewAttempt, ReviewAttemptError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let existing: Option<ReviewAttemptRow> = sqlx::query_as(
+            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                    ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                    ra.started_at_utc \
+             FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if let Some(row) = existing {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            return review_attempt_from_row(row);
+        }
+
+        let current: Option<(i64, String, String, String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, pls.learning_status, rc.id, rc.next_due_local_date, \
+                    ss.problem_id \
+             FROM problems p \
+             JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let (problem_id, identity_type, status, review_cycle_id, due, statement_problem_id) =
+            current.ok_or(ReviewAttemptError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(ReviewAttemptError::NotPersonal);
+        }
+        if statement_problem_id != Some(problem_id) {
+            return Err(ReviewAttemptError::StatementMissing);
+        }
+        let status = parse_learning_status(&status)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        if due != eligibility.scheduled_due_local_date.to_iso_string() {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+        let expected_scheduled_type = match status {
+            acm_os_domain::LearningStatus::WaitingColdStart => {
+                acm_os_domain::ReviewAttemptType::FirstColdStart
+            }
+            acm_os_domain::LearningStatus::LongTermReview => {
+                acm_os_domain::ReviewAttemptType::LongTermReview
+            }
+            _ => return Err(ReviewAttemptError::NotEligible),
+        };
+        if (eligibility.started_early
+            && eligibility.attempt_type != acm_os_domain::ReviewAttemptType::EarlyCheck)
+            || (!eligibility.started_early && eligibility.attempt_type != expected_scheduled_type)
+        {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let started_at: String = sqlx::query_scalar(
+            "INSERT INTO review_attempts \
+                (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, \
+                 started_early, judgement_rule_version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             RETURNING started_at_utc",
+        )
+        .bind(&attempt_id)
+        .bind(problem_id)
+        .bind(review_cycle_id)
+        .bind(review_attempt_type_value(eligibility.attempt_type))
+        .bind(eligibility.scheduled_due_local_date.to_iso_string())
+        .bind(i64::from(eligibility.started_early))
+        .bind(i64::from(
+            acm_os_domain::ReviewEligibilityEngine::JUDGEMENT_RULE_VERSION,
+        ))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+                ReviewAttemptError::IntegrityViolation
+            } else {
+                ReviewAttemptError::PersistenceUnavailable
+            }
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        Ok(ReviewAttempt {
+            attempt_id,
+            problem: problem.clone(),
+            attempt_type: eligibility.attempt_type,
+            scheduled_due_local_date: eligibility.scheduled_due_local_date,
+            started_early: eligibility.started_early,
+            judgement_rule_version:
+                acm_os_domain::ReviewEligibilityEngine::JUDGEMENT_RULE_VERSION,
+            started_at_utc: started_at,
+        })
+    }
+
+    async fn load_review_focus(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewFocusView, ReviewAttemptError> {
+        let row: Option<(
+            String,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                    ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                    ra.started_at_utc, p.title, p.source_url, ss.sanitized_html \
+             FROM review_attempts ra \
+             JOIN problems p ON p.id = ra.problem_id \
+             JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
+        )
+        .bind(attempt_id)
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let (
+            id,
+            contest_id,
+            index,
+            attempt_type,
+            due,
+            started_early,
+            rule_version,
+            started_at,
+            title,
+            source_url,
+            statement_sanitized_html,
+        ) = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
+        let attempt = review_attempt_from_row((
+            id,
+            contest_id,
+            index,
+            attempt_type,
+            due,
+            started_early,
+            rule_version,
+            started_at,
+        ))?;
+        let statement_assets = self
+            .statement_assets(&attempt.problem)
+            .await
+            .map_err(|error| match error {
+                ContestReadError::NotFound => ReviewAttemptError::ProblemNotFound,
+                ContestReadError::Unavailable => ReviewAttemptError::PersistenceUnavailable,
+            })?;
+        Ok(ReviewFocusView {
+            attempt,
+            title,
+            source_url,
+            statement_sanitized_html,
+            statement_assets,
+        })
+    }
+
+    async fn load_review_help_drawer(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewHelpDrawerView, ReviewAttemptError> {
+        let sources = self.review_help_sources(attempt_id).await?;
+        let revealed: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT help_level, MAX(revealed_at_utc) \
+             FROM review_help_usage_events WHERE review_attempt_id = ?1 GROUP BY help_level",
+        )
+        .bind(attempt_id)
+        .fetch_all(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let items = sources
+            .into_iter()
+            .map(|(level, content)| ReviewHelpItem {
+                level,
+                available: content.is_some(),
+                revealed_at_utc: revealed
+                    .iter()
+                    .find(|(number, _)| *number == i64::from(level.number()))
+                    .map(|(_, revealed_at)| revealed_at.clone()),
+            })
+            .collect();
+        Ok(ReviewHelpDrawerView {
+            attempt_id: attempt_id.to_owned(),
+            items,
+        })
+    }
+
+    async fn reveal_review_help(
+        &self,
+        attempt_id: &str,
+        level: acm_os_domain::ReviewHelpLevel,
+        impact_acknowledged: bool,
+    ) -> Result<RevealedReviewHelp, ReviewAttemptError> {
+        // Authority order: fresh disk read and exact section resolution happen before any
+        // durable evidence, while content is returned only after the event transaction commits.
+        let sources = self.review_help_sources(attempt_id).await?;
+        let content = sources
+            .into_iter()
+            .find(|(candidate, _)| *candidate == level)
+            .and_then(|(_, content)| content)
+            .ok_or(ReviewAttemptError::HelpContentUnavailable)?;
+        let source_digest = sha256_hex(content.markdown.as_bytes());
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts WHERE id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(attempt_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if active != 1 {
+            return Err(ReviewAttemptError::AttemptNotFound);
+        }
+        let previously_revealed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_help_usage_events \
+             WHERE review_attempt_id = ?1 AND help_level = ?2",
+        )
+        .bind(attempt_id)
+        .bind(i64::from(level.number()))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if previously_revealed == 0 && !impact_acknowledged {
+            return Err(ReviewAttemptError::HelpConfirmationRequired);
+        }
+        let event_id = uuid::Uuid::now_v7().to_string();
+        let revealed_at_utc: String = sqlx::query_scalar(
+            "INSERT INTO review_help_usage_events \
+                (id, review_attempt_id, help_level, source_digest) \
+             VALUES (?1, ?2, ?3, ?4) RETURNING revealed_at_utc",
+        )
+        .bind(&event_id)
+        .bind(attempt_id)
+        .bind(i64::from(level.number()))
+        .bind(&source_digest)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        Ok(RevealedReviewHelp {
+            event_id,
+            attempt_id: attempt_id.to_owned(),
+            level,
+            title: content.title,
+            content_markdown: content.markdown,
+            source_digest,
+            revealed_at_utc,
+        })
+    }
+
+    async fn load_review_completion_context(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewCompletionContext, ReviewAttemptError> {
+        let row: Option<(String, i64, String, String, String, i64, i64, String, String, i64)> =
+            sqlx::query_as(
+                "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                        ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                        ra.started_at_utc, pls.learning_status, rc.stage \
+                 FROM review_attempts ra \
+                 JOIN problems p ON p.id = ra.problem_id \
+                 JOIN problem_learning_states pls ON pls.problem_id = p.id \
+                 JOIN review_cycles rc ON rc.id = ra.review_cycle_id AND rc.cycle_status = 'active' \
+                 WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
+            )
+            .bind(attempt_id)
+            .fetch_optional(
+                self._pool
+                    .as_ref()
+                    .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+            )
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let (id, contest_id, index, attempt_type, due, early, rule, started, status, stage) =
+            row.ok_or(ReviewAttemptError::AttemptNotFound)?;
+        let highest_help: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(help_level) FROM review_help_usage_events WHERE review_attempt_id = ?1",
+        )
+        .bind(attempt_id)
+        .fetch_one(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        Ok(ReviewCompletionContext {
+            attempt: review_attempt_from_row((
+                id, contest_id, index, attempt_type, due, early, rule, started,
+            ))?,
+            learning_status: parse_learning_status(&status)
+                .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+            current_stage: u32::try_from(stage)
+                .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+            highest_help_level: highest_help
+                .map(|number| {
+                    u8::try_from(number)
+                        .ok()
+                        .and_then(acm_os_domain::ReviewHelpLevel::from_number)
+                        .ok_or(ReviewAttemptError::IntegrityViolation)
+                })
+                .transpose()?,
+        })
+    }
+
+    async fn commit_review_completion(
+        &self,
+        context: &ReviewCompletionContext,
+        input: &ReviewCompletionInput,
+        judgement: &acm_os_domain::ReviewJudgementDecision,
+        scheduling: acm_os_domain::ReviewCompletionDecision,
+        completed_on: acm_os_domain::LocalDate,
+    ) -> Result<CompletedReviewAttempt, ReviewAttemptError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let current: Option<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT ra.attempt_status, pls.learning_status, rc.stage, rc.cycle_status \
+             FROM review_attempts ra \
+             JOIN problem_learning_states pls ON pls.problem_id = ra.problem_id \
+             JOIN review_cycles rc ON rc.id = ra.review_cycle_id \
+             WHERE ra.id = ?1",
+        )
+        .bind(&context.attempt.attempt_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let (attempt_status, learning_status, stage, cycle_status) =
+            current.ok_or(ReviewAttemptError::AttemptNotFound)?;
+        if attempt_status != "in_progress" {
+            return Err(ReviewAttemptError::AttemptAlreadyFinished);
+        }
+        if cycle_status != "active"
+            || parse_learning_status(&learning_status)
+                .map_err(|_| ReviewAttemptError::IntegrityViolation)?
+                != context.learning_status
+            || u32::try_from(stage).map_err(|_| ReviewAttemptError::IntegrityViolation)?
+                != context.current_stage
+        {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+        let highest_help: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(help_level) FROM review_help_usage_events WHERE review_attempt_id = ?1",
+        )
+        .bind(&context.attempt.attempt_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let highest_help = highest_help
+            .map(|number| {
+                u8::try_from(number)
+                    .ok()
+                    .and_then(acm_os_domain::ReviewHelpLevel::from_number)
+                    .ok_or(ReviewAttemptError::IntegrityViolation)
+            })
+            .transpose()?;
+        if highest_help != context.highest_help_level {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+        let verified_judgement = acm_os_domain::ReviewJudgementEngine::judge(
+            &input.domain_facts(),
+            highest_help,
+        )
+        .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
+        if &verified_judgement != judgement {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+        let verified_scheduling = acm_os_domain::ReviewSchedulingEngine::complete_review(
+            context.learning_status,
+            context.attempt.attempt_type,
+            judgement.judgement,
+            context.current_stage,
+            completed_on,
+        )
+        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        if verified_scheduling != scheduling {
+            return Err(ReviewAttemptError::IntegrityViolation);
+        }
+        if judgement.judgement == acm_os_domain::ReviewJudgement::Mastered {
+            if !input.failure_reasons.is_empty() {
+                return Err(ReviewAttemptError::InvalidCompletionFacts);
+            }
+        } else if input.failure_reasons.is_empty() {
+            return Err(ReviewAttemptError::FailureReasonRequired);
+        }
+        for reason in &input.failure_reasons {
+            let (code, other) = failure_reason_value(reason);
+            sqlx::query(
+                "INSERT INTO review_failure_reasons (review_attempt_id, reason_code, other_text) \
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(&context.attempt.attempt_id)
+            .bind(code)
+            .bind(other)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
+        }
+        let evidence_codes = judgement
+            .evidence_codes
+            .iter()
+            .map(|code| (*code).to_owned())
+            .collect::<Vec<_>>();
+        let evidence_json = serde_json::to_string(&evidence_codes)
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let completed_at_utc: String = sqlx::query_scalar(
+            "UPDATE review_attempts SET attempt_status = 'completed', judgement = ?2, \
+                    completed_local_date = ?3, final_ac = ?4, first_submission_result = ?5, \
+                    final_result = ?6, total_submissions = ?7, idea_independent = ?8, \
+                    implementation_independent = ?9, debug_independence = ?10, \
+                    external_help = ?11, evidence_codes_json = ?12, \
+                    completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?1 AND attempt_status = 'in_progress' RETURNING completed_at_utc",
+        )
+        .bind(&context.attempt.attempt_id)
+        .bind(judgement_value(judgement.judgement))
+        .bind(completed_on.to_iso_string())
+        .bind(i64::from(input.final_ac))
+        .bind(submission_fact_value(&input.first_submission))
+        .bind(submission_fact_value(&input.final_submission))
+        .bind(i64::from(input.total_submissions))
+        .bind(i64::from(input.idea_independent))
+        .bind(i64::from(input.implementation_independent))
+        .bind(debug_independence_value(input.debug_independence))
+        .bind(external_help_value(input.external_help))
+        .bind(evidence_json)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        match scheduling.cycle {
+            acm_os_domain::ReviewCycleCompletion::Keep => {}
+            acm_os_domain::ReviewCycleCompletion::Advance {
+                next_stage,
+                next_due,
+            } => {
+                let updated = sqlx::query(
+                    "UPDATE review_cycles SET stage = ?2, next_due_local_date = ?3 \
+                     WHERE id = (SELECT review_cycle_id FROM review_attempts WHERE id = ?1) \
+                       AND cycle_status = 'active'",
+                )
+                .bind(&context.attempt.attempt_id)
+                .bind(i64::from(next_stage))
+                .bind(next_due.to_iso_string())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                if updated.rows_affected() != 1 {
+                    return Err(ReviewAttemptError::IntegrityViolation);
+                }
+            }
+            acm_os_domain::ReviewCycleCompletion::Suspend => {
+                let updated = sqlx::query(
+                    "UPDATE review_cycles SET cycle_status = 'suspended', next_due_local_date = NULL, \
+                            ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE id = (SELECT review_cycle_id FROM review_attempts WHERE id = ?1) \
+                       AND cycle_status = 'active'",
+                )
+                .bind(&context.attempt.attempt_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                if updated.rows_affected() != 1 {
+                    return Err(ReviewAttemptError::IntegrityViolation);
+                }
+            }
+        }
+        if scheduling.next_learning_status != context.learning_status {
+            let updated = sqlx::query(
+                "UPDATE problem_learning_states SET learning_status = ?2, \
+                        learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE problem_id = (SELECT problem_id FROM review_attempts WHERE id = ?1)",
+            )
+            .bind(&context.attempt.attempt_id)
+            .bind(learning_status_value(scheduling.next_learning_status))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(ReviewAttemptError::IntegrityViolation);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let lifecycle = self
+            .load_problem_lifecycle(&context.attempt.problem)
+            .await
+            .map_err(|error| match error {
+                ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
+                ProblemLifecycleError::PersistenceUnavailable => {
+                    ReviewAttemptError::PersistenceUnavailable
+                }
+                _ => ReviewAttemptError::IntegrityViolation,
+            })?;
+        Ok(CompletedReviewAttempt {
+            attempt: context.attempt.clone(),
+            judgement: judgement.judgement,
+            evidence_codes,
+            failure_reasons: input.failure_reasons.clone(),
+            completed_at_utc,
+            completed_local_date: completed_on,
+            lifecycle,
+        })
+    }
+
+    async fn void_review_attempt(
+        &self,
+        attempt_id: &str,
+        reason: &str,
+    ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let changed = sqlx::query(
+            "UPDATE review_attempts SET attempt_status = 'void', \
+                    completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if changed.rows_affected() != 1 {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM review_attempts WHERE id = ?1",
+            )
+            .bind(attempt_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            return Err(if exists == 0 {
+                ReviewAttemptError::AttemptNotFound
+            } else {
+                ReviewAttemptError::AttemptAlreadyFinished
+            });
+        }
+        sqlx::query(
+            "INSERT INTO review_void_events (id, review_attempt_id, reason) VALUES (?1, ?2, ?3)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(attempt_id)
+        .bind(reason)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        load_review_history_item_from_pool(pool, attempt_id).await
+    }
+
+    async fn load_review_attempt_history_item(
+        &self,
+        attempt_id: &str,
+    ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+        load_review_history_item_from_pool(
+            self._pool
+                .as_ref()
+                .ok_or(ReviewAttemptError::PersistenceUnavailable)?,
+            attempt_id,
+        )
+        .await
+    }
+
+    async fn load_review_history(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ReviewHistoryView, ReviewAttemptError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = ?1 AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if exists != 1 {
+            return Err(ReviewAttemptError::ProblemNotFound);
+        }
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT ra.id FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2 ORDER BY ra.started_at_utc DESC, ra.id DESC",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let mut attempts = Vec::with_capacity(ids.len());
+        for id in ids {
+            attempts.push(load_review_history_item_from_pool(pool, &id).await?);
+        }
+        let historical_best_review = attempts.iter().filter_map(|item| item.judgement).max();
+        let mastery = load_problem_mastery_projection(pool, problem).await?;
+        Ok(ReviewHistoryView {
+            problem: problem.clone(),
+            historical_best_review,
+            mastery,
+            attempts,
+        })
+    }
+
+    async fn update_problem_mastery_evidence(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        evidence: acm_os_domain::ProblemMasteryEvidence,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let thorough = evidence.is_thoroughly_digested();
+        let updated = sqlx::query(
+            "INSERT INTO problem_mastery_evidence (\
+                 problem_id, recalls_problem, multiple_solutions_clear, knowledge_understood, \
+                 implementation_fluent, can_adapt_or_create, transfer_solved_independently, \
+                 historical_thoroughly_digested, first_thoroughly_digested_local_date, updated_at_utc\
+             ) SELECT p.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+                      CASE WHEN ?9 = 1 THEN ?10 ELSE NULL END, \
+                      strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+               FROM problems p WHERE p.platform = 'codeforces' \
+                AND p.external_contest_key = ?1 AND p.external_problem_key = ?2 \
+             ON CONFLICT(problem_id) DO UPDATE SET \
+                 recalls_problem = excluded.recalls_problem, \
+                 multiple_solutions_clear = excluded.multiple_solutions_clear, \
+                 knowledge_understood = excluded.knowledge_understood, \
+                 implementation_fluent = excluded.implementation_fluent, \
+                 can_adapt_or_create = excluded.can_adapt_or_create, \
+                 transfer_solved_independently = excluded.transfer_solved_independently, \
+                 historical_thoroughly_digested = MAX(\
+                     problem_mastery_evidence.historical_thoroughly_digested, \
+                     excluded.historical_thoroughly_digested\
+                 ), \
+                 first_thoroughly_digested_local_date = COALESCE(\
+                     problem_mastery_evidence.first_thoroughly_digested_local_date, \
+                     excluded.first_thoroughly_digested_local_date\
+                 ), \
+                 updated_at_utc = excluded.updated_at_utc",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .bind(evidence.recalls_problem)
+        .bind(evidence.multiple_solutions_clear)
+        .bind(evidence.knowledge_understood)
+        .bind(evidence.implementation_fluent)
+        .bind(evidence.can_adapt_or_create)
+        .bind(evidence.transfer_solved_independently)
+        .bind(thorough)
+        .bind(confirmed_on.to_iso_string())
+        .execute(pool)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(ReviewAttemptError::ProblemNotFound);
+        }
+        load_problem_mastery_projection(pool, problem).await
+    }
+}
+
+async fn load_problem_mastery_projection(
+    pool: &SqlitePool,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+    let row: Option<(bool, bool, bool, bool, bool, bool, bool, Option<String>)> = sqlx::query_as(
+        "SELECT pme.recalls_problem, pme.multiple_solutions_clear, pme.knowledge_understood, \
+                pme.implementation_fluent, pme.can_adapt_or_create, \
+                pme.transfer_solved_independently, pme.historical_thoroughly_digested, \
+                pme.first_thoroughly_digested_local_date \
+         FROM problem_mastery_evidence pme JOIN problems p ON p.id = pme.problem_id \
+         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+           AND p.external_problem_key = ?2",
+    )
+    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.index())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let Some(row) = row else {
+        return Ok(ProblemMasteryProjection {
+            current: acm_os_domain::ProblemMasteryEvidence::default(),
+            historical_thoroughly_digested: false,
+            first_thoroughly_digested_local_date: None,
+        });
+    };
+    let first_date = row
+        .7
+        .as_deref()
+        .map(acm_os_domain::LocalDate::parse_iso)
+        .transpose()
+        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    if row.6 != first_date.is_some() {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    Ok(ProblemMasteryProjection {
+        current: acm_os_domain::ProblemMasteryEvidence {
+            recalls_problem: row.0,
+            multiple_solutions_clear: row.1,
+            knowledge_understood: row.2,
+            implementation_fluent: row.3,
+            can_adapt_or_create: row.4,
+            transfer_solved_independently: row.5,
+        },
+        historical_thoroughly_digested: row.6,
+        first_thoroughly_digested_local_date: first_date,
+    })
+}
+
 impl PersonalNoteDeletionPort for DatabaseRuntime {
     async fn prepare_personal_note_deletion(
         &self,
@@ -384,6 +1696,26 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
                 return Err(PersonalNoteDeletionError::PersistenceUnavailable)
             }
         };
+        let in_progress_review: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 FROM review_attempts ra \
+                JOIN problems p ON p.id = ra.problem_id \
+                WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+                  AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'\
+             )",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_one(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if in_progress_review != 0 {
+            return Err(PersonalNoteDeletionError::ReviewInProgress);
+        }
         let workspace = self
             .load_workspace_configuration()
             .await
@@ -489,6 +1821,17 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         }
         if relative_path != prepared.vault_relative_path || digest != prepared.content_digest {
             return Err(PersonalNoteDeletionError::ConcurrentModification);
+        }
+        let in_progress_review: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts \
+             WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(problem_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if in_progress_review != 0 {
+            return Err(PersonalNoteDeletionError::ReviewInProgress);
         }
         let status = parse_learning_status(&status).map_err(map_lifecycle_to_deletion_error)?;
         let decision = acm_os_domain::ProblemLifecycleEngine::decide(
@@ -1749,7 +3092,7 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5) {
+    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
@@ -1833,6 +3176,52 @@ async fn validate_schema_contract(
         ]);
         expected_objects.sort();
     }
+    if schema_version >= 6 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "one_in_progress_review_attempt_per_problem".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "review_attempts".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 7 {
+        expected_objects.push((
+            "table".to_owned(),
+            "review_help_usage_events".to_owned(),
+            "review_help_usage_events".to_owned(),
+        ));
+        expected_objects.sort();
+    }
+    if schema_version >= 8 {
+        expected_objects.extend([
+            (
+                "table".to_owned(),
+                "review_failure_reasons".to_owned(),
+                "review_failure_reasons".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "review_void_events".to_owned(),
+                "review_void_events".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 9 {
+        expected_objects.push((
+            "table".to_owned(),
+            "problem_mastery_evidence".to_owned(),
+            "problem_mastery_evidence".to_owned(),
+        ));
+        expected_objects.sort();
+    }
     if objects != expected_objects {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
@@ -1881,6 +3270,18 @@ async fn validate_schema_contract(
     }
     if schema_version >= 5 {
         validate_learning_lifecycle_contract(pool).await?;
+    }
+    if schema_version >= 6 {
+        validate_review_attempt_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 7 {
+        validate_review_help_usage_contract(pool).await?;
+    }
+    if schema_version >= 8 {
+        validate_review_completion_contract(pool).await?;
+    }
+    if schema_version >= 9 {
+        validate_problem_mastery_contract(pool).await?;
     }
 
     Ok(())
@@ -1966,6 +3367,147 @@ async fn validate_learning_lifecycle_contract(
     Ok(())
 }
 
+async fn validate_review_attempt_contract(
+    pool: &SqlitePool,
+    schema_version: i64,
+) -> Result<(), StartupRecoveryReason> {
+    let mut columns = vec![
+        "id",
+        "problem_id",
+        "review_cycle_id",
+        "attempt_type",
+        "attempt_status",
+        "scheduled_due_local_date",
+        "started_early",
+        "judgement_rule_version",
+        "started_at_utc",
+        "completed_at_utc",
+    ];
+    if schema_version >= 8 {
+        columns.extend([
+            "judgement",
+            "completed_local_date",
+            "final_ac",
+            "first_submission_result",
+            "final_result",
+            "total_submissions",
+            "idea_independent",
+            "implementation_independent",
+            "debug_independence",
+            "external_help",
+            "evidence_codes_json",
+        ]);
+    }
+    validate_table_columns(
+        pool,
+        "review_attempts",
+        &columns,
+    )
+    .await
+}
+
+async fn validate_review_help_usage_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "review_help_usage_events",
+        &[
+            "id",
+            "review_attempt_id",
+            "help_level",
+            "source_digest",
+            "revealed_at_utc",
+        ],
+    )
+    .await
+}
+
+async fn validate_review_completion_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "review_failure_reasons",
+        &["review_attempt_id", "reason_code", "other_text"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "review_void_events",
+        &["id", "review_attempt_id", "reason", "voided_at_utc"],
+    )
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM review_attempts ra WHERE \
+         (ra.attempt_status = 'completed' AND (ra.judgement IS NULL OR ra.completed_local_date IS NULL \
+            OR ra.final_ac IS NULL OR ra.first_submission_result IS NULL OR ra.final_result IS NULL \
+            OR ra.total_submissions IS NULL OR ra.idea_independent IS NULL \
+            OR ra.implementation_independent IS NULL OR ra.debug_independence IS NULL \
+            OR ra.external_help IS NULL OR ra.evidence_codes_json IS NULL)) \
+         OR (ra.attempt_status != 'completed' AND (ra.judgement IS NOT NULL \
+            OR ra.completed_local_date IS NOT NULL OR ra.final_ac IS NOT NULL \
+            OR ra.first_submission_result IS NOT NULL OR ra.final_result IS NOT NULL \
+            OR ra.total_submissions IS NOT NULL OR ra.idea_independent IS NOT NULL \
+            OR ra.implementation_independent IS NOT NULL OR ra.debug_independence IS NOT NULL \
+            OR ra.external_help IS NOT NULL OR ra.evidence_codes_json IS NOT NULL)) \
+         OR (ra.attempt_status = 'void') != EXISTS(SELECT 1 FROM review_void_events v WHERE v.review_attempt_id = ra.id) \
+         OR (ra.attempt_status = 'completed' AND json_valid(ra.evidence_codes_json) != 1) \
+         OR (ra.attempt_status = 'completed' AND ra.final_ac != (ra.final_result = 'accepted')) \
+         OR (ra.attempt_status = 'completed' AND ra.total_submissions = 1 \
+             AND ra.first_submission_result != ra.final_result) \
+         OR (ra.attempt_status = 'completed' AND ra.judgement = 'mastered' \
+             AND EXISTS(SELECT 1 FROM review_failure_reasons r WHERE r.review_attempt_id = ra.id)) \
+         OR (ra.attempt_status = 'completed' AND ra.judgement != 'mastered' \
+             AND NOT EXISTS(SELECT 1 FROM review_failure_reasons r WHERE r.review_attempt_id = ra.id)) \
+         OR (ra.attempt_status != 'completed' \
+             AND EXISTS(SELECT 1 FROM review_failure_reasons r WHERE r.review_attempt_id = ra.id)) \
+         OR EXISTS(SELECT 1 FROM review_cycles rc WHERE rc.stage > 6)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
+async fn validate_problem_mastery_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "problem_mastery_evidence",
+        &[
+            "problem_id",
+            "recalls_problem",
+            "multiple_solutions_clear",
+            "knowledge_understood",
+            "implementation_fluent",
+            "can_adapt_or_create",
+            "transfer_solved_independently",
+            "historical_thoroughly_digested",
+            "first_thoroughly_digested_local_date",
+            "updated_at_utc",
+        ],
+    )
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM problem_mastery_evidence WHERE \
+         historical_thoroughly_digested != (first_thoroughly_digested_local_date IS NOT NULL)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -1980,6 +3522,11 @@ async fn validate_table_columns(
         "file_bindings" => "PRAGMA table_xinfo('file_bindings')",
         "problem_learning_states" => "PRAGMA table_xinfo('problem_learning_states')",
         "review_cycles" => "PRAGMA table_xinfo('review_cycles')",
+        "review_attempts" => "PRAGMA table_xinfo('review_attempts')",
+        "review_help_usage_events" => "PRAGMA table_xinfo('review_help_usage_events')",
+        "review_failure_reasons" => "PRAGMA table_xinfo('review_failure_reasons')",
+        "review_void_events" => "PRAGMA table_xinfo('review_void_events')",
+        "problem_mastery_evidence" => "PRAGMA table_xinfo('problem_mastery_evidence')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -2278,7 +3825,8 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        add_extra_problem_link, configure_workspace, create_personal_note, delete_personal_note,
+        add_extra_problem_link, complete_review, configure_workspace, create_personal_note,
+        delete_personal_note,
         import_codeforces_contest,
         query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
         ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
@@ -2286,6 +3834,10 @@ mod tests {
         PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
         WorkspaceConfigurationStatus, WorkspacePathField,
         ProblemIdentityType, ProblemLifecyclePort, transition_problem_lifecycle,
+        reveal_review_help, review_focus, review_help_drawer, review_history,
+        update_problem_mastery_evidence,
+        start_or_resume_review, void_review, ReviewCompletionInput, ReviewFailureReason,
+        SubmissionFact,
         INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
@@ -2387,6 +3939,59 @@ mod tests {
         (directory, runtime, vault, problems, problem)
     }
 
+    async fn review_ready_fixture() -> (
+        TempDir,
+        DatabaseRuntime,
+        PathBuf,
+        PathBuf,
+        acm_os_domain::CodeforcesProblemIdentity,
+        ReviewAttempt,
+    ) {
+        let (directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+        let attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due"),
+        )
+        .await
+        .expect("start review");
+        (directory, runtime, vault, problems, problem, attempt)
+    }
+
+    fn mastered_input() -> ReviewCompletionInput {
+        ReviewCompletionInput {
+            final_ac: true,
+            first_submission: SubmissionFact {
+                result: acm_os_domain::SubmissionResult::WrongAnswer,
+                other_text: None,
+            },
+            final_submission: SubmissionFact {
+                result: acm_os_domain::SubmissionResult::Accepted,
+                other_text: None,
+            },
+            total_submissions: 2,
+            idea_independent: true,
+            implementation_independent: true,
+            debug_independence: acm_os_domain::DebugIndependence::Independent,
+            external_help: acm_os_domain::ExternalHelpLevel::None,
+            failure_reasons: Vec::new(),
+        }
+    }
+
     fn files_under(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut pending = vec![root.to_path_buf()];
@@ -2460,14 +4065,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 5 }
+            &StartupGateStatus::Ready { schema_version: 9 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 5);
+        assert_eq!(ledger_count, 9);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -2648,6 +4253,516 @@ mod tests {
             restored
                 .active_review_cycle
                 .expect("restored active cycle")
+                .next_due_local_date
+                .to_iso_string(),
+            "2026-08-14"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_attempt_starts_once_resumes_and_exposes_only_focus_data() {
+        let (_directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let note_path = problems.join("CF-1979-A.md");
+        fs::write(
+            &note_path,
+            "# Secret note\n\n## 题解\n\nDO NOT SEND THIS TO REVIEW\n",
+        )
+        .expect("external note edit");
+        runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("refresh note binding");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due date");
+        assert_eq!(
+            start_or_resume_review(&runtime, &problem, due).await,
+            Err(ReviewAttemptError::StatementMissing)
+        );
+        runtime
+            .persist_first_snapshot(&snapshot(
+                "A",
+                "<div class=\"problem-statement\">A statement</div>",
+                "<div class=\"problem-statement\">A statement</div>",
+            ))
+            .await
+            .expect("statement snapshot");
+        let first = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("start review");
+        assert_eq!(
+            first.attempt_type,
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+        );
+        assert!(!first.started_early);
+        let resumed = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("resume review");
+        assert_eq!(resumed.attempt_id, first.attempt_id);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts WHERE attempt_status = 'in_progress'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("attempt count");
+        assert_eq!(count, 1);
+
+        let focus = review_focus(&runtime, &first.attempt_id)
+            .await
+            .expect("focus view");
+        assert_eq!(focus.attempt.attempt_id, first.attempt_id);
+        assert_eq!(focus.title, "Problem A");
+        assert!(focus.statement_sanitized_html.contains("A"));
+        assert!(!focus.statement_sanitized_html.contains("DO NOT SEND THIS TO REVIEW"));
+        assert_eq!(
+            transition_problem_lifecycle(
+                &runtime,
+                &problem,
+                acm_os_domain::ProblemLifecycleAction::WithdrawUnderstood,
+                due,
+            )
+            .await,
+            Err(ProblemLifecycleError::InvalidTransition)
+        );
+        assert_eq!(
+            delete_personal_note(&runtime, &problem).await,
+            Err(PersonalNoteDeletionError::ReviewInProgress)
+        );
+        assert!(note_path.exists());
+    }
+
+    #[tokio::test]
+    async fn help_reveal_commits_evidence_before_returning_fresh_content() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let note_path = problems.join("CF-1979-A.md");
+        fs::write(
+            &note_path,
+            "# P\n\n## 前置知识\n- [[Graphs#DFS|Traversal]]\n\n## Hints\n### Hint 1\nold hint\n\n## 思路\nold idea\n\n## 代码\n```cpp\nsolve();\n```\n\n## 题解\nfull answer\n",
+        )
+        .expect("write help fixture");
+        fs::write(vault.join("Knowledge/Graphs.md"), "# Graphs\n\nDFS knowledge\n")
+            .expect("write knowledge fixture");
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+        let attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due"),
+        )
+        .await
+        .expect("start review");
+
+        let drawer = review_help_drawer(&runtime, &attempt.attempt_id)
+            .await
+            .expect("open drawer");
+        assert!(drawer.items.iter().all(|item| item.available));
+        let pool = runtime._pool.as_ref().expect("pool");
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_help_usage_events")
+            .fetch_one(pool)
+            .await
+            .expect("event count");
+        assert_eq!(before, 0, "opening the drawer is not usage");
+        assert_eq!(
+            reveal_review_help(
+                &runtime,
+                &attempt.attempt_id,
+                acm_os_domain::ReviewHelpLevel::Hints,
+                false,
+            )
+            .await,
+            Err(ReviewAttemptError::HelpConfirmationRequired)
+        );
+        let after_refusal: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM review_help_usage_events")
+                .fetch_one(pool)
+                .await
+                .expect("event count");
+        assert_eq!(after_refusal, 0);
+
+        fs::write(
+            &note_path,
+            "# P\n\n## 前置知识\n- [[Graphs#DFS|Traversal]]\n\n## Hints\n### Hint 1\nfresh external hint\n\n## 思路\nold idea\n\n## 代码\n```cpp\nsolve();\n```\n\n## 题解\nfull answer\n",
+        )
+        .expect("external edit before reveal");
+        let hint = reveal_review_help(
+            &runtime,
+            &attempt.attempt_id,
+            acm_os_domain::ReviewHelpLevel::Hints,
+            true,
+        )
+        .await
+        .expect("confirmed hint reveal");
+        assert!(hint.content_markdown.contains("fresh external hint"));
+        assert!(!hint.content_markdown.contains("full answer"));
+        assert_eq!(hint.source_digest.len(), 64);
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_help_usage_events WHERE review_attempt_id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("persisted evidence");
+        assert_eq!(persisted, 1);
+
+        let knowledge = reveal_review_help(
+            &runtime,
+            &attempt.attempt_id,
+            acm_os_domain::ReviewHelpLevel::PrerequisiteContent,
+            true,
+        )
+        .await
+        .expect("knowledge reveal");
+        assert!(knowledge.content_markdown.contains("DFS knowledge"));
+        let reopened = reveal_review_help(
+            &runtime,
+            &attempt.attempt_id,
+            acm_os_domain::ReviewHelpLevel::Hints,
+            false,
+        )
+        .await
+        .expect("already acknowledged level can reopen");
+        assert!(reopened.content_markdown.contains("fresh external hint"));
+        let final_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_help_usage_events WHERE review_attempt_id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("append-only evidence");
+        assert_eq!(final_count, 3);
+    }
+
+    #[tokio::test]
+    async fn completed_reviews_advance_then_relearn_without_overwriting_history() {
+        let (directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        let first = complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completed date"),
+        )
+        .await
+        .expect("mastered first cold start");
+        assert_eq!(first.judgement, acm_os_domain::ReviewJudgement::Mastered);
+        assert_eq!(
+            first.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::LongTermReview
+        );
+        let next_cycle = first.lifecycle.active_review_cycle.expect("continued cycle");
+        assert_eq!(next_cycle.stage, 1);
+        assert_eq!(next_cycle.next_due_local_date.to_iso_string(), "2026-08-24");
+
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("next due"),
+        )
+        .await
+        .expect("long-term review");
+        let mut partial_input = mastered_input();
+        partial_input.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+        partial_input.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+        let second = complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            partial_input,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("completed date"),
+        )
+        .await
+        .expect("partial long-term review");
+        assert_eq!(second.judgement, acm_os_domain::ReviewJudgement::Partial);
+        assert_eq!(
+            second.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::Relearning
+        );
+        assert!(second.lifecycle.active_review_cycle.is_none());
+
+        let history = review_history(&runtime, &problem).await.expect("review history");
+        assert_eq!(history.attempts.len(), 2);
+        assert_eq!(
+            history.historical_best_review,
+            Some(acm_os_domain::ReviewJudgement::Mastered)
+        );
+        assert!(history.attempts.iter().any(|item| {
+            item.attempt.attempt_id == first_attempt.attempt_id
+                && item.judgement == Some(acm_os_domain::ReviewJudgement::Mastered)
+        }));
+        assert!(history.attempts.iter().any(|item| {
+            item.attempt.attempt_id == second_attempt.attempt_id
+                && item.judgement == Some(acm_os_domain::ReviewJudgement::Partial)
+        }));
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let restored = review_history(&restarted, &problem)
+            .await
+            .expect("history after restart");
+        assert_eq!(restored.attempts.len(), 2);
+        assert_eq!(
+            restored.historical_best_review,
+            Some(acm_os_domain::ReviewJudgement::Mastered)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_incomplete_facts_leave_attempt_in_progress() {
+        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        let mut missing_reason = mastered_input();
+        missing_reason.idea_independent = false;
+        assert_eq!(
+            complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                missing_reason,
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("date"),
+            )
+            .await,
+            Err(ReviewAttemptError::FailureReasonRequired)
+        );
+        let mut contradiction = mastered_input();
+        contradiction.final_ac = false;
+        assert_eq!(
+            complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                contradiction,
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("date"),
+            )
+            .await,
+            Err(ReviewAttemptError::InvalidCompletionFacts)
+        );
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts WHERE id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("active attempt");
+        assert_eq!(active, 1);
+        let mut no_ac = mastered_input();
+        no_ac.final_ac = false;
+        no_ac.first_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+        no_ac.final_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+        no_ac.total_submissions = 1;
+        no_ac.failure_reasons = vec![ReviewFailureReason::ImplementationError];
+        let failed = complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            no_ac,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("date"),
+        )
+        .await
+        .expect("no final AC completes as fail");
+        assert_eq!(failed.judgement, acm_os_domain::ReviewJudgement::Fail);
+        assert_eq!(failed.lifecycle.learning_status, acm_os_domain::LearningStatus::Relearning);
+    }
+
+    #[tokio::test]
+    async fn full_solution_help_forces_fail_and_void_preserves_schedule_and_help_history() {
+        let (_directory, runtime, _vault, problems, _problem, attempt) =
+            review_ready_fixture().await;
+        fs::write(
+            problems.join("CF-1979-A.md"),
+            "# P\n\n## 前置知识\n\n## 题解\ncomplete answer\n\n## 额外题目\n",
+        )
+        .expect("solution note");
+        reveal_review_help(
+            &runtime,
+            &attempt.attempt_id,
+            acm_os_domain::ReviewHelpLevel::FullSolution,
+            true,
+        )
+        .await
+        .expect("reveal solution");
+        let mut failed_input = mastered_input();
+        failed_input.failure_reasons = vec![ReviewFailureReason::NoIdea];
+        let failed = complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            failed_input,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("date"),
+        )
+        .await
+        .expect("solution forces failure");
+        assert_eq!(failed.judgement, acm_os_domain::ReviewJudgement::Fail);
+        assert_eq!(
+            failed.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::Relearning
+        );
+
+        let (_directory2, runtime2, _vault2, problems2, problem2, mistaken) =
+            review_ready_fixture().await;
+        fs::write(
+            problems2.join("CF-1979-A.md"),
+            "# P\n\n## Hints\n### H1\na hint\n\n## 题解\n\n",
+        )
+        .expect("hint note");
+        reveal_review_help(
+            &runtime2,
+            &mistaken.attempt_id,
+            acm_os_domain::ReviewHelpLevel::Hints,
+            true,
+        )
+        .await
+        .expect("mistaken help reveal");
+        let before = runtime2
+            .load_problem_lifecycle(&problem2)
+            .await
+            .expect("before void");
+        let voided = void_review(&runtime2, &mistaken.attempt_id, "Opened the wrong problem")
+            .await
+            .expect("void mistaken attempt");
+        assert_eq!(voided.status, ReviewAttemptStatus::Void);
+        assert_eq!(voided.help_levels, [acm_os_domain::ReviewHelpLevel::Hints]);
+        let after = runtime2
+            .load_problem_lifecycle(&problem2)
+            .await
+            .expect("after void");
+        assert_eq!(before, after);
+        let replacement = start_or_resume_review(
+            &runtime2,
+            &problem2,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("same due"),
+        )
+        .await
+        .expect("replacement attempt");
+        assert_ne!(replacement.attempt_id, mistaken.attempt_id);
+        let history = review_history(&runtime2, &problem2).await.expect("void history");
+        assert_eq!(history.attempts.len(), 2);
+        assert!(history.attempts.iter().any(|item| item.status == ReviewAttemptStatus::Void));
+    }
+
+    #[tokio::test]
+    async fn early_mastered_completion_keeps_original_stage_and_due() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("transition");
+        }
+        let early = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("early"),
+        )
+        .await
+        .expect("early attempt");
+        let completed = complete_review(
+            &runtime,
+            &early.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("completed"),
+        )
+        .await
+        .expect("early mastered");
+        let cycle = completed.lifecycle.active_review_cycle.expect("unchanged cycle");
+        assert_eq!(completed.lifecycle.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+        assert_eq!(cycle.stage, 0);
+        assert_eq!(cycle.next_due_local_date.to_iso_string(), "2026-08-14");
+    }
+
+    #[tokio::test]
+    async fn completed_review_and_historical_best_survive_personal_note_deletion() {
+        let (_directory, runtime, _vault, problems, problem, attempt) = review_ready_fixture().await;
+        complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("date"),
+        )
+        .await
+        .expect("completed review");
+        delete_personal_note(&runtime, &problem)
+            .await
+            .expect("delete after completion");
+        assert!(!problems.join("CF-1979-A.md").exists());
+        let history = review_history(&runtime, &problem)
+            .await
+            .expect("history after downgrade");
+        assert_eq!(history.attempts.len(), 1);
+        assert_eq!(
+            history.historical_best_review,
+            Some(acm_os_domain::ReviewJudgement::Mastered)
+        );
+        assert_eq!(history.attempts[0].status, ReviewAttemptStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn early_review_attempt_preserves_the_original_cycle_due() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot(
+                "A",
+                "<div class=\"problem-statement\">A statement</div>",
+                "<div class=\"problem-statement\">A statement</div>",
+            ))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+
+        let early = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("early date"),
+        )
+        .await
+        .expect("early review");
+        assert_eq!(early.attempt_type, acm_os_domain::ReviewAttemptType::EarlyCheck);
+        assert!(early.started_early);
+        assert_eq!(early.scheduled_due_local_date.to_iso_string(), "2026-08-14");
+        let lifecycle = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("lifecycle preserved");
+        assert_eq!(
+            lifecycle.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
+        assert_eq!(
+            lifecycle
+                .active_review_cycle
+                .expect("active cycle")
                 .next_due_local_date
                 .to_iso_string(),
             "2026-08-14"
@@ -3424,7 +5539,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 6), \
+                        CHECK (schema_generation < 10), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -3528,7 +5643,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 5 }
+            &StartupGateStatus::Ready { schema_version: 9 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -3560,7 +5675,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 5 }
+            &StartupGateStatus::Ready { schema_version: 9 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 =
@@ -3843,6 +5958,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thorough_digestion_history_survives_current_regression_and_note_deletion() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let reached = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("date");
+        let all_six = acm_os_domain::ProblemMasteryEvidence {
+            recalls_problem: true,
+            multiple_solutions_clear: true,
+            knowledge_understood: true,
+            implementation_fluent: true,
+            can_adapt_or_create: true,
+            transfer_solved_independently: true,
+        };
+        let achieved = update_problem_mastery_evidence(&runtime, &problem, all_six, reached)
+            .await
+            .expect("confirm six evidence criteria");
+        assert!(achieved.current.is_thoroughly_digested());
+        assert!(achieved.historical_thoroughly_digested);
+        assert_eq!(achieved.first_thoroughly_digested_local_date, Some(reached));
+
+        let regressed = update_problem_mastery_evidence(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemMasteryEvidence {
+                transfer_solved_independently: false,
+                ..all_six
+            },
+            acm_os_domain::LocalDate::parse_iso("2026-08-20").expect("later date"),
+        )
+        .await
+        .expect("confirm current regression");
+        assert_eq!(regressed.current.achieved_count(), 5);
+        assert!(regressed.historical_thoroughly_digested);
+        assert_eq!(regressed.first_thoroughly_digested_local_date, Some(reached));
+
+        delete_personal_note(&runtime, &problem)
+            .await
+            .expect("delete personal note");
+        let history = review_history(&runtime, &problem)
+            .await
+            .expect("history remains readable after lightweight downgrade");
+        assert_eq!(history.mastery.current.achieved_count(), 5);
+        assert!(history.mastery.historical_thoroughly_digested);
+        assert_eq!(history.mastery.first_thoroughly_digested_local_date, Some(reached));
+    }
+
+    #[tokio::test]
     async fn corrupted_workspace_relationship_requires_recovery() {
         let app_data = TempDir::new().expect("temporary app data");
         let vault = TempDir::new().expect("temporary vault");
@@ -3886,7 +6046,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 5 }
+            &StartupGateStatus::Ready { schema_version: 9 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

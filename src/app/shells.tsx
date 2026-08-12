@@ -12,22 +12,43 @@ import "katex/dist/katex.min.css";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
   createPersonalNote,
+  completeReview,
   deletePersonalNote,
   getContestDetail,
   getContestShelf,
   getLightweightProblemDetail,
   getLightweightProblems,
   getPersonalNoteProjection,
+  getReviewFocus,
+  getReviewHelpDrawer,
+  getReviewAttemptHistory,
+  getReviewHistory,
   getStatementAssets,
   importCodeforcesContest,
   openPersonalNoteInObsidian,
+  revealReviewHelp,
+  startOrResumeReview,
   transitionProblemLifecycle,
+  updateProblemMasteryEvidence,
+  voidReview,
+  type CompleteReviewInputDto,
+  type CompletedReviewAttemptDto,
   type ContestDetailDto,
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
   type ProblemLifecycleActionDto,
+  type ProblemMasteryEvidenceDto,
+  type ReviewFocusDto,
+  type RevealedReviewHelpDto,
+  type ReviewHelpDrawerDto,
+  type ReviewHelpItemDto,
+  type ReviewHelpLevel,
+  type ReviewHistoryDto,
+  type ReviewHistoryItemDto,
+  type ReviewFailureReasonCodeDto,
+  type SubmissionResultDto,
 } from "../ipc/contest";
 import { onPersonalNoteInvalidated } from "../ipc/personal-note-events";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
@@ -253,24 +274,308 @@ export function NormalAppShell({
 
 export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; navigate: Navigate }) {
   const mainRef = useRouteFocus<HTMLDivElement>();
+  const [focus, setFocus] = useState<ReviewFocusDto | null>(null);
+  const [renderedHtml, setRenderedHtml] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpDrawer, setHelpDrawer] = useState<ReviewHelpDrawerDto | null>(null);
+  const [helpError, setHelpError] = useState<string | null>(null);
+  const [pendingHelp, setPendingHelp] = useState<ReviewHelpItemDto | null>(null);
+  const [revealedHelp, setRevealedHelp] = useState<RevealedReviewHelpDto[]>([]);
+  const [revealingLevel, setRevealingLevel] = useState<ReviewHelpLevel | null>(null);
+  const [completedReview, setCompletedReview] = useState<CompletedReviewAttemptDto | null>(null);
+  const [terminalHistory, setTerminalHistory] = useState<ReviewHistoryItemDto | null>(null);
+  const [completion, setCompletion] = useState<CompleteReviewInputDto>(() => emptyReviewCompletion(attemptId));
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [completing, setCompleting] = useState(false);
+  const [voidOpen, setVoidOpen] = useState(false);
+  const [voidReason, setVoidReason] = useState("");
+  const helpHeadingRef = useRef<HTMLHeadingElement>(null);
+  const helpButtonRef = useRef<HTMLButtonElement>(null);
+  const helpDrawerRef = useRef<HTMLElement>(null);
+  const helpConfirmRef = useRef<HTMLDivElement>(null);
+  const helpConfirmButtonRef = useRef<HTMLButtonElement>(null);
+  const voidButtonRef = useRef<HTMLButtonElement>(null);
+  const voidDialogRef = useRef<HTMLDivElement>(null);
+  const voidReasonRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    let active = true;
+    const objectUrls: string[] = [];
+    getReviewFocus(attemptId).then((nextFocus) => {
+      if (!active) return;
+      const assetUrls = new Map<string, string>();
+      for (const asset of nextFocus.statementAssets) {
+        const objectUrl = URL.createObjectURL(
+          new Blob([new Uint8Array(asset.bytes)], { type: asset.mediaType }),
+        );
+        objectUrls.push(objectUrl);
+        assetUrls.set(asset.localRef, objectUrl);
+      }
+      setFocus(nextFocus);
+      setRenderedHtml(sanitizeStatementForRender(nextFocus.statementSanitizedHtml, assetUrls));
+    }).catch(() => {
+      if (!active) return;
+      getReviewAttemptHistory(attemptId)
+        .then((history) => { if (active && history.status !== "inProgress") setTerminalHistory(history); })
+        .catch(() => { if (active) setFailed(true); });
+    });
+    return () => {
+      active = false;
+      for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attemptId]);
+
+  useEffect(() => {
+    if (helpOpen) helpHeadingRef.current?.focus();
+  }, [helpOpen, helpDrawer]);
+
+  useEffect(() => {
+    const container = voidOpen
+      ? voidDialogRef.current
+      : pendingHelp
+        ? helpConfirmRef.current
+        : helpOpen
+          ? helpDrawerRef.current
+          : null;
+    if (!container) return;
+    const initial = voidOpen
+      ? voidReasonRef.current
+      : pendingHelp
+        ? helpConfirmButtonRef.current
+        : helpHeadingRef.current;
+    initial?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (voidOpen) {
+          setVoidOpen(false);
+          queueMicrotask(() => voidButtonRef.current?.focus());
+        } else if (pendingHelp) {
+          setPendingHelp(null);
+          queueMicrotask(() => helpHeadingRef.current?.focus());
+        } else {
+          closeHelpDrawer();
+        }
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...container.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      )];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [helpOpen, pendingHelp, voidOpen]);
+
+  function openHelpDrawer() {
+    setHelpOpen(true);
+    setHelpDrawer(null);
+    setHelpError(null);
+    getReviewHelpDrawer(attemptId)
+      .then(setHelpDrawer)
+      .catch(() => setHelpError("Help availability could not be read. No help usage was recorded."));
+  }
+
+  function closeHelpDrawer() {
+    setHelpOpen(false);
+    setPendingHelp(null);
+    queueMicrotask(() => helpButtonRef.current?.focus());
+  }
+
+  function performReveal(item: ReviewHelpItemDto, impactAcknowledged: boolean) {
+    setRevealingLevel(item.level);
+    setHelpError(null);
+    revealReviewHelp(attemptId, item.level, impactAcknowledged)
+      .then((revealed) => {
+        setRevealedHelp((current) => [
+          ...current.filter((entry) => entry.level !== revealed.level),
+          revealed,
+        ]);
+        setHelpDrawer((current) => current && ({
+          ...current,
+          items: current.items.map((entry) => entry.level === revealed.level
+            ? { ...entry, revealedAtUtc: revealed.revealedAtUtc }
+            : entry),
+        }));
+        setPendingHelp(null);
+      })
+      .catch((error: unknown) => {
+        setHelpError(String(error).includes("review_help_confirmation_required")
+          ? "Confirm the Review consequence before revealing this help."
+          : "Help was not revealed and no usage content was released.");
+      })
+      .finally(() => setRevealingLevel(null));
+  }
+
+  function requestReveal(item: ReviewHelpItemDto) {
+    if (item.revealedAtUtc) performReveal(item, false);
+    else setPendingHelp(item);
+  }
+
+  function submitCompletion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setCompleting(true);
+    setCompletionError(null);
+    completeReview(completion)
+      .then((result) => {
+        setCompletedReview(result);
+        setHelpOpen(false);
+      })
+      .catch((error: unknown) => {
+        const code = String(error);
+        setCompletionError(code.includes("review_failure_reason_required")
+          ? "This Review is Partial or Not passed. Select at least one failure reason; your other facts were preserved."
+          : code.includes("review_completion_facts_invalid")
+            ? "The submitted facts contradict each other or are incomplete. The Attempt remains in progress."
+            : "Review completion failed. The Attempt remains in progress and the form was preserved.");
+      })
+      .finally(() => setCompleting(false));
+  }
+
+  function confirmVoid() {
+    setCompletionError(null);
+    voidReview(attemptId, voidReason)
+      .then((history) => {
+        setTerminalHistory(history);
+        setVoidOpen(false);
+      })
+      .catch(() => setCompletionError("The Attempt was not voided. Use Void only for a genuinely mistaken start."));
+  }
   return (
     <main className="review-shell" ref={mainRef} tabIndex={-1}>
       <header className="review-header">
         <div>
-          <p className="eyebrow">Review focus shell</p>
-          <h1>Isolated review workspace</h1>
+          <p className="eyebrow">M4 · Review Focus</p>
+          <h1>{focus ? `${focus.attempt.index}. ${focus.title}` : "Isolated review workspace"}</h1>
         </div>
         <button className="secondary-action" onClick={() => navigate("/today")} type="button">
           Return to Today
         </button>
       </header>
-      <section aria-labelledby="review-boundary" className="review-stage">
-        <h2 id="review-boundary">Review layout boundary</h2>
-        <p>
-          Route <code>/review/{attemptId}</code> is isolated from ordinary navigation. Review
-          execution and knowledge reveal are intentionally unavailable until M4.
-        </p>
-      </section>
+      {completedReview ? (
+        <ReviewEvidenceCard completed={completedReview} />
+      ) : terminalHistory ? (
+        <ReviewHistoryEvidenceCard item={terminalHistory} />
+      ) : failed ? (
+        <section className="review-stage" role="alert">
+          <h2>Review Attempt is unavailable</h2>
+          <p>No Review result or learning state was changed.</p>
+        </section>
+      ) : !focus || renderedHtml === null ? (
+        <section aria-busy="true" className="review-stage"><p>Loading isolated statement…</p></section>
+      ) : (
+        <>
+          <section aria-labelledby="review-attempt-metadata" className="review-stage">
+            <h2 id="review-attempt-metadata">Cold-start attempt</h2>
+            <p>
+              {reviewAttemptTypeLabel(focus.attempt.attemptType)} · scheduled {focus.attempt.scheduledDueLocalDate}
+              {focus.attempt.startedEarly ? " · started early" : ""}
+            </p>
+            <a href={focus.sourceUrl} rel="noreferrer" target="_blank">Open original OJ</a>
+            <button className="secondary-action" onClick={openHelpDrawer} ref={helpButtonRef} type="button">Open controlled help</button>
+            <p className="safe-note">Old notes, hints, solutions, Contest history, and Review history are not loaded into this Focus view.</p>
+          </section>
+          <section className="review-stage statement-view" aria-labelledby="review-statement-heading">
+            <h2 id="review-statement-heading">Statement snapshot</h2>
+            <div dangerouslySetInnerHTML={{ __html: renderedHtml }} />
+          </section>
+          <form className="review-stage review-facts-form" onSubmit={submitCompletion}>
+            <div>
+              <p className="eyebrow">Facts, not a self-selected grade</p>
+              <h2>Finish this Review</h2>
+              <p>The system derives Mastered, Partial, or Not passed from these facts and recorded help.</p>
+            </div>
+            <fieldset>
+              <legend>Submission facts</legend>
+              <label><input checked={completion.finalAc} onChange={(event) => setCompletion({ ...completion, finalAc: event.target.checked })} type="checkbox" /> Final result was AC</label>
+              <label>First submission result<select value={completion.firstSubmissionResult} onChange={(event) => { const result = event.target.value as SubmissionResultDto; setCompletion({ ...completion, firstSubmissionResult: result, firstSubmissionOther: result === "other" ? completion.firstSubmissionOther : null }); }}>{submissionResultOptions()}</select></label>
+              {completion.firstSubmissionResult === "other" ? <label>First result detail<input maxLength={120} onChange={(event) => setCompletion({ ...completion, firstSubmissionOther: event.target.value })} required value={completion.firstSubmissionOther ?? ""} /></label> : null}
+              <label>Final result<select value={completion.finalResult} onChange={(event) => { const result = event.target.value as SubmissionResultDto; setCompletion({ ...completion, finalResult: result, finalResultOther: result === "other" ? completion.finalResultOther : null }); }}>{submissionResultOptions()}</select></label>
+              {completion.finalResult === "other" ? <label>Final result detail<input maxLength={120} onChange={(event) => setCompletion({ ...completion, finalResultOther: event.target.value })} required value={completion.finalResultOther ?? ""} /></label> : null}
+              <label>Total submissions<input min="1" onChange={(event) => setCompletion({ ...completion, totalSubmissions: Number(event.target.value) })} required type="number" value={completion.totalSubmissions} /></label>
+            </fieldset>
+            <fieldset>
+              <legend>Independence</legend>
+              <label><input checked={completion.ideaIndependent} onChange={(event) => setCompletion({ ...completion, ideaIndependent: event.target.checked })} type="checkbox" /> Idea was independent</label>
+              <label><input checked={completion.implementationIndependent} onChange={(event) => setCompletion({ ...completion, implementationIndependent: event.target.checked })} type="checkbox" /> Implementation was independent</label>
+              <label>Debug<select value={completion.debugIndependence} onChange={(event) => setCompletion({ ...completion, debugIndependence: event.target.value as CompleteReviewInputDto["debugIndependence"] })}><option value="notNeeded">No debug needed</option><option value="independent">Debugged independently</option><option value="usedSolvingHelp">Used problem-solving help to debug</option></select></label>
+              <label>Unrecorded external help<select value={completion.externalHelp} onChange={(event) => setCompletion({ ...completion, externalHelp: event.target.value as CompleteReviewInputDto["externalHelp"] })}><option value="none">None</option><option value="solvingHint">Problem-solving hint</option><option value="fullSolution">Full solution</option></select></label>
+            </fieldset>
+            <fieldset>
+              <legend>Failure reasons</legend>
+              <p>Select at least one when the derived result may be Partial or Not passed.</p>
+              {reviewFailureReasonOptions.map(([code, label]) => <label key={code}><input checked={completion.failureReasons.some((reason) => reason.code === code)} onChange={(event) => setCompletion({ ...completion, failureReasons: event.target.checked ? [...completion.failureReasons, { code, otherText: null }] : completion.failureReasons.filter((reason) => reason.code !== code) })} type="checkbox" /> {label}</label>)}
+              {completion.failureReasons.some((reason) => reason.code === "other") ? <label>Other reason<input maxLength={500} onChange={(event) => setCompletion({ ...completion, failureReasons: completion.failureReasons.map((reason) => reason.code === "other" ? { ...reason, otherText: event.target.value } : reason) })} required value={completion.failureReasons.find((reason) => reason.code === "other")?.otherText ?? ""} /></label> : null}
+            </fieldset>
+            {completionError ? <p role="alert">{completionError}</p> : null}
+            <div className="button-row"><button disabled={completing} type="submit">{completing ? "Completing…" : "Complete from facts"}</button><button className="secondary-action" onClick={() => setVoidOpen(true)} ref={voidButtonRef} type="button">Void mistaken Attempt</button></div>
+          </form>
+          {[...revealedHelp]
+            .sort((left, right) => left.level - right.level)
+            .map((revealed) => (
+              <section className="review-stage review-help-content" key={revealed.level} aria-labelledby={`revealed-help-${revealed.level}`}>
+                <h2 id={`revealed-help-${revealed.level}`}>Level {revealed.level} · {revealed.title}</h2>
+                <p>Usage recorded at {revealed.revealedAtUtc}.</p>
+                <pre>{revealed.contentMarkdown}</pre>
+              </section>
+            ))}
+        </>
+      )}
+      {helpOpen ? (
+        <aside aria-labelledby="review-help-title" aria-modal="true" className="review-help-drawer" ref={helpDrawerRef} role="dialog">
+          <div className="review-help-drawer__header">
+            <div>
+              <p className="eyebrow">Evidence before reveal</p>
+              <h2 id="review-help-title" ref={helpHeadingRef} tabIndex={-1}>Controlled help</h2>
+            </div>
+            <button className="secondary-action" onClick={closeHelpDrawer} type="button">Close</button>
+          </div>
+          <p>Opening this drawer records nothing. A successful Reveal creates an irreversible usage event before content appears.</p>
+          {helpError ? <p role="alert">{helpError}</p> : null}
+          {!helpDrawer && !helpError ? <p aria-busy="true">Checking current Markdown…</p> : null}
+          <ol className="review-help-levels">
+            {helpDrawer?.items.map((item) => (
+              <li key={item.level}>
+                <div><strong>Level {item.level} · {reviewHelpLevelLabel(item.level)}</strong><span>{reviewHelpConsequence(item.consequence)}</span></div>
+                <button
+                  disabled={!item.available || revealingLevel !== null}
+                  onClick={() => requestReveal(item)}
+                  type="button"
+                >
+                  {revealingLevel === item.level ? "Recording…" : item.revealedAtUtc ? "Open again" : item.available ? "Reveal" : "Unavailable"}
+                </button>
+              </li>
+            ))}
+          </ol>
+          {pendingHelp ? (
+            <div aria-describedby="review-help-confirm-description" aria-labelledby="review-help-confirm-title" aria-modal="true" className="review-help-confirm" ref={helpConfirmRef} role="alertdialog">
+              <h3 id="review-help-confirm-title">Reveal Level {pendingHelp.level}?</h3>
+              <p id="review-help-confirm-description">
+                {pendingHelp.level === 5
+                  ? "Viewing the full solution means this Attempt can only be judged Not passed."
+                  : "Using this problem-solving help means this Attempt can be judged Partial at best."}
+              </p>
+              <div className="button-row">
+                <button onClick={() => performReveal(pendingHelp, true)} ref={helpConfirmButtonRef} type="button">Confirm and reveal</button>
+                <button className="secondary-action" onClick={() => { setPendingHelp(null); queueMicrotask(() => helpHeadingRef.current?.focus()); }} type="button">Cancel</button>
+              </div>
+            </div>
+          ) : null}
+        </aside>
+      ) : null}
+      {voidOpen ? (
+        <div className="modal-backdrop"><div aria-describedby="void-review-description" aria-labelledby="void-review-title" aria-modal="true" ref={voidDialogRef} role="alertdialog"><h2 id="void-review-title">Void this Attempt?</h2><p id="void-review-description">Only use this for an accidental start. A real attempt that did not succeed must be completed as Not passed. The Void record and any revealed help remain in history; scheduling is unchanged.</p><label>Reason<input onChange={(event) => setVoidReason(event.target.value)} ref={voidReasonRef} value={voidReason} /></label><div className="button-row"><button disabled={!voidReason.trim()} onClick={confirmVoid} type="button">Void mistaken Attempt</button><button className="secondary-action" onClick={() => { setVoidOpen(false); queueMicrotask(() => voidButtonRef.current?.focus()); }} type="button">Cancel</button></div></div></div>
+      ) : null}
     </main>
   );
 }
@@ -429,6 +734,8 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
   const [showDeletePreview, setShowDeletePreview] = useState(false);
   const [deletingNote, setDeletingNote] = useState(false);
+  const [startingReview, setStartingReview] = useState(false);
+  const [reviewMessage, setReviewMessage] = useState<string | null>(null);
   const noteReadSequence = useRef(0);
   const mounted = useRef(true);
   const displayedNotePath = noteReadState?.state === "ready"
@@ -571,10 +878,27 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setNoteReadState(null);
       setShowDeletePreview(false);
       setNoteMessage("Personal Markdown deleted. Contest and historical facts were preserved.");
-    } catch {
-      setNoteMessage("Personal Markdown was not deleted. The Personal Problem and its history were preserved.");
+    } catch (error) {
+      setNoteMessage(
+        String(error).includes("review_in_progress")
+          ? "Personal Markdown cannot be deleted while this Review Attempt is in progress."
+          : "Personal Markdown was not deleted. The Personal Problem and its history were preserved.",
+      );
     } finally {
       setDeletingNote(false);
+    }
+  };
+  const beginReview = async () => {
+    if (startingReview) return;
+    setStartingReview(true);
+    setReviewMessage(null);
+    try {
+      const attempt = await startOrResumeReview(contestId, index);
+      navigate(`/review/${attempt.attemptId}`);
+    } catch {
+      setReviewMessage("Review could not be started. The learning state and schedule were preserved.");
+    } finally {
+      setStartingReview(false);
     }
   };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
@@ -622,7 +946,7 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
         <h2 id="learning-lifecycle-heading">Learning lifecycle</h2>
         <p><strong>Current status:</strong> {learningStatusLabel(detail.lifecycle.learningStatus)}</p>
         {detail.lifecycle.nextReviewDueLocalDate ? (
-          <p><strong>First cold-start due:</strong> {detail.lifecycle.nextReviewDueLocalDate}</p>
+          <p><strong>Next Review due:</strong> {detail.lifecycle.nextReviewDueLocalDate}</p>
         ) : null}
         <div className="action-row">
           {detail.lifecycle.availableActions.map((action) => (
@@ -636,8 +960,20 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
               {lifecycleAction === action ? "Updating…" : lifecycleActionLabel(action)}
             </button>
           ))}
+          {detail.reviewAction ? (
+            <button className="primary-action" disabled={startingReview} onClick={() => void beginReview()} type="button">
+              {startingReview
+                ? "Opening Review…"
+                : detail.reviewAction === "earlyCheck"
+                  ? "Start early check"
+                  : detail.reviewAction === "continueReview"
+                    ? "Continue Review"
+                    : "Start Review"}
+            </button>
+          ) : null}
         </div>
         {lifecycleMessage ? <p aria-live="polite" className="system-caption">{lifecycleMessage}</p> : null}
+        {reviewMessage ? <p aria-live="polite" className="system-caption">{reviewMessage}</p> : null}
       </section>
     ) : null}
     {detail.identityType === "personal" ? (
@@ -685,8 +1021,176 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
         </section>
       )
     ) : null}
+    <ProblemReviewHistory contestId={contestId} index={index} learningStatus={detail.lifecycle.learningStatus} />
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
+}
+
+const reviewFailureReasonOptions: ReadonlyArray<readonly [ReviewFailureReasonCodeDto, string]> = [
+  ["noIdea", "No idea"],
+  ["keyPropertyBlocked", "Direction found, key property blocked"],
+  ["derivationBlocked", "Formula or derivation blocked"],
+  ["cannotImplement", "Algorithm known, could not implement"],
+  ["implementationError", "Implementation error"],
+  ["boundaryError", "Boundary error"],
+  ["complexityError", "Complexity judgement error"],
+  ["other", "Other"],
+];
+
+function emptyReviewCompletion(attemptId: string): CompleteReviewInputDto {
+  return {
+    attemptId,
+    finalAc: true,
+    firstSubmissionResult: "accepted",
+    firstSubmissionOther: null,
+    finalResult: "accepted",
+    finalResultOther: null,
+    totalSubmissions: 1,
+    ideaIndependent: true,
+    implementationIndependent: true,
+    debugIndependence: "notNeeded",
+    externalHelp: "none",
+    failureReasons: [],
+  };
+}
+
+function submissionResultOptions() {
+  const options: Array<[SubmissionResultDto, string]> = [
+    ["accepted", "Accepted"],
+    ["wrongAnswer", "Wrong answer"],
+    ["timeLimitExceeded", "Time limit exceeded"],
+    ["memoryLimitExceeded", "Memory limit exceeded"],
+    ["runtimeError", "Runtime error"],
+    ["compilationError", "Compilation error"],
+    ["other", "Other"],
+  ];
+  return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
+}
+
+function ReviewEvidenceCard({ completed }: { completed: CompletedReviewAttemptDto }) {
+  return (
+    <section className="review-stage review-evidence-card" aria-labelledby="review-evidence-title">
+      <p className="eyebrow">Completed Review · Evidence Card</p>
+      <h2 id="review-evidence-title">{reviewJudgementLabel(completed.judgement)}</h2>
+      <p>Completed {completed.completedLocalDate}. This result was derived by judgement rule v{completed.attempt.judgementRuleVersion}; it was not selected directly.</p>
+      <h3>Why</h3>
+      <ul>{completed.evidenceCodes.map((code) => <li key={code}>{reviewEvidenceLabel(code)}</li>)}</ul>
+      {completed.failureReasons.length ? <><h3>Failure reasons</h3><ul>{completed.failureReasons.map((reason) => <li key={reason.code}>{reviewFailureReasonLabel(reason)}</li>)}</ul></> : null}
+      <h3>Next state</h3>
+      <p>{learningStatusLabel(completed.lifecycle.learningStatus)}{completed.lifecycle.nextReviewDueLocalDate ? ` · due ${completed.lifecycle.nextReviewDueLocalDate}` : ""}</p>
+    </section>
+  );
+}
+
+function ReviewHistoryEvidenceCard({ item }: { item: ReviewHistoryItemDto }) {
+  if (item.status === "void") {
+    return <section className="review-stage review-evidence-card"><p className="eyebrow">Review history</p><h2>Voided mistaken Attempt</h2><p>{item.voidReason}</p><p>Scheduling was unchanged. Revealed help history remains recorded.</p></section>;
+  }
+  return <section className="review-stage review-evidence-card"><p className="eyebrow">Completed Review · Evidence Card</p><h2>{item.judgement ? reviewJudgementLabel(item.judgement) : "Completed"}</h2><p>Completed {item.completedLocalDate}.</p><ul>{item.evidenceCodes.map((code) => <li key={code}>{reviewEvidenceLabel(code)}</li>)}</ul></section>;
+}
+
+const emptyMasteryEvidence: ProblemMasteryEvidenceDto = {
+  recallsProblem: false,
+  multipleSolutionsClear: false,
+  knowledgeUnderstood: false,
+  implementationFluent: false,
+  canAdaptOrCreate: false,
+  transferSolvedIndependently: false,
+};
+
+const masteryEvidenceLabels: ReadonlyArray<readonly [keyof ProblemMasteryEvidenceDto, string]> = [
+  ["recallsProblem", "I can recall what the Problem asks me to solve"],
+  ["multipleSolutionsClear", "Multiple solution routes are clear"],
+  ["knowledgeUnderstood", "The related knowledge is genuinely understood"],
+  ["implementationFluent", "I can implement it quickly and clearly"],
+  ["canAdaptOrCreate", "I understand the setting and can adapt or create a related Problem"],
+  ["transferSolvedIndependently", "I independently solved a related transfer Problem"],
+];
+
+function ProblemReviewHistory({ contestId, index, learningStatus }: {
+  contestId: number;
+  index: string;
+  learningStatus: LightweightProblemDetailDto["lifecycle"]["learningStatus"];
+}) {
+  const [history, setHistory] = useState<ReviewHistoryDto | null>(null);
+  const [masteryDraft, setMasteryDraft] = useState<ProblemMasteryEvidenceDto>(emptyMasteryEvidence);
+  const [loading, setLoading] = useState(false);
+  const [savingMastery, setSavingMastery] = useState(false);
+  const [error, setError] = useState(false);
+  const load = () => {
+    setLoading(true);
+    setError(false);
+    getReviewHistory(contestId, index)
+      .then((next) => {
+        setHistory(next);
+        setMasteryDraft(next.mastery?.current ?? emptyMasteryEvidence);
+      })
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  };
+  const saveMastery = () => {
+    if (!history) return;
+    setSavingMastery(true);
+    setError(false);
+    updateProblemMasteryEvidence(contestId, index, masteryDraft)
+      .then((mastery) => setHistory({ ...history, mastery }))
+      .catch(() => setError(true))
+      .finally(() => setSavingMastery(false));
+  };
+  const mastery = history?.mastery;
+  const achievedCount = Object.values(masteryDraft).filter(Boolean).length;
+  return (
+    <section className="content-panel" aria-labelledby="review-history-heading">
+      <h2 id="review-history-heading">Review history</h2>
+      {!history ? <button className="secondary-action" disabled={loading} onClick={load} type="button">{loading ? "Loading…" : "Load Review history"}</button> : null}
+      {error ? <p role="alert">Review history is temporarily unavailable; no history was changed.</p> : null}
+      {history ? <>
+        <p><strong>Historical best Review evidence:</strong> {history.historicalBestReview ? reviewJudgementLabel(history.historicalBestReview) : "None yet"}</p>
+        <section className="mastery-evidence" aria-labelledby="mastery-evidence-heading">
+          <h3 id="mastery-evidence-heading">Thorough digestion evidence</h3>
+          <p><strong>Current:</strong> {achievedCount}/6 evidence criteria · {learningStatusLabel(learningStatus)}</p>
+          <p><strong>Historical highest:</strong> {mastery?.historicalThoroughlyDigested ? "Thoroughly digested" : "Not yet thoroughly digested"}{mastery?.firstThoroughlyDigestedLocalDate ? ` · first reached ${mastery.firstThoroughlyDigestedLocalDate}` : ""}</p>
+          <p className="safe-note">Only 6/6 is “Thoroughly digested”. Review Mastered does not automatically change these user-confirmed facts.</p>
+          <fieldset>
+            <legend>Current evidence</legend>
+            {masteryEvidenceLabels.map(([key, label]) => <label key={key}><input checked={masteryDraft[key]} onChange={(event) => setMasteryDraft({ ...masteryDraft, [key]: event.target.checked })} type="checkbox" /> {label}</label>)}
+          </fieldset>
+          <button className="secondary-action" disabled={savingMastery} onClick={saveMastery} type="button">{savingMastery ? "Saving…" : "Save current evidence"}</button>
+        </section>
+        {history.attempts.length === 0 ? <p>No Review Attempts yet.</p> : <ol className="review-history-list">{history.attempts.map((item) => <li key={item.attempt.attemptId}><strong>{item.status === "void" ? "Void" : item.status === "inProgress" ? "In progress" : item.judgement ? reviewJudgementLabel(item.judgement) : "Completed"}</strong><span>{item.attempt.attemptType} · started {item.attempt.startedAtUtc}</span>{item.completionFacts ? <span>Final AC: {item.completionFacts.finalAc ? "yes" : "no"} · submissions: {item.completionFacts.totalSubmissions} · idea independent: {item.completionFacts.ideaIndependent ? "yes" : "no"} · implementation independent: {item.completionFacts.implementationIndependent ? "yes" : "no"}</span> : null}{item.helpLevels.length ? <span>Help levels: {item.helpLevels.join(", ")}</span> : null}{item.failureReasons.length ? <span>Reasons: {item.failureReasons.map(reviewFailureReasonLabel).join("; ")}</span> : null}</li>)}</ol>}
+      </> : null}
+    </section>
+  );
+}
+
+function reviewJudgementLabel(judgement: CompletedReviewAttemptDto["judgement"]): string {
+  return judgement === "mastered" ? "Mastered" : judgement === "partial" ? "Partial" : "Not passed";
+}
+
+function reviewFailureReasonLabel(reason: { code: ReviewFailureReasonCodeDto; otherText: string | null }): string {
+  return reason.code === "other"
+    ? `Other: ${reason.otherText ?? ""}`
+    : reviewFailureReasonOptions.find(([code]) => code === reason.code)?.[1] ?? reason.code;
+}
+
+function reviewEvidenceLabel(code: string): string {
+  const labels: Record<string, string> = {
+    final_ac: "Final submission accepted",
+    no_final_ac: "No final accepted submission",
+    controlled_help_l1: "Prerequisite names revealed",
+    controlled_help_l2: "Hint revealed",
+    controlled_help_l3: "Prerequisite content revealed",
+    controlled_help_l4: "Old idea or code revealed",
+    controlled_help_l5: "Full solution revealed",
+    external_solving_hint: "External problem-solving hint reported",
+    external_full_solution: "External full solution reported",
+    idea_not_independent: "Idea was not independent",
+    implementation_not_independent: "Implementation was not independent",
+    debug_not_needed: "No debugging was needed",
+    debug_independent: "Debugging was independent",
+    debug_solving_help: "Problem-solving help was used while debugging",
+  };
+  return labels[code] ?? code;
 }
 
 function learningStatusLabel(status: LightweightProblemDetailDto["lifecycle"]["learningStatus"]): string {
@@ -712,6 +1216,30 @@ function lifecycleActionLabel(action: ProblemLifecycleActionDto): string {
     stopLearning: "停止学习此题",
   } satisfies Record<ProblemLifecycleActionDto, string>;
   return labels[action];
+}
+
+function reviewAttemptTypeLabel(type: ReviewFocusDto["attempt"]["attemptType"]): string {
+  const labels = {
+    firstColdStart: "First cold-start Review",
+    longTermReview: "Long-term Review",
+    earlyCheck: "Early check",
+  } satisfies Record<ReviewFocusDto["attempt"]["attemptType"], string>;
+  return labels[type];
+}
+
+function reviewHelpLevelLabel(level: ReviewHelpLevel): string {
+  const labels = {
+    1: "Prerequisite names",
+    2: "Hints",
+    3: "Prerequisite content",
+    4: "Old idea / code",
+    5: "Full solution",
+  } satisfies Record<ReviewHelpLevel, string>;
+  return labels[level];
+}
+
+function reviewHelpConsequence(consequence: ReviewHelpItemDto["consequence"]): string {
+  return consequence === "fail_only" ? "Not passed only" : "Partial at best";
 }
 
 function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string, string>): string {

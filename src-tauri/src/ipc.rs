@@ -71,6 +71,7 @@ pub struct LightweightProblemDetailDto {
     identity_type: &'static str,
     personal_note: Option<PersonalNoteBindingDto>,
     lifecycle: ProblemLifecycleStateDto,
+    review_action: Option<&'static str>,
 }
 
 #[derive(serde::Serialize)]
@@ -88,6 +89,188 @@ pub struct ProblemLifecycleCommandInput {
     contest_id: u64,
     index: String,
     action: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFocusInput {
+    attempt_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealReviewHelpInput {
+    attempt_id: String,
+    level: u8,
+    impact_acknowledged: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteReviewInput {
+    attempt_id: String,
+    final_ac: bool,
+    first_submission_result: String,
+    first_submission_other: Option<String>,
+    final_result: String,
+    final_result_other: Option<String>,
+    total_submissions: u32,
+    idea_independent: bool,
+    implementation_independent: bool,
+    debug_independence: String,
+    external_help: String,
+    failure_reasons: Vec<ReviewFailureReasonInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFailureReasonInput {
+    code: String,
+    other_text: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoidReviewInput {
+    attempt_id: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewAttemptDto {
+    attempt_id: String,
+    contest_id: u64,
+    index: String,
+    attempt_type: &'static str,
+    scheduled_due_local_date: String,
+    started_early: bool,
+    judgement_rule_version: u32,
+    started_at_utc: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFocusDto {
+    attempt: ReviewAttemptDto,
+    title: String,
+    source_url: String,
+    statement_sanitized_html: String,
+    statement_assets: Vec<LocalStatementAssetDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewHelpItemDto {
+    level: u8,
+    consequence: &'static str,
+    available: bool,
+    revealed_at_utc: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewHelpDrawerDto {
+    attempt_id: String,
+    items: Vec<ReviewHelpItemDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealedReviewHelpDto {
+    event_id: String,
+    attempt_id: String,
+    level: u8,
+    consequence: &'static str,
+    title: String,
+    content_markdown: String,
+    source_digest: String,
+    revealed_at_utc: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedReviewAttemptDto {
+    attempt: ReviewAttemptDto,
+    judgement: &'static str,
+    evidence_codes: Vec<String>,
+    failure_reasons: Vec<ReviewFailureReasonDto>,
+    completed_at_utc: String,
+    completed_local_date: String,
+    lifecycle: ProblemLifecycleStateDto,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFailureReasonDto {
+    code: &'static str,
+    other_text: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCompletionFactsDto {
+    final_ac: bool,
+    first_submission_result: String,
+    final_result: String,
+    total_submissions: u32,
+    idea_independent: bool,
+    implementation_independent: bool,
+    debug_independence: &'static str,
+    external_help: &'static str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewHistoryItemDto {
+    attempt: ReviewAttemptDto,
+    status: &'static str,
+    judgement: Option<&'static str>,
+    completion_facts: Option<ReviewCompletionFactsDto>,
+    evidence_codes: Vec<String>,
+    failure_reasons: Vec<ReviewFailureReasonDto>,
+    help_levels: Vec<u8>,
+    completed_at_utc: Option<String>,
+    completed_local_date: Option<String>,
+    void_reason: Option<String>,
+    voided_at_utc: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewHistoryDto {
+    contest_id: u64,
+    index: String,
+    historical_best_review: Option<&'static str>,
+    mastery: ProblemMasteryProjectionDto,
+    attempts: Vec<ReviewHistoryItemDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemMasteryProjectionDto {
+    current: ProblemMasteryEvidenceDto,
+    historical_thoroughly_digested: bool,
+    first_thoroughly_digested_local_date: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemMasteryEvidenceDto {
+    recalls_problem: bool,
+    multiple_solutions_clear: bool,
+    knowledge_understood: bool,
+    implementation_fluent: bool,
+    can_adapt_or_create: bool,
+    transfer_solved_independently: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProblemMasteryEvidenceInput {
+    contest_id: u64,
+    index: String,
+    evidence: ProblemMasteryEvidenceDto,
 }
 
 #[derive(serde::Serialize)]
@@ -255,12 +438,19 @@ pub async fn lightweight_problem_detail(
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
-    database.lightweight_problem_detail(&problem).await
-        .map(lightweight_problem_detail_dto)
+    let today = acm_os_infrastructure::current_local_date().ok();
+    let detail = database.lightweight_problem_detail(&problem).await
         .map_err(|error| match error {
             acm_os_application::ContestReadError::NotFound => "problem_not_found",
             acm_os_application::ContestReadError::Unavailable => "problem_unavailable",
-        })
+        })?;
+    use acm_os_application::ReviewAttemptPort;
+    let review_in_progress = database
+        .load_in_progress_review_attempt(&problem)
+        .await
+        .map_err(acm_os_application::ReviewAttemptError::code)?
+        .is_some();
+    Ok(lightweight_problem_detail_dto(detail, today, review_in_progress))
 }
 
 #[tauri::command]
@@ -294,6 +484,167 @@ pub async fn transition_problem_lifecycle(
         .await
         .map(problem_lifecycle_state_dto)
         .map_err(acm_os_application::ProblemLifecycleError::code)
+}
+
+#[tauri::command]
+pub async fn start_or_resume_review(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<ReviewAttemptDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    let today = acm_os_infrastructure::current_local_date()
+        .map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::start_or_resume_review(database.inner(), &problem, today)
+        .await
+        .map(review_attempt_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn review_focus(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ReviewFocusInput,
+) -> Result<ReviewFocusDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    acm_os_application::review_focus(database.inner(), &input.attempt_id)
+        .await
+        .map(review_focus_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn review_help_drawer(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ReviewFocusInput,
+) -> Result<ReviewHelpDrawerDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    acm_os_application::review_help_drawer(database.inner(), &input.attempt_id)
+        .await
+        .map(review_help_drawer_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn reveal_review_help(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: RevealReviewHelpInput,
+) -> Result<RevealedReviewHelpDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    let level = acm_os_domain::ReviewHelpLevel::from_number(input.level)
+        .ok_or("invalid_review_help_level")?;
+    acm_os_application::reveal_review_help(
+        database.inner(),
+        &input.attempt_id,
+        level,
+        input.impact_acknowledged,
+    )
+    .await
+    .map(revealed_review_help_dto)
+    .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn complete_review(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CompleteReviewInput,
+) -> Result<CompletedReviewAttemptDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    let completion = parse_review_completion_input(input)?;
+    let completed_on = acm_os_infrastructure::current_local_date()
+        .map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::complete_review(
+        database.inner(),
+        &completion.0,
+        completion.1,
+        completed_on,
+    )
+    .await
+    .map(completed_review_attempt_dto)
+    .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn void_review(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: VoidReviewInput,
+) -> Result<ReviewHistoryItemDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    acm_os_application::void_review(database.inner(), &input.attempt_id, &input.reason)
+        .await
+        .map(review_history_item_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn review_attempt_history(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ReviewFocusInput,
+) -> Result<ReviewHistoryItemDto, &'static str> {
+    if input.attempt_id.len() != 36 {
+        return Err("invalid_review_attempt_identity");
+    }
+    acm_os_application::review_attempt_history_item(database.inner(), &input.attempt_id)
+        .await
+        .map(review_history_item_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn review_history(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<ReviewHistoryDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::review_history(database.inner(), &problem)
+        .await
+        .map(review_history_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
+}
+
+#[tauri::command]
+pub async fn update_problem_mastery_evidence(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: UpdateProblemMasteryEvidenceInput,
+) -> Result<ProblemMasteryProjectionDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    let today = acm_os_infrastructure::current_local_date()
+        .map_err(|_| "local_calendar_unavailable")?;
+    let evidence = acm_os_domain::ProblemMasteryEvidence {
+        recalls_problem: input.evidence.recalls_problem,
+        multiple_solutions_clear: input.evidence.multiple_solutions_clear,
+        knowledge_understood: input.evidence.knowledge_understood,
+        implementation_fluent: input.evidence.implementation_fluent,
+        can_adapt_or_create: input.evidence.can_adapt_or_create,
+        transfer_solved_independently: input.evidence.transfer_solved_independently,
+    };
+    acm_os_application::update_problem_mastery_evidence(
+        database.inner(),
+        &problem,
+        evidence,
+        today,
+    )
+    .await
+    .map(problem_mastery_projection_dto)
+    .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -473,7 +824,16 @@ fn lightweight_problem_item_dto(item: acm_os_application::LightweightProblemItem
     }
 }
 
-fn lightweight_problem_detail_dto(item: acm_os_application::LightweightProblemDetail) -> LightweightProblemDetailDto {
+fn lightweight_problem_detail_dto(
+    item: acm_os_application::LightweightProblemDetail,
+    today: Option<acm_os_domain::LocalDate>,
+    review_in_progress: bool,
+) -> LightweightProblemDetailDto {
+    let review_action = if review_in_progress {
+        Some("continueReview")
+    } else {
+        review_action_dto(&item.lifecycle, today)
+    };
     LightweightProblemDetailDto {
         contest_id: item.problem.contest().contest_id(),
         index: item.problem.index().to_owned(),
@@ -486,12 +846,41 @@ fn lightweight_problem_detail_dto(item: acm_os_application::LightweightProblemDe
         },
         identity_type: problem_identity_type_dto(item.identity_type),
         personal_note: item.personal_note.map(personal_note_binding_dto),
-        lifecycle: problem_lifecycle_state_dto(item.lifecycle),
+        lifecycle: problem_lifecycle_state_dto_with_review_state(item.lifecycle, review_in_progress),
+        review_action,
     }
+}
+
+fn review_action_dto(
+    lifecycle: &acm_os_application::ProblemLifecycleState,
+    today: Option<acm_os_domain::LocalDate>,
+) -> Option<&'static str> {
+    if lifecycle.identity_type != acm_os_application::ProblemIdentityType::Personal {
+        return None;
+    }
+    let cycle = lifecycle.active_review_cycle.as_ref()?;
+    let decision = acm_os_domain::ReviewEligibilityEngine::decide(
+        lifecycle.learning_status,
+        cycle.next_due_local_date,
+        today?,
+    )
+    .ok()?;
+    Some(if decision.started_early {
+        "earlyCheck"
+    } else {
+        "startReview"
+    })
 }
 
 fn problem_lifecycle_state_dto(
     state: acm_os_application::ProblemLifecycleState,
+) -> ProblemLifecycleStateDto {
+    problem_lifecycle_state_dto_with_review_state(state, false)
+}
+
+fn problem_lifecycle_state_dto_with_review_state(
+    state: acm_os_application::ProblemLifecycleState,
+    review_in_progress: bool,
 ) -> ProblemLifecycleStateDto {
     ProblemLifecycleStateDto {
         learning_status: learning_status_dto(state.learning_status),
@@ -499,7 +888,9 @@ fn problem_lifecycle_state_dto(
         next_review_due_local_date: state
             .active_review_cycle
             .map(|cycle| cycle.next_due_local_date.to_iso_string()),
-        available_actions: if state.identity_type == acm_os_application::ProblemIdentityType::Personal {
+        available_actions: if state.identity_type == acm_os_application::ProblemIdentityType::Personal
+            && !review_in_progress
+        {
             acm_os_domain::ProblemLifecycleEngine::available_actions(state.learning_status)
                 .iter()
                 .copied()
@@ -547,6 +938,290 @@ fn problem_lifecycle_action_dto(action: acm_os_domain::ProblemLifecycleAction) -
         acm_os_domain::ProblemLifecycleAction::StartRelearning => "startRelearning",
         acm_os_domain::ProblemLifecycleAction::StopLearning => "stopLearning",
         acm_os_domain::ProblemLifecycleAction::DeletePersonalNote => "deletePersonalNote",
+    }
+}
+
+fn review_attempt_dto(attempt: acm_os_application::ReviewAttempt) -> ReviewAttemptDto {
+    ReviewAttemptDto {
+        attempt_id: attempt.attempt_id,
+        contest_id: attempt.problem.contest().contest_id(),
+        index: attempt.problem.index().to_owned(),
+        attempt_type: match attempt.attempt_type {
+            acm_os_domain::ReviewAttemptType::FirstColdStart => "firstColdStart",
+            acm_os_domain::ReviewAttemptType::LongTermReview => "longTermReview",
+            acm_os_domain::ReviewAttemptType::EarlyCheck => "earlyCheck",
+        },
+        scheduled_due_local_date: attempt.scheduled_due_local_date.to_iso_string(),
+        started_early: attempt.started_early,
+        judgement_rule_version: attempt.judgement_rule_version,
+        started_at_utc: attempt.started_at_utc,
+    }
+}
+
+fn review_focus_dto(view: acm_os_application::ReviewFocusView) -> ReviewFocusDto {
+    ReviewFocusDto {
+        attempt: review_attempt_dto(view.attempt),
+        title: view.title,
+        source_url: view.source_url,
+        statement_sanitized_html: view.statement_sanitized_html,
+        statement_assets: view
+            .statement_assets
+            .into_iter()
+            .map(|asset| LocalStatementAssetDto {
+                local_ref: asset.local_ref,
+                media_type: asset.media_type,
+                bytes: asset.bytes,
+            })
+            .collect(),
+    }
+}
+
+fn review_help_drawer_dto(
+    view: acm_os_application::ReviewHelpDrawerView,
+) -> ReviewHelpDrawerDto {
+    ReviewHelpDrawerDto {
+        attempt_id: view.attempt_id,
+        items: view
+            .items
+            .into_iter()
+            .map(|item| ReviewHelpItemDto {
+                level: item.level.number(),
+                consequence: item.level.consequence_code(),
+                available: item.available,
+                revealed_at_utc: item.revealed_at_utc,
+            })
+            .collect(),
+    }
+}
+
+fn revealed_review_help_dto(
+    revealed: acm_os_application::RevealedReviewHelp,
+) -> RevealedReviewHelpDto {
+    RevealedReviewHelpDto {
+        event_id: revealed.event_id,
+        attempt_id: revealed.attempt_id,
+        level: revealed.level.number(),
+        consequence: revealed.level.consequence_code(),
+        title: revealed.title,
+        content_markdown: revealed.content_markdown,
+        source_digest: revealed.source_digest,
+        revealed_at_utc: revealed.revealed_at_utc,
+    }
+}
+
+fn parse_review_completion_input(
+    input: CompleteReviewInput,
+) -> Result<(String, acm_os_application::ReviewCompletionInput), &'static str> {
+    let attempt_id = input.attempt_id;
+    let first_submission = parse_submission_fact(
+        &input.first_submission_result,
+        input.first_submission_other,
+    )?;
+    let final_submission = parse_submission_fact(&input.final_result, input.final_result_other)?;
+    let debug_independence = match input.debug_independence.as_str() {
+        "notNeeded" => acm_os_domain::DebugIndependence::NotNeeded,
+        "independent" => acm_os_domain::DebugIndependence::Independent,
+        "usedSolvingHelp" => acm_os_domain::DebugIndependence::UsedSolvingHelp,
+        _ => return Err("review_completion_facts_invalid"),
+    };
+    let external_help = match input.external_help.as_str() {
+        "none" => acm_os_domain::ExternalHelpLevel::None,
+        "solvingHint" => acm_os_domain::ExternalHelpLevel::SolvingHint,
+        "fullSolution" => acm_os_domain::ExternalHelpLevel::FullSolution,
+        _ => return Err("review_completion_facts_invalid"),
+    };
+    let failure_reasons = input
+        .failure_reasons
+        .into_iter()
+        .map(parse_failure_reason_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        attempt_id,
+        acm_os_application::ReviewCompletionInput {
+            final_ac: input.final_ac,
+            first_submission,
+            final_submission,
+            total_submissions: input.total_submissions,
+            idea_independent: input.idea_independent,
+            implementation_independent: input.implementation_independent,
+            debug_independence,
+            external_help,
+            failure_reasons,
+        },
+    ))
+}
+
+fn parse_submission_fact(
+    result: &str,
+    other_text: Option<String>,
+) -> Result<acm_os_application::SubmissionFact, &'static str> {
+    let result = match result {
+        "accepted" => acm_os_domain::SubmissionResult::Accepted,
+        "wrongAnswer" => acm_os_domain::SubmissionResult::WrongAnswer,
+        "timeLimitExceeded" => acm_os_domain::SubmissionResult::TimeLimitExceeded,
+        "memoryLimitExceeded" => acm_os_domain::SubmissionResult::MemoryLimitExceeded,
+        "runtimeError" => acm_os_domain::SubmissionResult::RuntimeError,
+        "compilationError" => acm_os_domain::SubmissionResult::CompilationError,
+        "other" => acm_os_domain::SubmissionResult::Other,
+        _ => return Err("review_completion_facts_invalid"),
+    };
+    Ok(acm_os_application::SubmissionFact { result, other_text })
+}
+
+fn parse_failure_reason_input(
+    input: ReviewFailureReasonInput,
+) -> Result<acm_os_application::ReviewFailureReason, &'static str> {
+    match (input.code.as_str(), input.other_text) {
+        ("noIdea", None) => Ok(acm_os_application::ReviewFailureReason::NoIdea),
+        ("keyPropertyBlocked", None) => {
+            Ok(acm_os_application::ReviewFailureReason::KeyPropertyBlocked)
+        }
+        ("derivationBlocked", None) => {
+            Ok(acm_os_application::ReviewFailureReason::DerivationBlocked)
+        }
+        ("cannotImplement", None) => {
+            Ok(acm_os_application::ReviewFailureReason::CannotImplement)
+        }
+        ("implementationError", None) => {
+            Ok(acm_os_application::ReviewFailureReason::ImplementationError)
+        }
+        ("boundaryError", None) => {
+            Ok(acm_os_application::ReviewFailureReason::BoundaryError)
+        }
+        ("complexityError", None) => {
+            Ok(acm_os_application::ReviewFailureReason::ComplexityError)
+        }
+        ("other", Some(text)) => Ok(acm_os_application::ReviewFailureReason::Other(text)),
+        _ => Err("invalid_review_failure_reason"),
+    }
+}
+
+fn completed_review_attempt_dto(
+    completed: acm_os_application::CompletedReviewAttempt,
+) -> CompletedReviewAttemptDto {
+    CompletedReviewAttemptDto {
+        attempt: review_attempt_dto(completed.attempt),
+        judgement: review_judgement_dto(completed.judgement),
+        evidence_codes: completed.evidence_codes,
+        failure_reasons: completed
+            .failure_reasons
+            .into_iter()
+            .map(review_failure_reason_dto)
+            .collect(),
+        completed_at_utc: completed.completed_at_utc,
+        completed_local_date: completed.completed_local_date.to_iso_string(),
+        lifecycle: problem_lifecycle_state_dto(completed.lifecycle),
+    }
+}
+
+fn review_history_dto(history: acm_os_application::ReviewHistoryView) -> ReviewHistoryDto {
+    ReviewHistoryDto {
+        contest_id: history.problem.contest().contest_id(),
+        index: history.problem.index().to_owned(),
+        historical_best_review: history.historical_best_review.map(review_judgement_dto),
+        mastery: problem_mastery_projection_dto(history.mastery),
+        attempts: history
+            .attempts
+            .into_iter()
+            .map(review_history_item_dto)
+            .collect(),
+    }
+}
+
+fn problem_mastery_projection_dto(
+    projection: acm_os_application::ProblemMasteryProjection,
+) -> ProblemMasteryProjectionDto {
+    ProblemMasteryProjectionDto {
+        current: ProblemMasteryEvidenceDto {
+            recalls_problem: projection.current.recalls_problem,
+            multiple_solutions_clear: projection.current.multiple_solutions_clear,
+            knowledge_understood: projection.current.knowledge_understood,
+            implementation_fluent: projection.current.implementation_fluent,
+            can_adapt_or_create: projection.current.can_adapt_or_create,
+            transfer_solved_independently: projection.current.transfer_solved_independently,
+        },
+        historical_thoroughly_digested: projection.historical_thoroughly_digested,
+        first_thoroughly_digested_local_date: projection
+            .first_thoroughly_digested_local_date
+            .map(|date| date.to_iso_string()),
+    }
+}
+
+fn review_history_item_dto(item: acm_os_application::ReviewHistoryItem) -> ReviewHistoryItemDto {
+    ReviewHistoryItemDto {
+        attempt: review_attempt_dto(item.attempt),
+        status: match item.status {
+            acm_os_application::ReviewAttemptStatus::InProgress => "inProgress",
+            acm_os_application::ReviewAttemptStatus::Completed => "completed",
+            acm_os_application::ReviewAttemptStatus::Void => "void",
+        },
+        judgement: item.judgement.map(review_judgement_dto),
+        completion_facts: item.completion_input.as_ref().map(|input| ReviewCompletionFactsDto {
+            final_ac: input.final_ac,
+            first_submission_result: submission_fact_dto(&input.first_submission),
+            final_result: submission_fact_dto(&input.final_submission),
+            total_submissions: input.total_submissions,
+            idea_independent: input.idea_independent,
+            implementation_independent: input.implementation_independent,
+            debug_independence: match input.debug_independence {
+                acm_os_domain::DebugIndependence::NotNeeded => "notNeeded",
+                acm_os_domain::DebugIndependence::Independent => "independent",
+                acm_os_domain::DebugIndependence::UsedSolvingHelp => "usedSolvingHelp",
+            },
+            external_help: match input.external_help {
+                acm_os_domain::ExternalHelpLevel::None => "none",
+                acm_os_domain::ExternalHelpLevel::SolvingHint => "solvingHint",
+                acm_os_domain::ExternalHelpLevel::FullSolution => "fullSolution",
+            },
+        }),
+        evidence_codes: item.evidence_codes,
+        failure_reasons: item
+            .failure_reasons
+            .into_iter()
+            .map(review_failure_reason_dto)
+            .collect(),
+        help_levels: item.help_levels.into_iter().map(|level| level.number()).collect(),
+        completed_at_utc: item.completed_at_utc,
+        completed_local_date: item.completed_local_date.map(|date| date.to_iso_string()),
+        void_reason: item.void_reason,
+        voided_at_utc: item.voided_at_utc,
+    }
+}
+
+fn submission_fact_dto(fact: &acm_os_application::SubmissionFact) -> String {
+    match fact.result {
+        acm_os_domain::SubmissionResult::Accepted => "accepted".to_owned(),
+        acm_os_domain::SubmissionResult::WrongAnswer => "wrongAnswer".to_owned(),
+        acm_os_domain::SubmissionResult::TimeLimitExceeded => "timeLimitExceeded".to_owned(),
+        acm_os_domain::SubmissionResult::MemoryLimitExceeded => "memoryLimitExceeded".to_owned(),
+        acm_os_domain::SubmissionResult::RuntimeError => "runtimeError".to_owned(),
+        acm_os_domain::SubmissionResult::CompilationError => "compilationError".to_owned(),
+        acm_os_domain::SubmissionResult::Other => {
+            format!("other:{}", fact.other_text.as_deref().unwrap_or_default())
+        }
+    }
+}
+
+fn review_failure_reason_dto(
+    reason: acm_os_application::ReviewFailureReason,
+) -> ReviewFailureReasonDto {
+    match reason {
+        acm_os_application::ReviewFailureReason::NoIdea => ReviewFailureReasonDto { code: "noIdea", other_text: None },
+        acm_os_application::ReviewFailureReason::KeyPropertyBlocked => ReviewFailureReasonDto { code: "keyPropertyBlocked", other_text: None },
+        acm_os_application::ReviewFailureReason::DerivationBlocked => ReviewFailureReasonDto { code: "derivationBlocked", other_text: None },
+        acm_os_application::ReviewFailureReason::CannotImplement => ReviewFailureReasonDto { code: "cannotImplement", other_text: None },
+        acm_os_application::ReviewFailureReason::ImplementationError => ReviewFailureReasonDto { code: "implementationError", other_text: None },
+        acm_os_application::ReviewFailureReason::BoundaryError => ReviewFailureReasonDto { code: "boundaryError", other_text: None },
+        acm_os_application::ReviewFailureReason::ComplexityError => ReviewFailureReasonDto { code: "complexityError", other_text: None },
+        acm_os_application::ReviewFailureReason::Other(text) => ReviewFailureReasonDto { code: "other", other_text: Some(text) },
+    }
+}
+
+fn review_judgement_dto(judgement: acm_os_domain::ReviewJudgement) -> &'static str {
+    match judgement {
+        acm_os_domain::ReviewJudgement::Mastered => "mastered",
+        acm_os_domain::ReviewJudgement::Partial => "partial",
+        acm_os_domain::ReviewJudgement::Fail => "fail",
     }
 }
 
@@ -802,7 +1477,9 @@ mod tests {
     use acm_os_application::{
         ActiveReviewCycle,
         KnownMarkdownSection, MarkdownParseWarning, PersonalNoteBinding, PersonalNoteReadState,
-        ProblemIdentityType, ProblemLifecycleState, ProblemMarkdownProjection, SolutionRoute,
+        LocalStatementAsset, ProblemIdentityType, ProblemLifecycleState, ProblemMarkdownProjection,
+        RevealedReviewHelp, ReviewAttempt, ReviewFocusView, ReviewHelpDrawerView, ReviewHelpItem,
+        SolutionRoute,
         StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
         WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
     };
@@ -810,9 +1487,12 @@ mod tests {
 
     use super::{
         app_shell_status_dto, normalize_windows_verbatim_path, obsidian_open_uri,
-        personal_note_read_state_dto, problem_lifecycle_state_dto, startup_status_dto,
-        workspace_error_dto, workspace_status_dto, LightweightProblemDetailDto,
-        ProblemLifecycleStateDto, StatementReadStateDto,
+        personal_note_read_state_dto, problem_lifecycle_state_dto, review_action_dto,
+        parse_review_completion_input, revealed_review_help_dto, review_focus_dto, review_help_drawer_dto,
+        startup_status_dto, workspace_error_dto, workspace_status_dto,
+        LightweightProblemDetailDto,
+        CompleteReviewInput, ProblemLifecycleStateDto, ReviewFailureReasonInput,
+        StatementReadStateDto,
     };
 
     #[test]
@@ -926,6 +1606,7 @@ mod tests {
                 next_review_due_local_date: None,
                 available_actions: Vec::new(),
             },
+            review_action: None,
         };
         assert_eq!(
             serde_json::to_value(dto).expect("serialize problem detail"),
@@ -946,7 +1627,8 @@ mod tests {
                     "learningStatusSinceUtc": "2026-08-11T00:00:00.000Z",
                     "nextReviewDueLocalDate": null,
                     "availableActions": []
-                }
+                },
+                "reviewAction": null
             })
         );
     }
@@ -973,6 +1655,153 @@ mod tests {
                 "nextReviewDueLocalDate": "2026-08-14",
                 "availableActions": ["withdrawUnderstood", "stopLearning"]
             })
+        );
+    }
+
+    #[test]
+    fn review_contract_exposes_attempt_metadata_and_only_focus_statement_data() {
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
+        let lifecycle = ProblemLifecycleState {
+            identity_type: ProblemIdentityType::Personal,
+            learning_status: acm_os_domain::LearningStatus::WaitingColdStart,
+            learning_status_since_utc: "2026-08-11T00:00:00.000Z".to_owned(),
+            active_review_cycle: Some(ActiveReviewCycle {
+                cycle_number: 1,
+                stage: 0,
+                schedule_rule_version: 1,
+                next_due_local_date: due,
+            }),
+        };
+        assert_eq!(review_action_dto(&lifecycle, Some(due)), Some("startReview"));
+        assert_eq!(
+            review_action_dto(
+                &lifecycle,
+                Some(acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early")),
+            ),
+            Some("earlyCheck")
+        );
+
+        let dto = review_focus_dto(ReviewFocusView {
+            attempt: ReviewAttempt {
+                attempt_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab".to_owned(),
+                problem,
+                attempt_type: acm_os_domain::ReviewAttemptType::FirstColdStart,
+                scheduled_due_local_date: due,
+                started_early: false,
+                judgement_rule_version: 1,
+                started_at_utc: "2026-08-14T00:00:00.000Z".to_owned(),
+            },
+            title: "Problem A".to_owned(),
+            source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+            statement_sanitized_html: "<p>statement only</p>".to_owned(),
+            statement_assets: vec![LocalStatementAsset {
+                local_ref: "acm-os-asset://sample".to_owned(),
+                media_type: "image/png".to_owned(),
+                bytes: vec![1, 2, 3],
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize focus"),
+            json!({
+                "attempt": {
+                    "attemptId": "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+                    "contestId": 1979,
+                    "index": "A",
+                    "attemptType": "firstColdStart",
+                    "scheduledDueLocalDate": "2026-08-14",
+                    "startedEarly": false,
+                    "judgementRuleVersion": 1,
+                    "startedAtUtc": "2026-08-14T00:00:00.000Z"
+                },
+                "title": "Problem A",
+                "sourceUrl": "https://codeforces.com/contest/1979/problem/A",
+                "statementSanitizedHtml": "<p>statement only</p>",
+                "statementAssets": [{
+                    "localRef": "acm-os-asset://sample",
+                    "mediaType": "image/png",
+                    "bytes": [1, 2, 3]
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn review_help_contract_exposes_no_content_before_reveal() {
+        let drawer = review_help_drawer_dto(ReviewHelpDrawerView {
+            attempt_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab".to_owned(),
+            items: vec![ReviewHelpItem {
+                level: acm_os_domain::ReviewHelpLevel::Hints,
+                available: true,
+                revealed_at_utc: None,
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(drawer).expect("serialize drawer"),
+            json!({
+                "attemptId": "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+                "items": [{
+                    "level": 2,
+                    "consequence": "partial_at_best",
+                    "available": true,
+                    "revealedAtUtc": null
+                }]
+            })
+        );
+        let revealed = revealed_review_help_dto(RevealedReviewHelp {
+            event_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ac".to_owned(),
+            attempt_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab".to_owned(),
+            level: acm_os_domain::ReviewHelpLevel::FullSolution,
+            title: "Full solution".to_owned(),
+            content_markdown: "## 题解\nanswer".to_owned(),
+            source_digest: "a".repeat(64),
+            revealed_at_utc: "2026-08-14T00:00:00.000Z".to_owned(),
+        });
+        assert_eq!(
+            serde_json::to_value(revealed).expect("serialize revealed help"),
+            json!({
+                "eventId": "018f0d8e-4a5b-7c6d-8e9f-0123456789ac",
+                "attemptId": "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+                "level": 5,
+                "consequence": "fail_only",
+                "title": "Full solution",
+                "contentMarkdown": "## 题解\nanswer",
+                "sourceDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revealedAtUtc": "2026-08-14T00:00:00.000Z"
+            })
+        );
+    }
+
+    #[test]
+    fn completion_contract_accepts_facts_without_accepting_a_user_selected_judgement() {
+        let (attempt_id, input) = parse_review_completion_input(CompleteReviewInput {
+            attempt_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab".to_owned(),
+            final_ac: true,
+            first_submission_result: "wrongAnswer".to_owned(),
+            first_submission_other: None,
+            final_result: "accepted".to_owned(),
+            final_result_other: None,
+            total_submissions: 2,
+            idea_independent: false,
+            implementation_independent: true,
+            debug_independence: "independent".to_owned(),
+            external_help: "none".to_owned(),
+            failure_reasons: vec![ReviewFailureReasonInput {
+                code: "keyPropertyBlocked".to_owned(),
+                other_text: None,
+            }],
+        })
+        .expect("valid completion facts");
+        assert_eq!(attempt_id, "018f0d8e-4a5b-7c6d-8e9f-0123456789ab");
+        assert!(!input.idea_independent);
+        assert_eq!(input.total_submissions, 2);
+        assert_eq!(
+            input.failure_reasons,
+            [acm_os_application::ReviewFailureReason::KeyPropertyBlocked]
         );
     }
 
