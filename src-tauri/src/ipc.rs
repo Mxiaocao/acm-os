@@ -59,6 +59,123 @@ pub struct LightweightProblemDetailInput {
     index: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeNodeInput {
+    knowledge_node_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchInput {
+    query: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeUnderstandingInput {
+    knowledge_node_id: String,
+    level: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCandidateRegisterInput {
+    contest_id: u64,
+    index: String,
+    fingerprint: String,
+    target_ref: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCandidateDispositionInput {
+    contest_id: u64,
+    index: String,
+    fingerprint: String,
+    disposition: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCandidateAcceptInput {
+    contest_id: u64,
+    index: String,
+    fingerprint: String,
+    knowledge_node_id: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedKnowledgeCandidateDto {
+    knowledge_node_id: String,
+    target_ref: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCandidateDto {
+    contest_id: u64,
+    problem_index: String,
+    fingerprint: String,
+    target_ref: String,
+    disposition: &'static str,
+    knowledge_node_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeNodeDto {
+    knowledge_node_id: String,
+    display_name: String,
+    vault_relative_path: String,
+    content_digest: String,
+    location_state: &'static str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeIndexDto {
+    nodes: Vec<KnowledgeNodeDto>,
+    location_anomalies: Vec<KnowledgeNodeDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeUnderstandingDto {
+    knowledge_node_id: String,
+    current: &'static str,
+    historical_highest: &'static str,
+    first_reached_highest_on: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedKnowledgeProblemDto {
+    problem_id: String,
+    contest_id: u64,
+    problem_index: String,
+    title: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeDetailDto {
+    node: KnowledgeNodeDto,
+    understanding: Option<KnowledgeUnderstandingDto>,
+    incoming: Vec<KnowledgeNodeDto>,
+    outgoing: Vec<KnowledgeNodeDto>,
+    related_problems: Vec<RelatedKnowledgeProblemDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReevaluationSuggestionDto {
+    knowledge_node_id: String,
+    should_suggest: bool,
+    qualifying_problem_count: u32,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightweightProblemDetailDto {
@@ -1138,6 +1255,337 @@ pub async fn open_personal_note_in_obsidian(
         .map_err(|_| "obsidian_open_failed")
 }
 
+#[tauri::command]
+pub async fn open_knowledge_in_obsidian(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    app: tauri::AppHandle,
+    input: KnowledgeNodeInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::WorkspaceConfigurationPort;
+    use tauri_plugin_opener::OpenerExt;
+
+    let detail =
+        acm_os_application::load_knowledge_detail(database.inner(), &input.knowledge_node_id)
+            .await
+            .map_err(knowledge_index_error_code)?;
+    let workspace = database
+        .load_workspace_configuration()
+        .await
+        .map_err(|_| "workspace_unavailable")?
+        .ok_or("workspace_unavailable")?;
+    let uri = obsidian_open_uri(
+        workspace.active_vault_path(),
+        &detail.node.vault_relative_path,
+    )?;
+    app.opener()
+        .open_url(uri, None::<&str>)
+        .map_err(|_| "obsidian_open_failed")
+}
+
+#[tauri::command]
+pub async fn knowledge_index(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeSearchInput,
+) -> Result<KnowledgeIndexDto, &'static str> {
+    let projection = acm_os_application::rebuild_knowledge_index(database.inner())
+        .await
+        .map_err(knowledge_index_error_code)?;
+    let nodes = if input.query.trim().is_empty() {
+        projection.nodes
+    } else {
+        acm_os_application::search_knowledge_index(database.inner(), &input.query)
+            .await
+            .map_err(knowledge_index_error_code)?
+    };
+    Ok(KnowledgeIndexDto {
+        nodes: nodes.into_iter().map(knowledge_node_dto).collect(),
+        location_anomalies: projection
+            .location_anomalies
+            .into_iter()
+            .map(knowledge_node_dto)
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn knowledge_detail(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeNodeInput,
+) -> Result<KnowledgeDetailDto, &'static str> {
+    acm_os_application::load_knowledge_detail(database.inner(), &input.knowledge_node_id)
+        .await
+        .map(knowledge_detail_dto)
+        .map_err(knowledge_index_error_code)
+}
+
+#[tauri::command]
+pub async fn confirm_knowledge_understanding(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeUnderstandingInput,
+) -> Result<KnowledgeUnderstandingDto, &'static str> {
+    let level = knowledge_understanding_level(&input.level)?;
+    let date = command_local_date().map_err(|_| "local_date_unavailable")?;
+    acm_os_application::confirm_knowledge_understanding(
+        database.inner(),
+        &input.knowledge_node_id,
+        level,
+        date,
+    )
+    .await
+    .map(knowledge_understanding_dto)
+    .map_err(knowledge_index_error_code)
+}
+
+#[tauri::command]
+pub async fn knowledge_reevaluation_suggestion(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeNodeInput,
+) -> Result<KnowledgeReevaluationSuggestionDto, &'static str> {
+    acm_os_application::load_knowledge_reevaluation_suggestion(
+        database.inner(),
+        &input.knowledge_node_id,
+    )
+    .await
+    .map(|v| KnowledgeReevaluationSuggestionDto {
+        knowledge_node_id: v.knowledge_node_id,
+        should_suggest: v.should_suggest,
+        qualifying_problem_count: v.qualifying_problem_count,
+    })
+    .map_err(knowledge_index_error_code)
+}
+
+#[tauri::command]
+pub async fn knowledge_candidates(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<Vec<KnowledgeCandidateDto>, &'static str> {
+    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    let items = acm_os_application::list_knowledge_candidates(database.inner(), &problem)
+        .await
+        .map_err(knowledge_candidate_error_code)?;
+    let index = acm_os_application::rebuild_knowledge_index(database.inner())
+        .await
+        .map_err(knowledge_index_error_code)?;
+    Ok(items
+        .into_iter()
+        .map(|item| knowledge_candidate_dto(item, &index.nodes))
+        .collect())
+}
+
+#[tauri::command]
+pub async fn register_knowledge_candidate(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeCandidateRegisterInput,
+) -> Result<KnowledgeCandidateDto, &'static str> {
+    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    acm_os_application::register_knowledge_candidate(
+        database.inner(),
+        &problem,
+        &input.fingerprint,
+        &input.target_ref,
+    )
+    .await
+    .map(|item| knowledge_candidate_dto(item, &[]))
+    .map_err(knowledge_candidate_error_code)
+}
+
+#[tauri::command]
+pub async fn set_knowledge_candidate_disposition(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeCandidateDispositionInput,
+) -> Result<KnowledgeCandidateDto, &'static str> {
+    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    let disposition = match input.disposition.as_str() {
+        "pending" => acm_os_application::KnowledgeCandidateDisposition::Pending,
+        "acceptedIntent" => acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent,
+        "ignored" => acm_os_application::KnowledgeCandidateDisposition::Ignored,
+        _ => return Err("invalid_candidate_disposition"),
+    };
+    acm_os_application::set_knowledge_candidate_disposition(
+        database.inner(),
+        &problem,
+        &input.fingerprint,
+        disposition,
+    )
+    .await
+    .map(|item| knowledge_candidate_dto(item, &[]))
+    .map_err(knowledge_candidate_error_code)
+}
+
+#[tauri::command]
+pub async fn accept_existing_knowledge_candidate(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeCandidateAcceptInput,
+) -> Result<AcceptedKnowledgeCandidateDto, &'static str> {
+    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    acm_os_application::accept_existing_knowledge_candidate(
+        database.inner(),
+        &problem,
+        &input.fingerprint,
+        &input.knowledge_node_id,
+    )
+    .await
+    .map(|value| AcceptedKnowledgeCandidateDto {
+        knowledge_node_id: value.knowledge_node_id,
+        target_ref: value.target_ref,
+    })
+    .map_err(knowledge_candidate_error_code)
+}
+
+fn knowledge_candidate_problem(
+    contest_id: u64,
+    index: String,
+) -> Result<acm_os_domain::CodeforcesProblemIdentity, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+        .map_err(|_| "invalid_problem_identity")
+}
+
+fn knowledge_candidate_dto(
+    value: acm_os_application::KnowledgeCandidateProjection,
+    nodes: &[acm_os_application::KnowledgeNodeProjection],
+) -> KnowledgeCandidateDto {
+    let matches = nodes
+        .iter()
+        .filter(|node| {
+            if value.target_ref.contains('/') {
+                node.vault_relative_path
+                    .strip_suffix(".md")
+                    .is_some_and(|path| path.eq_ignore_ascii_case(&value.target_ref))
+            } else {
+                node.display_name.eq_ignore_ascii_case(&value.target_ref)
+            }
+        })
+        .collect::<Vec<_>>();
+    KnowledgeCandidateDto {
+        contest_id: value.problem.contest().contest_id(),
+        problem_index: value.problem.index().to_owned(),
+        fingerprint: value.fingerprint,
+        target_ref: value.target_ref,
+        disposition: match value.disposition {
+            acm_os_application::KnowledgeCandidateDisposition::Pending => "pending",
+            acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent => "acceptedIntent",
+            acm_os_application::KnowledgeCandidateDisposition::Ignored => "ignored",
+        },
+        knowledge_node_id: (matches.len() == 1).then(|| matches[0].knowledge_node_id.clone()),
+    }
+}
+
+fn knowledge_candidate_error_code(
+    error: acm_os_application::KnowledgeCandidateError,
+) -> &'static str {
+    match error {
+        acm_os_application::KnowledgeCandidateError::ProblemNotFound => "problem_not_found",
+        acm_os_application::KnowledgeCandidateError::NotPersonal => {
+            "candidate_requires_personal_problem"
+        }
+        acm_os_application::KnowledgeCandidateError::CandidateNotFound => "candidate_not_found",
+        acm_os_application::KnowledgeCandidateError::InvalidFingerprint => {
+            "invalid_candidate_fingerprint"
+        }
+        acm_os_application::KnowledgeCandidateError::InvalidTarget => "invalid_candidate_target",
+        acm_os_application::KnowledgeCandidateError::PersistenceUnavailable => {
+            "persistence_unavailable"
+        }
+        acm_os_application::KnowledgeCandidateError::IntegrityViolation => "integrity_violation",
+    }
+}
+
+fn knowledge_node_dto(node: acm_os_application::KnowledgeNodeProjection) -> KnowledgeNodeDto {
+    KnowledgeNodeDto {
+        knowledge_node_id: node.knowledge_node_id,
+        display_name: node.display_name,
+        vault_relative_path: node.vault_relative_path,
+        content_digest: node.content_digest,
+        location_state: match node.location_state {
+            acm_os_application::KnowledgeLocationState::Ready => "ready",
+            acm_os_application::KnowledgeLocationState::LocationAnomaly => "locationAnomaly",
+        },
+    }
+}
+
+fn knowledge_understanding_level(
+    value: &str,
+) -> Result<acm_os_domain::KnowledgeUnderstandingLevel, &'static str> {
+    match value {
+        "notLearned" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::NotLearned),
+        "vague" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Vague),
+        "basic" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Basic),
+        "proficient" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Proficient),
+        "deep" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Deep),
+        _ => Err("invalid_understanding_level"),
+    }
+}
+
+fn knowledge_understanding_dto(
+    value: acm_os_application::KnowledgeUnderstandingProjection,
+) -> KnowledgeUnderstandingDto {
+    KnowledgeUnderstandingDto {
+        knowledge_node_id: value.knowledge_node_id,
+        current: knowledge_understanding_level_dto(value.current),
+        historical_highest: knowledge_understanding_level_dto(value.historical_highest),
+        first_reached_highest_on: value.first_reached_highest_on.to_iso_string(),
+    }
+}
+
+fn knowledge_understanding_level_dto(
+    value: acm_os_domain::KnowledgeUnderstandingLevel,
+) -> &'static str {
+    match value {
+        acm_os_domain::KnowledgeUnderstandingLevel::NotLearned => "notLearned",
+        acm_os_domain::KnowledgeUnderstandingLevel::Vague => "vague",
+        acm_os_domain::KnowledgeUnderstandingLevel::Basic => "basic",
+        acm_os_domain::KnowledgeUnderstandingLevel::Proficient => "proficient",
+        acm_os_domain::KnowledgeUnderstandingLevel::Deep => "deep",
+    }
+}
+
+fn knowledge_detail_dto(
+    detail: acm_os_application::KnowledgeDetailProjection,
+) -> KnowledgeDetailDto {
+    KnowledgeDetailDto {
+        node: knowledge_node_dto(detail.node),
+        understanding: detail.understanding.map(knowledge_understanding_dto),
+        incoming: detail
+            .incoming
+            .into_iter()
+            .map(knowledge_node_dto)
+            .collect(),
+        outgoing: detail
+            .outgoing
+            .into_iter()
+            .map(knowledge_node_dto)
+            .collect(),
+        related_problems: detail
+            .related_problems
+            .into_iter()
+            .map(|item| RelatedKnowledgeProblemDto {
+                problem_id: item.problem_id,
+                contest_id: item.problem.contest().contest_id(),
+                problem_index: item.problem.index().to_owned(),
+                title: item.title,
+            })
+            .collect(),
+    }
+}
+
+fn knowledge_index_error_code(error: acm_os_application::KnowledgeIndexError) -> &'static str {
+    match error {
+        acm_os_application::KnowledgeIndexError::WorkspaceUnavailable => "workspace_unavailable",
+        acm_os_application::KnowledgeIndexError::KnowledgeRootUnavailable => {
+            "knowledge_root_unavailable"
+        }
+        acm_os_application::KnowledgeIndexError::KnowledgeNodeNotFound => {
+            "knowledge_node_not_found"
+        }
+        acm_os_application::KnowledgeIndexError::PersistenceUnavailable => {
+            "persistence_unavailable"
+        }
+        acm_os_application::KnowledgeIndexError::IntegrityViolation => "integrity_violation",
+    }
+}
+
 fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, &'static str> {
     let vault = std::fs::canonicalize(active_vault).map_err(|_| "vault_unavailable")?;
     let target =
@@ -1148,7 +1596,9 @@ fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, 
     let mut uri = url::Url::parse("obsidian://open").map_err(|_| "note_open_failed")?;
     uri.query_pairs_mut()
         .append_pair("path", &obsidian_external_path(&target)?);
-    Ok(uri.into())
+    // Obsidian treats `+` as a literal filename character in `path`; use URI
+    // percent encoding for spaces instead of form-url-encoded spaces.
+    Ok(String::from(uri).replace('+', "%20"))
 }
 
 fn obsidian_external_path(path: &std::path::Path) -> Result<String, &'static str> {
@@ -2247,7 +2697,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, normalize_windows_verbatim_path, obsidian_open_uri,
+        app_shell_status_dto, knowledge_index_error_code, knowledge_understanding_dto,
+        knowledge_understanding_level, normalize_windows_verbatim_path, obsidian_open_uri,
         parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
         startup_status_dto, workspace_error_dto, workspace_status_dto, CompleteReviewInput,
@@ -2771,7 +3222,8 @@ mod tests {
         .expect("safe Obsidian URI");
 
         assert!(uri.starts_with("obsidian://open?path="));
-        assert!(uri.contains("A+note.md") || uri.contains("A%20note.md"));
+        assert!(uri.contains("A%20note.md"));
+        assert!(!uri.contains("A+note.md"));
         let decoded_path = url::Url::parse(&uri)
             .expect("valid Obsidian URI")
             .query_pairs()
@@ -2802,6 +3254,51 @@ mod tests {
         assert_eq!(
             obsidian_open_uri(vault.to_str().expect("utf-8 vault"), "../outside.md"),
             Err("note_open_failed")
+        );
+    }
+
+    #[test]
+    fn knowledge_open_errors_remain_specific_and_non_mutating() {
+        assert_eq!(
+            knowledge_index_error_code(
+                acm_os_application::KnowledgeIndexError::KnowledgeNodeNotFound
+            ),
+            "knowledge_node_not_found"
+        );
+        assert_eq!(
+            knowledge_index_error_code(
+                acm_os_application::KnowledgeIndexError::KnowledgeRootUnavailable
+            ),
+            "knowledge_root_unavailable"
+        );
+    }
+
+    #[test]
+    fn knowledge_understanding_ipc_accepts_only_frozen_levels_and_serializes_history() {
+        assert_eq!(
+            knowledge_understanding_level("deep"),
+            Ok(acm_os_domain::KnowledgeUnderstandingLevel::Deep)
+        );
+        assert_eq!(
+            knowledge_understanding_level("mastered"),
+            Err("invalid_understanding_level")
+        );
+        let dto =
+            knowledge_understanding_dto(acm_os_application::KnowledgeUnderstandingProjection {
+                knowledge_node_id: "node-1".to_owned(),
+                current: acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+                historical_highest: acm_os_domain::KnowledgeUnderstandingLevel::Deep,
+                first_reached_highest_on: acm_os_domain::LocalDate::parse_iso("2026-08-13")
+                    .expect("valid date"),
+            });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize understanding"),
+            json!({
+                "knowledgeNodeId": "node-1",
+                "current": "basic",
+                "historicalHighest": "deep",
+                "firstReachedHighestOn": "2026-08-13"
+            })
         );
     }
 }

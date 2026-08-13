@@ -25,6 +25,11 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
     };
+    const selectValue = (select, value) => {
+      if (!select) throw new Error(`Missing select for ${value}`);
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
     const setDate = (localDate) => invoke("desktop_e2e_set_date", { input: { localDate } });
     const stage = (value) => invoke("desktop_e2e_log", { input: { stage: value } });
     const budgetInput = (day) => document.querySelector(`input[aria-label="${day} ACM budget in minutes"]`);
@@ -50,6 +55,33 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       const configured = await invoke("desktop_e2e_context");
       if (configured.phase === "verify-restart") {
         await waitText("Today");
+        await navigateTo("Knowledge", "Knowledge index");
+        await clickText("Segment Tree");
+        await waitText("Historical highest:");
+        await waitText("基本理解");
+        assertText(document.querySelector('select[aria-label="Current understanding"]')?.value ?? "<missing>", "basic", "persisted Knowledge understanding");
+        await stage("restart-knowledge-restored");
+
+        await clickText("我的题库");
+        await clickText("A. Desktop E2E Problem");
+        await waitText("Segment Tree Candidate");
+        await waitText("Ignored");
+        await waitText("Fenwick Tree Intent");
+        await waitText("Accepted intent · existing Knowledge Markdown now found");
+        await clickText("Accept existing Knowledge");
+        await waitText("verified as a formal relation");
+        await stage("restart-candidate-ignored-restored");
+        await stage("restart-accepted-intent-explicitly-safe-patched");
+
+        await navigateTo("Knowledge", "Knowledge index");
+        await clickText("Segment Tree");
+        await waitText("1979A · Desktop E2E Problem");
+        await waitText("Consider re-evaluating this Knowledge status");
+        await waitText("3 distinct related Problems gained new 真会 Review Evidence");
+        await stage("restart-safe-patch-relation-restored");
+        await stage("restart-reevaluation-suggestion-restored");
+
+        await navigateTo("Today");
         await waitFor(() => summaryValue("Budget") === "180 min", "persisted 180 minute override");
         await stage("restart-today-restored");
 
@@ -76,6 +108,17 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
 
       await waitText("Today");
       await stage("workspace-configured");
+
+      await navigateTo("Knowledge", "Knowledge index");
+      await waitText("Segment Tree");
+      await clickText("Segment Tree");
+      await waitText("No user-confirmed status yet.");
+      selectValue(document.querySelector('select[aria-label="Current understanding"]'), "basic");
+      await clickText("Confirm status");
+      await waitText("Understanding status confirmed by you.");
+      await waitText("Historical highest:");
+      await waitText("基本理解");
+      await stage("knowledge-confirmed");
 
       await navigateTo("Settings", "Weekly ACM budget");
       await waitFor(() => budgetInput("Monday") !== null, "weekly budget inputs");
@@ -138,6 +181,43 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await clickText("A. Desktop E2E Problem");
       await clickText("Create my note");
       await waitText("Personal Markdown created and verified.");
+      await invoke("register_knowledge_candidate", { input: {
+        contestId: 1979,
+        index: "A",
+        fingerprint: "de".repeat(32),
+        targetRef: "Fenwick Tree Intent",
+      } });
+      await clickText("我的题库");
+      await clickText("A. Desktop E2E Problem");
+      await waitText("Fenwick Tree Intent");
+      await clickText("Save intent only");
+      await waitText("Intent saved only");
+      await stage("candidate-accepted-intent-without-authority");
+      await invoke("register_knowledge_candidate", { input: {
+        contestId: 1979,
+        index: "A",
+        fingerprint: "ab".repeat(32),
+        targetRef: "Segment Tree Candidate",
+      } });
+      await clickText("我的题库");
+      await clickText("A. Desktop E2E Problem");
+      await waitText("Segment Tree Candidate");
+      await waitText("Save intent only");
+      await clickText("Do not suggest");
+      await waitText("Suggestion ignored.");
+      await stage("candidate-ignored-without-authority");
+      await invoke("register_knowledge_candidate", { input: {
+        contestId: 1979,
+        index: "A",
+        fingerprint: "bc".repeat(32),
+        targetRef: "Segment Tree",
+      } });
+      await clickText("我的题库");
+      await clickText("A. Desktop E2E Problem");
+      await waitText("Pending · existing Knowledge Markdown found");
+      await clickText("Accept existing Knowledge");
+      await waitText("verified as a formal relation");
+      await stage("candidate-safe-patched");
       await clickText("加入补题");
       await waitText("开始学习");
       await clickText("开始学习");
@@ -150,16 +230,35 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await clickText("B. Desktop E2E Study Problem");
       await clickText("Create my note");
       await waitText("Personal Markdown created and verified.");
+      await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "B", fingerprint: "be".repeat(32), targetRef: "Segment Tree" } });
+      await clickText("我的题库");
+      await clickText("B. Desktop E2E Study Problem");
+      await clickText("Accept existing Knowledge");
+      await waitText("verified as a formal relation");
       await clickText("加入补题");
       await waitText("开始学习");
-      await stage("problem-c-queued");
+      await clickText("开始学习");
+      await waitText("我已经补懂");
+      await clickText("我已经补懂");
+      await waitText("Next Review due: 2026-08-14");
+      await stage("problem-b-learned");
 
       await clickText("我的题库");
       await clickText("C. Desktop E2E Extra Study Problem");
       await clickText("Create my note");
       await waitText("Personal Markdown created and verified.");
+      await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "C", fingerprint: "ce".repeat(32), targetRef: "Segment Tree" } });
+      await clickText("我的题库");
+      await clickText("C. Desktop E2E Extra Study Problem");
+      await clickText("Accept existing Knowledge");
+      await waitText("verified as a formal relation");
       await clickText("加入补题");
       await waitText("开始学习");
+      await clickText("开始学习");
+      await waitText("我已经补懂");
+      await clickText("我已经补懂");
+      await waitText("Next Review due: 2026-08-14");
+      await stage("problem-c-learned");
 
       await setDate("2026-08-14");
       await clickText("我的题库");
@@ -169,10 +268,35 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await waitText("Finish this Review");
       await clickText("Complete from facts");
       await waitText("Mastered");
-      await stage("review-completed");
+      await stage("review-a-completed");
+
+      await clickText("Return to Today");
+      await clickText("我的题库");
+      await clickText("B. Desktop E2E Study Problem");
+      await clickText("Start Review");
+      await waitText("Finish this Review");
+      await clickText("Complete from facts");
+      await waitText("Mastered");
+      await stage("review-b-completed");
+
+      await clickText("Return to Today");
+      await clickText("我的题库");
+      await clickText("C. Desktop E2E Extra Study Problem");
+      await clickText("Start Review");
+      await waitText("Finish this Review");
+      await clickText("Complete from facts");
+      await waitText("Mastered");
+      await stage("review-c-completed");
+
+      await clickText("Return to Today");
+      await navigateTo("Knowledge", "Knowledge index");
+      await clickText("Segment Tree");
+      await waitText("Consider re-evaluating this Knowledge status");
+      await waitText("3 distinct related Problems gained new 真会 Review Evidence");
+      await stage("reevaluation-suggestion-visible");
 
       await setDate("2026-08-24");
-      await clickText("Return to Today");
+      await navigateTo("Today");
       await waitFor(() => summaryValue("Budget") === "95 min", "Monday weekly default");
       inputValue(document.querySelector('input[aria-label="Daily budget in minutes"]'), "180");
       await clickText("Preview replan");
@@ -180,10 +304,12 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await clickText("Apply replan");
       await waitFor(() => summaryValue("Budget") === "180 min", "applied Monday override");
       await waitText("Long-term Review");
-      await waitText("Upsolve");
       await stage("today-generated");
       if (!/Review[\s\S]*Desktop E2E Problem[\s\S]*Long-term Review/.test(bodyText())) {
         throw new Error("Later Today did not contain the authoritative Review recall");
+      }
+      if ((bodyText().match(/Long-term Review/g) ?? []).length !== 3) {
+        throw new Error("Later Today did not contain all three authoritative Review recalls");
       }
 
       await invoke("desktop_e2e_finish", { input: { result: "restart" } });

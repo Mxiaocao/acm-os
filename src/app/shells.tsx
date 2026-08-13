@@ -11,6 +11,20 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
+  confirmKnowledgeUnderstanding,
+  acceptExistingKnowledgeCandidate,
+  loadKnowledgeDetail,
+  loadKnowledgeIndex,
+  loadKnowledgeCandidates,
+  loadKnowledgeReevaluationSuggestion,
+  openKnowledgeInObsidian,
+  setKnowledgeCandidateDisposition,
+  type KnowledgeCandidateDto,
+  type KnowledgeDetailDto,
+  type KnowledgeNodeDto,
+  type KnowledgeUnderstandingLevel,
+} from "../ipc/knowledge";
+import {
   createPersonalNote,
   completeReview,
   deletePersonalNote,
@@ -620,18 +634,119 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   }
   if (page === "contests") return <ContestShelf navigate={navigate} />;
   if (page === "problems") return <ProblemIndex navigate={navigate} />;
-  const titles: Record<Exclude<NormalPage, "today" | "settings" | "contests" | "problems">, string> = {
-    knowledge: "Knowledge",
+  return <KnowledgePage navigate={navigate} />;
+}
+
+const knowledgeLevels: Array<[KnowledgeUnderstandingLevel, string]> = [
+  ["notLearned", "未学"],
+  ["vague", "学过但模糊"],
+  ["basic", "基本理解"],
+  ["proficient", "熟练使用"],
+  ["deep", "深入理解"],
+];
+
+function knowledgeLevelLabel(level: KnowledgeUnderstandingLevel): string {
+  return knowledgeLevels.find(([value]) => value === level)?.[1] ?? level;
+}
+
+function KnowledgePage({ navigate }: { navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [nodes, setNodes] = useState<KnowledgeNodeDto[]>([]);
+  const [anomalies, setAnomalies] = useState<KnowledgeNodeDto[]>([]);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<KnowledgeDetailDto | null>(null);
+  const [selectedLevel, setSelectedLevel] = useState<KnowledgeUnderstandingLevel>("notLearned");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [reevaluation, setReevaluation] = useState<{ shouldSuggest: boolean; qualifyingProblemCount: number } | null>(null);
+
+  const refresh = useCallback(async (nextQuery = query) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const index = await loadKnowledgeIndex(nextQuery);
+      setNodes(index.nodes);
+      setAnomalies(index.locationAnomalies);
+    } catch {
+      setError("Knowledge index is temporarily unavailable.");
+    } finally {
+      setLoading(false);
+    }
+  }, [query]);
+
+  useEffect(() => { void refresh(""); }, []);
+
+  const openDetail = async (node: KnowledgeNodeDto) => {
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await loadKnowledgeDetail(node.knowledgeNodeId);
+      setDetail(next);
+      setSelectedLevel(next.understanding?.current ?? "notLearned");
+      try { setReevaluation(await loadKnowledgeReevaluationSuggestion(node.knowledgeNodeId)); }
+      catch { setReevaluation(null); }
+    } catch {
+      setError("This Knowledge Markdown could not be read fresh.");
+    }
   };
+
+  const confirmUnderstanding = async () => {
+    if (!detail) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const understanding = await confirmKnowledgeUnderstanding(detail.node.knowledgeNodeId, selectedLevel);
+      setDetail({ ...detail, understanding });
+      setMessage("Understanding status confirmed by you.");
+    } catch {
+      setMessage("Understanding status could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <>
-      <PageHeader eyebrow="Normal app shell" headingRef={headingRef} title={titles[page]} />
-      <section className="empty-state">
-        <h2>Surface boundary ready</h2>
-        <p>This product surface is intentionally empty in M0.</p>
+      <PageHeader eyebrow="Markdown authority" headingRef={headingRef} title="Knowledge" />
+      <section aria-labelledby="knowledge-index-title" className="content-panel knowledge-index">
+        <div className="knowledge-toolbar">
+          <div><h2 id="knowledge-index-title">Knowledge index</h2><p>Only Markdown files currently found in Knowledge Root appear here.</p></div>
+          <button className="secondary-action" disabled={loading} onClick={() => void refresh(query)} type="button">{loading ? "Re-indexing..." : "Re-index"}</button>
+        </div>
+        <form className="knowledge-search" onSubmit={(event) => { event.preventDefault(); void refresh(query); }}>
+          <label htmlFor="knowledge-search">Search name or path</label>
+          <div><input id="knowledge-search" onChange={(event) => setQuery(event.currentTarget.value)} value={query} /><button type="submit">Search</button></div>
+        </form>
+        {error ? <p aria-live="polite" className="error-copy">{error}</p> : null}
+        {!loading && !error && nodes.length === 0 ? <p className="safe-note">No matching Markdown files were discovered.</p> : null}
+        <ul className="knowledge-node-list">
+          {nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void openDetail(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}
+        </ul>
+        {anomalies.length > 0 ? <p className="error-copy">{anomalies.length} bound Knowledge node(s) have a location anomaly and require recovery.</p> : null}
       </section>
+      {detail ? (
+        <section aria-labelledby="knowledge-detail-title" className="content-panel knowledge-detail">
+          <div className="knowledge-toolbar"><div><p className="eyebrow">Fresh Markdown detail</p><h2 id="knowledge-detail-title">{detail.node.displayName}</h2><p><code>{detail.node.vaultRelativePath}</code></p></div><button className="secondary-action" onClick={() => void openKnowledgeInObsidian(detail.node.knowledgeNodeId).catch(() => setMessage("Obsidian could not open this file."))} type="button">Open in Obsidian</button></div>
+          <div className="knowledge-understanding">
+            <label>Current understanding<select aria-label="Current understanding" onChange={(event) => setSelectedLevel(event.currentTarget.value as KnowledgeUnderstandingLevel)} value={selectedLevel}>{knowledgeLevels.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <button disabled={saving} onClick={() => void confirmUnderstanding()} type="button">{saving ? "Saving..." : "Confirm status"}</button>
+            {detail.understanding ? <p>Historical highest: <strong>{knowledgeLevelLabel(detail.understanding.historicalHighest)}</strong> · first reached {detail.understanding.firstReachedHighestOn}</p> : <p>No user-confirmed status yet.</p>}
+            {reevaluation?.shouldSuggest ? <p aria-live="polite" className="safe-note">Consider re-evaluating this Knowledge status: {reevaluation.qualifyingProblemCount} distinct related Problems gained new 真会 Review Evidence. Your current status was not changed.</p> : null}
+            {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
+          </div>
+          <KnowledgeNeighborList heading="Outgoing knowledge" nodes={detail.outgoing} onOpen={openDetail} />
+          <KnowledgeNeighborList heading="Incoming knowledge" nodes={detail.incoming} onOpen={openDetail} />
+          <div><h3>Related problems</h3>{detail.relatedProblems.length === 0 ? <p>None.</p> : <ul>{detail.relatedProblems.map((problem) => <li key={problem.problemId}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.problemIndex}`)} type="button"><strong>{problem.contestId}{problem.problemIndex} · {problem.title}</strong></button></li>)}</ul>}</div>
+        </section>
+      ) : null}
     </>
   );
+}
+
+function KnowledgeNeighborList({ heading, nodes, onOpen }: { heading: string; nodes: KnowledgeNodeDto[]; onOpen: (node: KnowledgeNodeDto) => Promise<void> }) {
+  return <div><h3>{heading}</h3>{nodes.length === 0 ? <p>None.</p> : <ul>{nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void onOpen(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}</ul>}</div>;
 }
 
 const weekBudgetFields: Array<[keyof WeeklyAcmBudgetDto, string]> = [
@@ -961,6 +1076,9 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   const [deletingNote, setDeletingNote] = useState(false);
   const [startingReview, setStartingReview] = useState(false);
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
+  const [knowledgeCandidates, setKnowledgeCandidates] = useState<KnowledgeCandidateDto[]>([]);
+  const [candidateMessage, setCandidateMessage] = useState<string | null>(null);
+  const [busyCandidate, setBusyCandidate] = useState<string | null>(null);
   const noteReadSequence = useRef(0);
   const mounted = useRef(true);
   const displayedNotePath = noteReadState?.state === "ready"
@@ -994,6 +1112,8 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setDetail(nextDetail);
       if (nextDetail.identityType === "personal") {
         await refreshPersonalNote();
+        try { setKnowledgeCandidates(await loadKnowledgeCandidates(contestId, index)); }
+        catch { setCandidateMessage("Knowledge suggestions are temporarily unavailable."); }
       }
       if (nextDetail.statement.state !== "ready") return;
       const assets = await getStatementAssets(contestId, index);
@@ -1126,6 +1246,49 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setStartingReview(false);
     }
   };
+  const updateCandidate = async (candidate: KnowledgeCandidateDto, disposition: KnowledgeCandidateDto["disposition"]) => {
+    if (busyCandidate) return;
+    setBusyCandidate(candidate.fingerprint);
+    setCandidateMessage(null);
+    try {
+      const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, disposition);
+      setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? updated : item));
+      setCandidateMessage(disposition === "ignored"
+          ? "Suggestion ignored. No Markdown or relation was changed."
+          : "Suggestion returned to pending.");
+    } catch {
+      setCandidateMessage("The suggestion state could not be changed.");
+    } finally { setBusyCandidate(null); }
+  };
+  const acceptCandidate = async (candidate: KnowledgeCandidateDto) => {
+    if (busyCandidate || !candidate.knowledgeNodeId) return;
+    setBusyCandidate(candidate.fingerprint);
+    setCandidateMessage(null);
+    try {
+      await acceptExistingKnowledgeCandidate(contestId, index, candidate.fingerprint, candidate.knowledgeNodeId);
+      setCandidateMessage("Knowledge link was written to current Markdown, re-read, and verified as a formal relation.");
+      try {
+        setKnowledgeCandidates(await loadKnowledgeCandidates(contestId, index));
+        await refreshPersonalNote();
+      } catch {
+        setKnowledgeCandidates((current) => current.filter((item) => item.fingerprint !== candidate.fingerprint));
+      }
+    } catch {
+      setCandidateMessage("The current Markdown could not be safely patched. No formal relation was accepted.");
+    } finally { setBusyCandidate(null); }
+  };
+  const acceptCandidateIntent = async (candidate: KnowledgeCandidateDto) => {
+    if (busyCandidate || candidate.knowledgeNodeId || candidate.disposition !== "pending") return;
+    setBusyCandidate(candidate.fingerprint);
+    setCandidateMessage(null);
+    try {
+      const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, "acceptedIntent");
+      setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? { ...item, ...updated } : item));
+      setCandidateMessage("Intent saved only. No Markdown, Knowledge Node, or formal relation was created.");
+    } catch {
+      setCandidateMessage("The intent could not be saved.");
+    } finally { setBusyCandidate(null); }
+  };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
   return <>
@@ -1199,6 +1362,14 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
         </div>
         {lifecycleMessage ? <p aria-live="polite" className="system-caption">{lifecycleMessage}</p> : null}
         {reviewMessage ? <p aria-live="polite" className="system-caption">{reviewMessage}</p> : null}
+      </section>
+    ) : null}
+    {detail.identityType === "personal" ? (
+      <section className="content-panel knowledge-candidates" aria-labelledby="knowledge-candidates-heading">
+        <h2 id="knowledge-candidates-heading">Prerequisite knowledge suggestions</h2>
+        <p>Suggestions are not Knowledge Nodes or formal relations. Accepting requires target resolution and the separate Safe Patch flow.</p>
+        {knowledgeCandidates.length === 0 ? <p className="safe-note">No suggestions for this Personal Problem.</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition === "acceptedIntent" ? candidate.knowledgeNodeId ? "Accepted intent · existing Knowledge Markdown now found" : "Accepted intent" : candidate.disposition === "ignored" ? "Ignored" : candidate.knowledgeNodeId ? "Pending · existing Knowledge Markdown found" : "Pending · no unique Knowledge Node"}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">Accept existing Knowledge</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">Save intent only</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">Do not suggest</button> : null}{candidate.disposition !== "pending" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "pending")} type="button">Return to pending</button> : null}</div></li>)}</ul>}
+        {candidateMessage ? <p aria-live="polite" className="safe-note">{candidateMessage}</p> : null}
       </section>
     ) : null}
     {detail.identityType === "personal" ? (

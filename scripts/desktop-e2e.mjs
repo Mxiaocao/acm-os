@@ -18,6 +18,7 @@ const appStderr = [];
 
 try {
   await Promise.all([mkdir(appData), mkdir(problems, { recursive: true }), mkdir(knowledge, { recursive: true })]);
+  await writeFile(path.join(knowledge, "Segment Tree.md"), "# Segment Tree\n\nA real Knowledge Markdown fixture.\n");
   await writeFile(dateFile, "2026-08-11\n");
   process.env.VITE_ACM_OS_DESKTOP_E2E = "1";
   await run(process.execPath, [path.join(repo, "node_modules", "vite", "bin", "vite.js"), "build"], repo);
@@ -28,6 +29,11 @@ try {
   let result = await waitForResult(resultFile, app, 60_000);
   assert.equal(result, "restart", `Desktop E2E initial phase failed: ${result}`);
   await stopApp(app);
+  const problemNotes = (await readdir(problems)).filter((name) => name.endsWith(".md"));
+  const initialProblemMarkdown = await Promise.all(problemNotes.map((name) => readFile(path.join(problems, name), "utf8")));
+  assert.equal(initialProblemMarkdown.some((markdown) => markdown.includes("Fenwick Tree Intent")), false,
+    "Accepted intent wrote to Problem Markdown before explicit Safe Patch");
+  await writeFile(path.join(knowledge, "Fenwick Tree Intent.md"), "# Fenwick Tree Intent\n\nCreated externally after intent acceptance.\n");
   await rm(resultFile, { force: true });
 
   app = launchApp("verify-restart");
@@ -35,7 +41,7 @@ try {
   assert.equal(result, "passed", `Desktop E2E restart phase failed: ${result}`);
   passed = true;
   assert.ok((await readdir(problems)).some((name) => name.endsWith(".md")), "Personal Markdown was not created");
-  console.log("Desktop E2E passed: weekly budget + date-local override + process restart + core loop recall");
+  console.log("Desktop E2E passed: Knowledge discovery/status + accepted-intent explicit Safe Patch restart + weekly budget + date-local override + core loop recall");
   if (manual) {
     console.log("Manual QA window is ready. Close the ACM-OS window when inspection is complete.");
     await new Promise((resolve) => app.once("exit", resolve));

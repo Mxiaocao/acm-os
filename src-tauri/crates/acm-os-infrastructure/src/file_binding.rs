@@ -85,7 +85,7 @@ pub(crate) fn resolve_personal_note(
     }
 }
 
-fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
+pub(crate) fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
     let mut files = Vec::new();
     let mut pending = vec![vault.to_path_buf()];
     let mut visited = HashSet::new();
@@ -132,7 +132,7 @@ fn read_resolved_note(
     resolved_note_from_bytes(vault, path, bytes, relocated)
 }
 
-fn resolved_note_from_bytes(
+pub(crate) fn resolved_note_from_bytes(
     vault: &Path,
     path: PathBuf,
     bytes: Vec<u8>,

@@ -2,6 +2,7 @@
 
 pub mod codeforces;
 mod file_binding;
+mod knowledge_index;
 mod markdown;
 mod persistence;
 mod safe_patch;

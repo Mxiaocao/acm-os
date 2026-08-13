@@ -1084,6 +1084,124 @@ test("Today asks for a budget before creating the first daily snapshot", {
   } finally { await view.cleanup(); }
 });
 
+test("Problem Detail can save a missing Knowledge intent without creating authority", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const candidate = {
+    contestId: 1, problemIndex: "A", fingerprint: "a".repeat(64), targetRef: "Segment Tree", disposition: "pending",
+  };
+  const detail = {
+    contestId: 1, index: "A", title: "Candidate Problem", rating: null,
+    sourceUrl: "https://codeforces.com/contest/1/problem/A", identityType: "personal",
+    statement: { state: "pending" }, personalNote: { vaultRelativePath: "Problems/1-A.md" },
+    lifecycle: { learningStatus: "unstarted", learningStatusSinceUtc: "2026-08-13T00:00:00.000Z", nextReviewDueLocalDate: null, availableActions: [] }, reviewAction: null,
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return detail;
+    if (command === "personal_note_projection") return { state: "ready", vaultRelativePath: "Problems/1-A.md", relocated: false, projection: { knownSections: [], solutionRoutes: [], warnings: [] } };
+    if (command === "knowledge_candidates") { calls.push([command, args]); return [candidate]; }
+    if (command === "set_knowledge_candidate_disposition") { calls.push([command, args]); return { ...candidate, disposition: args.input.disposition }; }
+    if (command === "review_history") return { items: [], mastery: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1/A");
+  try {
+    await settle();
+    assert.equal(calls.filter(([name]) => name === "knowledge_candidates").length, 1);
+    assert.match(view.document.body.textContent, /Segment Tree/);
+    const saveIntent = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save intent only");
+    assert.ok(saveIntent);
+    await act(async () => saveIntent.click()); await settle();
+    assert.equal(calls.at(-1)[0], "set_knowledge_candidate_disposition");
+    assert.equal(calls.at(-1)[1].input.disposition, "acceptedIntent");
+    assert.match(view.document.body.textContent, /Intent saved only/);
+    const ignore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Do not suggest");
+    await act(async () => ignore.click()); await settle();
+    assert.equal(calls.at(-1)[0], "set_knowledge_candidate_disposition");
+    assert.equal(calls.at(-1)[1].input.disposition, "ignored");
+    assert.equal(calls.some(([, args]) => args?.input?.disposition === "acceptedIntent"), true);
+    assert.match(view.document.body.textContent, /Suggestion ignored/);
+  } finally { await view.cleanup(); }
+});
+
+test("Problem Detail accepts only a uniquely resolved existing Knowledge Node through Safe Patch", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const candidate = {
+    contestId: 1, problemIndex: "A", fingerprint: "b".repeat(64), targetRef: "Segment Tree",
+    disposition: "pending", knowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-1123456789ab",
+  };
+  let candidates = [candidate];
+  const detail = {
+    contestId: 1, index: "A", title: "Safe Patch Problem", rating: null,
+    sourceUrl: "https://codeforces.com/contest/1/problem/A", identityType: "personal",
+    statement: { state: "pending" }, personalNote: { vaultRelativePath: "Problems/1-A.md" },
+    lifecycle: { learningStatus: "unstarted", learningStatusSinceUtc: "2026-08-13T00:00:00.000Z", nextReviewDueLocalDate: null, availableActions: [] }, reviewAction: null,
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return detail;
+    if (command === "personal_note_projection") return { state: "ready", vaultRelativePath: "Problems/1-A.md", relocated: false, projection: { knownSections: [{ name: "前置知识" }], solutionRoutes: [], warnings: [] } };
+    if (command === "knowledge_candidates") return candidates;
+    if (command === "accept_existing_knowledge_candidate") {
+      calls.push([command, args]); candidates = [];
+      return { knowledgeNodeId: candidate.knowledgeNodeId, targetRef: candidate.targetRef };
+    }
+    if (command === "review_history") return { items: [], mastery: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1/A");
+  try {
+    await settle();
+    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Accept existing Knowledge");
+    assert.ok(accept);
+    await act(async () => accept.click()); await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][1].input.knowledgeNodeId, candidate.knowledgeNodeId);
+    assert.match(view.document.body.textContent, /written to current Markdown, re-read, and verified as a formal relation/);
+    assert.match(view.document.body.textContent, /No suggestions for this Personal Problem/);
+  } finally { await view.cleanup(); }
+});
+
+test("Problem Detail requires a second explicit action after accepted intent later resolves", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const candidate = {
+    contestId: 1, problemIndex: "A", fingerprint: "c".repeat(64), targetRef: "Fenwick Tree",
+    disposition: "acceptedIntent", knowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-2123456789ab",
+  };
+  let candidates = [candidate];
+  const detail = {
+    contestId: 1, index: "A", title: "Intent Problem", rating: null,
+    sourceUrl: "https://codeforces.com/contest/1/problem/A", identityType: "personal",
+    statement: { state: "pending" }, personalNote: { vaultRelativePath: "Problems/1-A.md" },
+    lifecycle: { learningStatus: "unstarted", learningStatusSinceUtc: "2026-08-13T00:00:00.000Z", nextReviewDueLocalDate: null, availableActions: [] }, reviewAction: null,
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return detail;
+    if (command === "personal_note_projection") return { state: "ready", vaultRelativePath: "Problems/1-A.md", relocated: false, projection: { knownSections: [], solutionRoutes: [], warnings: [] } };
+    if (command === "knowledge_candidates") return candidates;
+    if (command === "accept_existing_knowledge_candidate") { calls.push([command, args]); candidates = []; return { knowledgeNodeId: candidate.knowledgeNodeId, targetRef: candidate.targetRef }; }
+    if (command === "review_history") return { items: [], mastery: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1/A");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Accepted intent · existing Knowledge Markdown now found/);
+    assert.equal(calls.length, 0);
+    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Accept existing Knowledge");
+    assert.ok(accept);
+    await act(async () => accept.click()); await settle();
+    assert.equal(calls.length, 1);
+  } finally { await view.cleanup(); }
+});
+
 test("Settings saves optional arbitrary-minute weekly defaults without touching Today", {
   concurrency: false,
 }, async () => {
@@ -1131,5 +1249,56 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
     assert.equal(calls[0].wednesday, 73);
     assert.equal(calls[0].thursday, null);
     assert.match(view.document.body.textContent, /Existing Today plans and one-day overrides were not changed/);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge discovers Markdown, loads Fresh detail, and changes understanding only after confirmation", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const node = {
+    knowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+    displayName: "Segment Tree",
+    vaultRelativePath: "Knowledge/Data Structures/Segment Tree.md",
+    contentDigest: "a".repeat(64),
+    locationState: "ready",
+  };
+  let understanding = null;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") { calls.push([command, args]); return { nodes: [node], locationAnomalies: [] }; }
+    if (command === "knowledge_detail") { calls.push([command, args]); return { node, understanding, incoming: [], outgoing: [], relatedProblems: [{ problemId: "problem-1", contestId: 1, problemIndex: "A", title: "Theatre Square" }] }; }
+    if (command === "knowledge_reevaluation_suggestion") { calls.push([command, args]); return { knowledgeNodeId: node.knowledgeNodeId, shouldSuggest: true, qualifyingProblemCount: 3 }; }
+    if (command === "confirm_knowledge_understanding") {
+      calls.push([command, args]);
+      understanding = { knowledgeNodeId: node.knowledgeNodeId, current: args.input.level, historicalHighest: args.input.level, firstReachedHighestOn: "2026-08-13" };
+      return understanding;
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    assert.equal(calls[0][0], "knowledge_index");
+    assert.equal(calls[0][1].input.query, "");
+    assert.match(view.document.body.textContent, /Segment Tree/);
+    const nodeButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent.includes("Segment Tree"));
+    await act(async () => nodeButton.click()); await settle();
+    assert.equal(calls.filter(([name]) => name === "knowledge_detail").length, 1);
+    assert.equal(calls.filter(([name]) => name === "knowledge_reevaluation_suggestion").length, 1);
+    assert.match(view.document.body.textContent, /3 distinct related Problems gained new 真会 Review Evidence/);
+    assert.match(view.document.body.textContent, /Your current status was not changed/);
+    assert.match(view.document.body.textContent, /No user-confirmed status yet/);
+    const select = view.document.querySelector('select[aria-label="Current understanding"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(select, "basic");
+      select.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    assert.equal(calls.filter(([name]) => name === "confirm_knowledge_understanding").length, 0);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm status");
+    await act(async () => confirm.click()); await settle();
+    assert.equal(calls.at(-1)[0], "confirm_knowledge_understanding");
+    assert.equal(calls.at(-1)[1].input.level, "basic");
+    assert.match(view.document.body.textContent, /Historical highest: 基本理解/);
   } finally { await view.cleanup(); }
 });

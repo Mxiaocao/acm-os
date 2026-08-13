@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use acm_os_application::ExtraProblemLinkTarget;
+use acm_os_application::{ExtraProblemLinkTarget, PrerequisiteLinkTarget};
 
 use crate::file_binding::{sha256_hex, windows_file_key};
 use crate::markdown::parse_problem_markdown;
@@ -94,16 +94,106 @@ where
     })
 }
 
+pub(crate) fn add_prerequisite_link<F>(
+    active_vault: &str,
+    relative_path: &str,
+    recovery_root: &Path,
+    recovery_key: &str,
+    target: &PrerequisiteLinkTarget,
+    before_concurrency_check: F,
+) -> Result<SafePatchOutcome, SafePatchError>
+where
+    F: FnOnce(&Path),
+{
+    safe_patch_link(
+        active_vault,
+        relative_path,
+        recovery_root,
+        recovery_key,
+        "前置知识",
+        target.as_str(),
+        before_concurrency_check,
+    )
+}
+
 fn build_extra_problem_patch(
     bytes: &[u8],
     target: &ExtraProblemLinkTarget,
+) -> Result<Vec<u8>, SafePatchError> {
+    build_section_link_patch(bytes, "额外题目", target.as_str())
+}
+
+fn safe_patch_link<F>(
+    active_vault: &str,
+    relative_path: &str,
+    recovery_root: &Path,
+    recovery_key: &str,
+    section_name: &str,
+    target: &str,
+    before_concurrency_check: F,
+) -> Result<SafePatchOutcome, SafePatchError>
+where
+    F: FnOnce(&Path),
+{
+    let vault = fs::canonicalize(active_vault).map_err(|_| SafePatchError::VaultUnavailable)?;
+    let relative = Path::new(relative_path);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(SafePatchError::BindingUnavailable);
+    }
+    let path =
+        fs::canonicalize(vault.join(relative)).map_err(|_| SafePatchError::BindingUnavailable)?;
+    if !path.starts_with(&vault) || !path.is_file() {
+        return Err(SafePatchError::BindingUnavailable);
+    }
+    let pre_bytes = fs::read(&path).map_err(|_| SafePatchError::WriteFailed)?;
+    let pre_digest = sha256_hex(&pre_bytes);
+    let patched = build_section_link_patch(&pre_bytes, section_name, target)?;
+    let post_digest = sha256_hex(&patched);
+    create_recovery_copy(
+        recovery_root,
+        recovery_key,
+        &pre_bytes,
+        &pre_digest,
+        &post_digest,
+    )?;
+    before_concurrency_check(&path);
+    let current = fs::read(&path).map_err(|_| SafePatchError::WriteFailed)?;
+    if sha256_hex(&current) != pre_digest {
+        return Err(SafePatchError::ConcurrentModification);
+    }
+    atomic_replace(&path, &patched)?;
+    let written = fs::read(&path).map_err(|_| SafePatchError::VerificationFailed)?;
+    if written != patched || !contains_section_link(&written, section_name, target)? {
+        return Err(SafePatchError::VerificationFailed);
+    }
+    let relative_path = path
+        .strip_prefix(&vault)
+        .map_err(|_| SafePatchError::VerificationFailed)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(SafePatchOutcome {
+        relative_path,
+        content_digest: sha256_hex(&written),
+        windows_file_key: windows_file_key(&path),
+    })
+}
+
+fn build_section_link_patch(
+    bytes: &[u8],
+    section_name: &str,
+    target: &str,
 ) -> Result<Vec<u8>, SafePatchError> {
     let markdown = std::str::from_utf8(bytes).map_err(|_| SafePatchError::InvalidUtf8)?;
     let projection = parse_problem_markdown(markdown, sha256_hex(bytes));
     let sections = projection
         .known_sections
         .iter()
-        .filter(|section| section.name == "额外题目")
+        .filter(|section| section.name == section_name)
         .collect::<Vec<_>>();
     let section = match sections.as_slice() {
         [] => return Err(SafePatchError::TargetSectionMissing),
@@ -114,7 +204,7 @@ fn build_extra_problem_patch(
         markdown,
         section.start_offset,
         section.end_offset,
-        target.as_str(),
+        target,
     ) {
         return Err(SafePatchError::LinkAlreadyPresent);
     }
@@ -129,14 +219,38 @@ fn build_extra_problem_patch(
     while insertion > section.start_offset && matches!(bytes[insertion - 1], b'\r' | b'\n') {
         insertion -= 1;
     }
-    let mut patch = Vec::with_capacity(bytes.len() + target.as_str().len() + 8);
+    let mut patch = Vec::with_capacity(bytes.len() + target.len() + 8);
     patch.extend_from_slice(&bytes[..insertion]);
     patch.extend_from_slice(newline);
     patch.extend_from_slice(b"- [[");
-    patch.extend_from_slice(target.as_str().as_bytes());
+    patch.extend_from_slice(target.as_bytes());
     patch.extend_from_slice(b"]]");
     patch.extend_from_slice(&bytes[insertion..]);
     Ok(patch)
+}
+
+fn contains_section_link(
+    bytes: &[u8],
+    section_name: &str,
+    target: &str,
+) -> Result<bool, SafePatchError> {
+    let markdown = std::str::from_utf8(bytes).map_err(|_| SafePatchError::InvalidUtf8)?;
+    let projection = parse_problem_markdown(markdown, sha256_hex(bytes));
+    let sections = projection
+        .known_sections
+        .iter()
+        .filter(|section| section.name == section_name)
+        .collect::<Vec<_>>();
+    match sections.as_slice() {
+        [section] => Ok(crate::markdown::section_contains_wikilink_item(
+            markdown,
+            section.start_offset,
+            section.end_offset,
+            target,
+        )),
+        [] => Err(SafePatchError::TargetSectionMissing),
+        _ => Err(SafePatchError::TargetSectionAmbiguous),
+    }
 }
 
 fn contains_extra_problem_link(

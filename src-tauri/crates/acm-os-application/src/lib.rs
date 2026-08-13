@@ -1358,6 +1358,19 @@ impl ExtraProblemLinkTarget {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrerequisiteLinkTarget(String);
+
+impl PrerequisiteLinkTarget {
+    pub fn parse(value: impl Into<String>) -> Result<Self, PersonalNotePatchError> {
+        ExtraProblemLinkTarget::parse(value).map(|value| Self(value.0))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersonalNotePatchError {
     InvalidLinkTarget,
@@ -1401,11 +1414,26 @@ impl PersonalNotePatchError {
 
 #[allow(async_fn_in_trait)]
 pub trait PersonalNotePatchPort {
+    async fn add_prerequisite_link(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        target: &PrerequisiteLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
+
     async fn add_extra_problem_link(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
         target: &ExtraProblemLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
+}
+
+pub async fn add_prerequisite_link<P: PersonalNotePatchPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    target: impl Into<String>,
+) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+    let target = PrerequisiteLinkTarget::parse(target)?;
+    port.add_prerequisite_link(problem, &target).await
 }
 
 pub async fn add_extra_problem_link<P: PersonalNotePatchPort>(
@@ -2027,6 +2055,311 @@ fn map_persistence_error(error: WorkspacePersistenceError) -> WorkspaceConfigura
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeLocationState {
+    Ready,
+    LocationAnomaly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeNodeProjection {
+    pub knowledge_node_id: String,
+    pub display_name: String,
+    pub vault_relative_path: String,
+    pub content_digest: String,
+    pub windows_file_key: Option<String>,
+    pub location_state: KnowledgeLocationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeIndexProjection {
+    pub nodes: Vec<KnowledgeNodeProjection>,
+    pub location_anomalies: Vec<KnowledgeNodeProjection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeIndexError {
+    WorkspaceUnavailable,
+    KnowledgeRootUnavailable,
+    KnowledgeNodeNotFound,
+    PersistenceUnavailable,
+    IntegrityViolation,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeIndexPort {
+    async fn rebuild_knowledge_index(
+        &self,
+    ) -> Result<KnowledgeIndexProjection, KnowledgeIndexError>;
+
+    async fn search_knowledge_index(
+        &self,
+        query: &str,
+    ) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError>;
+}
+
+pub async fn rebuild_knowledge_index<P: KnowledgeIndexPort>(
+    port: &P,
+) -> Result<KnowledgeIndexProjection, KnowledgeIndexError> {
+    port.rebuild_knowledge_index().await
+}
+
+pub async fn search_knowledge_index<P: KnowledgeIndexPort>(
+    port: &P,
+    query: &str,
+) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
+    port.search_knowledge_index(query.trim()).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeLinkResolution {
+    Resolved,
+    Unresolved,
+    Ambiguous,
+    NonKnowledgeTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLinkProjection {
+    pub source_kind: String,
+    pub source_id: String,
+    pub target_ref: String,
+    pub target_knowledge_node_id: Option<String>,
+    pub resolution: KnowledgeLinkResolution,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeRelationPort {
+    async fn rebuild_knowledge_relations(
+        &self,
+    ) -> Result<Vec<KnowledgeLinkProjection>, KnowledgeIndexError>;
+}
+
+pub async fn rebuild_knowledge_relations<P: KnowledgeRelationPort>(
+    port: &P,
+) -> Result<Vec<KnowledgeLinkProjection>, KnowledgeIndexError> {
+    port.rebuild_knowledge_relations().await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeUnderstandingProjection {
+    pub knowledge_node_id: String,
+    pub current: acm_os_domain::KnowledgeUnderstandingLevel,
+    pub historical_highest: acm_os_domain::KnowledgeUnderstandingLevel,
+    pub first_reached_highest_on: acm_os_domain::LocalDate,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeUnderstandingPort {
+    async fn confirm_knowledge_understanding(
+        &self,
+        knowledge_node_id: &str,
+        selected: acm_os_domain::KnowledgeUnderstandingLevel,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<KnowledgeUnderstandingProjection, KnowledgeIndexError>;
+}
+
+pub async fn confirm_knowledge_understanding<P: KnowledgeUnderstandingPort>(
+    port: &P,
+    knowledge_node_id: &str,
+    selected: acm_os_domain::KnowledgeUnderstandingLevel,
+    confirmed_on: acm_os_domain::LocalDate,
+) -> Result<KnowledgeUnderstandingProjection, KnowledgeIndexError> {
+    if knowledge_node_id.trim().is_empty() {
+        return Err(KnowledgeIndexError::IntegrityViolation);
+    }
+    port.confirm_knowledge_understanding(knowledge_node_id, selected, confirmed_on)
+        .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedKnowledgeProblemProjection {
+    pub problem_id: String,
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeDetailProjection {
+    pub node: KnowledgeNodeProjection,
+    pub understanding: Option<KnowledgeUnderstandingProjection>,
+    pub incoming: Vec<KnowledgeNodeProjection>,
+    pub outgoing: Vec<KnowledgeNodeProjection>,
+    pub related_problems: Vec<RelatedKnowledgeProblemProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeReevaluationSuggestion {
+    pub knowledge_node_id: String,
+    pub should_suggest: bool,
+    pub qualifying_problem_count: u32,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeReevaluationPort {
+    async fn load_knowledge_reevaluation_suggestion(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<KnowledgeReevaluationSuggestion, KnowledgeIndexError>;
+}
+
+pub async fn load_knowledge_reevaluation_suggestion<P: KnowledgeReevaluationPort>(
+    port: &P,
+    knowledge_node_id: &str,
+) -> Result<KnowledgeReevaluationSuggestion, KnowledgeIndexError> {
+    let id = knowledge_node_id.trim();
+    if id.is_empty() {
+        return Err(KnowledgeIndexError::IntegrityViolation);
+    }
+    port.load_knowledge_reevaluation_suggestion(id).await
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeDetailPort {
+    async fn load_knowledge_detail(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<KnowledgeDetailProjection, KnowledgeIndexError>;
+}
+
+pub async fn load_knowledge_detail<P: KnowledgeDetailPort>(
+    port: &P,
+    knowledge_node_id: &str,
+) -> Result<KnowledgeDetailProjection, KnowledgeIndexError> {
+    let knowledge_node_id = knowledge_node_id.trim();
+    if knowledge_node_id.is_empty() {
+        return Err(KnowledgeIndexError::IntegrityViolation);
+    }
+    port.load_knowledge_detail(knowledge_node_id).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCandidateDisposition {
+    Pending,
+    AcceptedIntent,
+    Ignored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCandidateProjection {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub fingerprint: String,
+    pub target_ref: String,
+    pub disposition: KnowledgeCandidateDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedKnowledgeCandidateProjection {
+    pub knowledge_node_id: String,
+    pub target_ref: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCandidateError {
+    ProblemNotFound,
+    NotPersonal,
+    CandidateNotFound,
+    InvalidFingerprint,
+    InvalidTarget,
+    PersistenceUnavailable,
+    IntegrityViolation,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeCandidatePort {
+    async fn list_knowledge_candidates(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError>;
+
+    async fn register_knowledge_candidate(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        target_ref: &str,
+    ) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError>;
+
+    async fn set_knowledge_candidate_disposition(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        disposition: KnowledgeCandidateDisposition,
+    ) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError>;
+
+    async fn accept_existing_knowledge_candidate(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        knowledge_node_id: &str,
+    ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError>;
+}
+
+pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    fingerprint: &str,
+    knowledge_node_id: &str,
+) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    let knowledge_node_id = knowledge_node_id.trim();
+    if knowledge_node_id.is_empty() {
+        return Err(KnowledgeCandidateError::IntegrityViolation);
+    }
+    port.accept_existing_knowledge_candidate(problem, &fingerprint, knowledge_node_id)
+        .await
+}
+
+pub async fn list_knowledge_candidates<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError> {
+    port.list_knowledge_candidates(problem).await
+}
+
+pub async fn register_knowledge_candidate<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    fingerprint: &str,
+    target_ref: &str,
+) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    let target_ref = normalize_candidate_target(target_ref)?;
+    port.register_knowledge_candidate(problem, &fingerprint, &target_ref)
+        .await
+}
+
+pub async fn set_knowledge_candidate_disposition<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    fingerprint: &str,
+    disposition: KnowledgeCandidateDisposition,
+) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    port.set_knowledge_candidate_disposition(problem, &fingerprint, disposition)
+        .await
+}
+
+fn normalize_candidate_fingerprint(fingerprint: &str) -> Result<String, KnowledgeCandidateError> {
+    let fingerprint = fingerprint.trim().to_ascii_lowercase();
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(KnowledgeCandidateError::InvalidFingerprint);
+    }
+    Ok(fingerprint)
+}
+
+fn normalize_candidate_target(target_ref: &str) -> Result<String, KnowledgeCandidateError> {
+    let target_ref = target_ref.trim();
+    if target_ref.is_empty()
+        || target_ref.len() > 512
+        || target_ref.contains(['\r', '\n'])
+        || target_ref.contains("[[")
+        || target_ref.contains("]]")
+    {
+        return Err(KnowledgeCandidateError::InvalidTarget);
+    }
+    Ok(target_ref.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -2354,6 +2687,14 @@ mod tests {
     }
 
     impl PersonalNotePatchPort for RecordingPatchPort {
+        async fn add_prerequisite_link(
+            &self,
+            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _target: &PrerequisiteLinkTarget,
+        ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+            Err(PersonalNotePatchError::PersistenceUnavailable)
+        }
+
         async fn add_extra_problem_link(
             &self,
             _problem: &acm_os_domain::CodeforcesProblemIdentity,

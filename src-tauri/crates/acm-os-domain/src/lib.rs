@@ -194,6 +194,41 @@ impl LocalDate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidLocalDate;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KnowledgeUnderstandingLevel {
+    NotLearned,
+    Vague,
+    Basic,
+    Proficient,
+    Deep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnowledgeUnderstandingDecision {
+    pub current: KnowledgeUnderstandingLevel,
+    pub historical_highest: KnowledgeUnderstandingLevel,
+    pub first_reached_highest_on: LocalDate,
+}
+
+pub fn confirm_knowledge_understanding(
+    previous_highest: Option<(KnowledgeUnderstandingLevel, LocalDate)>,
+    selected: KnowledgeUnderstandingLevel,
+    confirmed_on: LocalDate,
+) -> KnowledgeUnderstandingDecision {
+    match previous_highest {
+        Some((highest, first_on)) if highest >= selected => KnowledgeUnderstandingDecision {
+            current: selected,
+            historical_highest: highest,
+            first_reached_highest_on: first_on,
+        },
+        _ => KnowledgeUnderstandingDecision {
+            current: selected,
+            historical_highest: selected,
+            first_reached_highest_on: confirmed_on,
+        },
+    }
+}
+
 pub struct ReviewSchedulingEngine;
 
 impl ReviewSchedulingEngine {

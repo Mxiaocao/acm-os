@@ -262,6 +262,23 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 .today-suggestions li span { display: grid; gap: 4px; }
 .today-suggestions small { color: var(--ink-muted); }
 
+.knowledge-index, .knowledge-detail { display: grid; gap: 20px; }
+.knowledge-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.knowledge-toolbar h2, .knowledge-toolbar p { margin-block: 0 6px; }
+.knowledge-search { display: grid; gap: 6px; }
+.knowledge-search > div { display: flex; gap: 8px; }
+.knowledge-search input, .knowledge-understanding select { min-height: 42px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); color: inherit; }
+.knowledge-search input { flex: 1; min-width: 0; }
+.knowledge-node-list, .knowledge-detail ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.knowledge-node-list li, .knowledge-detail li { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.knowledge-understanding { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-muted); }
+.knowledge-understanding label { display: grid; gap: 6px; max-width: 320px; font-weight: 650; }
+.knowledge-understanding button { justify-self: start; }
+.knowledge-candidates ul { display: grid; gap: 10px; padding: 0; list-style: none; }
+.knowledge-candidates li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.knowledge-candidates li > div:first-child { display: grid; gap: 4px; }
+.knowledge-candidates li span { color: var(--ink-muted); }
+
 .detail-list li { display: flex; align-items: center; gap: 12px; }
 .list-link {
   display: grid;
@@ -349,6 +366,8 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
   .app-sidebar .system-caption { display: none; }
   .normal-content { padding: 36px 20px 56px; }
   .today-toolbar { align-items: stretch; flex-direction: column; }
+  .knowledge-toolbar, .knowledge-search > div { align-items: stretch; flex-direction: column; }
+  .knowledge-candidates li { align-items: stretch; flex-direction: column; }
   .today-entry { grid-template-columns: 34px minmax(0, 1fr); }
   .today-entry > .primary-action { grid-column: 2; justify-self: start; }
   .review-header { align-items: stretch; flex-direction: column; }

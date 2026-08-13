@@ -7,16 +7,22 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acm_os_application::{
-    ActiveReviewCycle, CompletedReviewAttempt, ContestDetail, ContestImportDraft,
-    ContestImportPersistenceError, ContestImportPort, ContestImportStatus, ContestReadError,
-    ContestReadPort, ContestShelfItem, CreatedPersonalNoteFile, ExtraProblemLinkTarget,
-    LightweightProblemDetail, LightweightProblemItem, LocalStatementAsset, PersistedContestImport,
-    PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteDeletionError,
-    PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError, PersonalNotePatchPort,
-    PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState,
-    PreparedPersonalNoteDeletion, ProblemIdentityType, ProblemLifecycleError, ProblemLifecyclePort,
-    ProblemLifecycleState, ProblemMarkdownProjection, ProblemMasteryProjection, RevealedReviewHelp,
-    ReviewAttempt, ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus,
+    AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CompletedReviewAttempt, ContestDetail,
+    ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
+    ContestReadError, ContestReadPort, ContestShelfItem, CreatedPersonalNoteFile,
+    ExtraProblemLinkTarget, KnowledgeCandidateDisposition, KnowledgeCandidateError,
+    KnowledgeCandidatePort, KnowledgeCandidateProjection, KnowledgeDetailPort,
+    KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort, KnowledgeIndexProjection,
+    KnowledgeLinkProjection, KnowledgeLinkResolution, KnowledgeLocationState,
+    KnowledgeNodeProjection, KnowledgeRelationPort, KnowledgeUnderstandingPort,
+    KnowledgeUnderstandingProjection, LightweightProblemDetail, LightweightProblemItem,
+    LocalStatementAsset, PersistedContestImport, PersonalNoteBinding, PersonalNoteCreationContext,
+    PersonalNoteDeletionError, PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError,
+    PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort,
+    PersonalNoteReadState, PreparedPersonalNoteDeletion, PrerequisiteLinkTarget,
+    ProblemIdentityType, ProblemLifecycleError, ProblemLifecyclePort, ProblemLifecycleState,
+    ProblemMarkdownProjection, ProblemMasteryProjection, RelatedKnowledgeProblemProjection,
+    RevealedReviewHelp, ReviewAttempt, ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus,
     ReviewCompletionContext, ReviewCompletionInput, ReviewFailureReason, ReviewFocusView,
     ReviewHelpDrawerView, ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, StartupGateStatus,
     StartupRecoveryReason, StatementReadState, StatementSnapshotDraft, SubmissionFact,
@@ -29,7 +35,12 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::SqlitePool;
 
 use crate::file_binding::{
-    resolve_personal_note, sha256_hex, windows_file_key, BindingResolution, ResolvedNoteFile,
+    markdown_files, resolve_personal_note, sha256_hex, windows_file_key, BindingResolution,
+    ResolvedNoteFile,
+};
+use crate::knowledge_index::{
+    discover_markdown, extract_wikilink_targets, replace_index, resolve_links,
+    StoredKnowledgeBinding,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -201,8 +212,715 @@ impl DatabaseRuntime {
         if result.rows_affected() == 1 {
             Ok(true)
         } else {
-            Err(PersonalNoteReadError::BindingUnavailable)
+            let current: Option<(String, Option<String>, String)> = sqlx::query_as(
+                "SELECT vault_relative_path, windows_file_key, content_digest \
+                 FROM file_bindings WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_optional(
+                self._pool
+                    .as_ref()
+                    .ok_or(PersonalNoteReadError::PersistenceUnavailable)?,
+            )
+            .await
+            .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+            if current.as_ref()
+                == Some(&(
+                    resolved.relative_path.clone(),
+                    resolved.windows_file_key.clone(),
+                    resolved.content_digest.clone(),
+                ))
+            {
+                Ok(true)
+            } else {
+                Err(PersonalNoteReadError::BindingUnavailable)
+            }
         }
+    }
+}
+
+impl KnowledgeIndexPort for DatabaseRuntime {
+    async fn rebuild_knowledge_index(
+        &self,
+    ) -> Result<KnowledgeIndexProjection, KnowledgeIndexError> {
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?
+            .ok_or(KnowledgeIndexError::WorkspaceUnavailable)?;
+        let active_vault = workspace.active_vault_path().to_owned();
+        let knowledge_root = workspace.knowledge_root_path().to_owned();
+        let (discovered, relocation_candidates) =
+            tokio::task::spawn_blocking(move || discover_markdown(&active_vault, &knowledge_root))
+                .await
+                .map_err(|_| KnowledgeIndexError::KnowledgeRootUnavailable)??;
+
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let stored_rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT knowledge_node_id, vault_relative_path, windows_file_key, content_digest \
+             FROM knowledge_file_bindings ORDER BY knowledge_node_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let stored = stored_rows
+            .into_iter()
+            .map(
+                |(node_id, relative_path, file_key, digest)| StoredKnowledgeBinding {
+                    node_id,
+                    relative_path,
+                    file_key,
+                    digest,
+                },
+            )
+            .collect();
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let projection =
+            replace_index(&mut transaction, stored, discovered, relocation_candidates).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        Ok(projection)
+    }
+
+    async fn search_knowledge_index(
+        &self,
+        query: &str,
+    ) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let pattern = format!("%{}%", query.to_lowercase());
+        let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT i.knowledge_node_id, i.display_name, i.vault_relative_path, \
+                    i.content_digest, b.windows_file_key \
+             FROM knowledge_discovery_index i JOIN knowledge_file_bindings b \
+               ON b.knowledge_node_id = i.knowledge_node_id \
+             WHERE lower(i.display_name) LIKE ?1 ESCAPE '\\' \
+             ORDER BY lower(i.display_name), i.knowledge_node_id",
+        )
+        .bind(pattern)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    knowledge_node_id,
+                    display_name,
+                    vault_relative_path,
+                    content_digest,
+                    windows_file_key,
+                )| {
+                    KnowledgeNodeProjection {
+                        knowledge_node_id,
+                        display_name,
+                        vault_relative_path,
+                        content_digest,
+                        windows_file_key,
+                        location_state: KnowledgeLocationState::Ready,
+                    }
+                },
+            )
+            .collect())
+    }
+}
+
+impl acm_os_application::KnowledgeRelationPort for DatabaseRuntime {
+    async fn rebuild_knowledge_relations(
+        &self,
+    ) -> Result<Vec<KnowledgeLinkProjection>, KnowledgeIndexError> {
+        let index = self.rebuild_knowledge_index().await?;
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?
+            .ok_or(KnowledgeIndexError::WorkspaceUnavailable)?;
+        let active_vault = workspace.active_vault_path().to_owned();
+        let vault_root = std::path::PathBuf::from(&active_vault);
+        let formal_paths = index
+            .nodes
+            .iter()
+            .map(|node| node.vault_relative_path.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let non_knowledge_markdown_paths = markdown_files(&vault_root)
+            .map_err(|_| KnowledgeIndexError::KnowledgeRootUnavailable)?
+            .into_iter()
+            .filter_map(|path| {
+                path.strip_prefix(&vault_root)
+                    .ok()
+                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            })
+            .filter(|path| !formal_paths.contains(path))
+            .collect::<Vec<_>>();
+        let mut links = Vec::new();
+        for node in &index.nodes {
+            let path = vault_root.join(&node.vault_relative_path);
+            let markdown = std::fs::read_to_string(&path)
+                .map_err(|_| KnowledgeIndexError::KnowledgeRootUnavailable)?;
+            links.extend(
+                extract_wikilink_targets(&markdown)
+                    .into_iter()
+                    .map(|target| {
+                        (
+                            "knowledge".to_owned(),
+                            node.knowledge_node_id.clone(),
+                            target,
+                        )
+                    }),
+            );
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let problem_bindings: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT fb.problem_id, fb.vault_relative_path, fb.windows_file_key, fb.content_digest \
+             FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
+             WHERE p.identity_type = 'personal' ORDER BY fb.problem_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let problem_links = tokio::task::spawn_blocking(move || {
+            let mut links = Vec::new();
+            for (problem_id, relative_path, file_key, digest) in problem_bindings {
+                let BindingResolution::Ready(note) = resolve_personal_note(
+                    &active_vault,
+                    &relative_path,
+                    file_key.as_deref(),
+                    &digest,
+                ) else {
+                    continue;
+                };
+                let Ok(markdown) = std::str::from_utf8(&note.bytes) else {
+                    continue;
+                };
+                let Some(targets) = crate::markdown::prerequisite_targets(markdown) else {
+                    continue;
+                };
+                links.extend(
+                    targets
+                        .into_iter()
+                        .map(|target| ("problem".to_owned(), problem_id.to_string(), target)),
+                );
+            }
+            links
+        })
+        .await
+        .map_err(|_| KnowledgeIndexError::KnowledgeRootUnavailable)?;
+        links.extend(problem_links);
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let projections = resolve_links(links, &index.nodes, &non_knowledge_markdown_paths);
+        sqlx::query("DELETE FROM knowledge_link_index")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        for relation in &projections {
+            sqlx::query("INSERT INTO knowledge_link_index (source_kind, source_id, target_ref, target_knowledge_node_id, resolution) VALUES (?1, ?2, ?3, ?4, ?5)")
+                .bind(&relation.source_kind).bind(&relation.source_id).bind(&relation.target_ref).bind(&relation.target_knowledge_node_id).bind(match relation.resolution { KnowledgeLinkResolution::Resolved => "resolved", KnowledgeLinkResolution::Unresolved => "unresolved", KnowledgeLinkResolution::Ambiguous => "ambiguous", KnowledgeLinkResolution::NonKnowledgeTarget => "non_knowledge_target" })
+                .execute(&mut *tx).await.map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        Ok(projections)
+    }
+}
+
+impl KnowledgeUnderstandingPort for DatabaseRuntime {
+    async fn confirm_knowledge_understanding(
+        &self,
+        knowledge_node_id: &str,
+        selected: acm_os_domain::KnowledgeUnderstandingLevel,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<KnowledgeUnderstandingProjection, KnowledgeIndexError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_discovery_index WHERE knowledge_node_id = ?1)",
+        )
+        .bind(knowledge_node_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        if exists == 0 {
+            return Err(KnowledgeIndexError::IntegrityViolation);
+        }
+        let previous: Option<(String, String)> = sqlx::query_as("SELECT historical_highest_level, first_reached_highest_local_date FROM knowledge_understanding_states WHERE knowledge_node_id = ?1").bind(knowledge_node_id).fetch_optional(pool).await.map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let previous = previous
+            .map(|(level, date)| {
+                Ok((
+                    parse_understanding(&level)?,
+                    acm_os_domain::LocalDate::parse_iso(&date)
+                        .map_err(|_| KnowledgeIndexError::IntegrityViolation)?,
+                ))
+            })
+            .transpose()?;
+        let decision =
+            acm_os_domain::confirm_knowledge_understanding(previous, selected, confirmed_on);
+        sqlx::query("INSERT INTO knowledge_understanding_states (knowledge_node_id, current_level, historical_highest_level, first_reached_highest_local_date) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(knowledge_node_id) DO UPDATE SET current_level = excluded.current_level, historical_highest_level = excluded.historical_highest_level, first_reached_highest_local_date = excluded.first_reached_highest_local_date, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+            .bind(knowledge_node_id).bind(understanding_value(decision.current)).bind(understanding_value(decision.historical_highest)).bind(decision.first_reached_highest_on.to_iso_string()).execute(pool).await.map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        Ok(KnowledgeUnderstandingProjection {
+            knowledge_node_id: knowledge_node_id.to_owned(),
+            current: decision.current,
+            historical_highest: decision.historical_highest,
+            first_reached_highest_on: decision.first_reached_highest_on,
+        })
+    }
+}
+
+impl acm_os_application::KnowledgeReevaluationPort for DatabaseRuntime {
+    async fn load_knowledge_reevaluation_suggestion(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<acm_os_application::KnowledgeReevaluationSuggestion, KnowledgeIndexError> {
+        self.rebuild_knowledge_relations().await?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let count: Option<i64> = sqlx::query_scalar("SELECT (SELECT COUNT(DISTINCT l.source_id) FROM knowledge_link_index l JOIN review_attempts ra ON l.source_kind = 'problem' AND CAST(l.source_id AS INTEGER) = ra.problem_id WHERE l.target_knowledge_node_id = kus.knowledge_node_id AND l.resolution = 'resolved' AND ra.attempt_status = 'completed' AND ra.judgement = 'mastered' AND ra.completed_at_utc > kus.updated_at_utc) FROM knowledge_understanding_states kus WHERE kus.knowledge_node_id = ?1").bind(knowledge_node_id).fetch_optional(pool).await.map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let count = count.ok_or(KnowledgeIndexError::KnowledgeNodeNotFound)?;
+        Ok(acm_os_application::KnowledgeReevaluationSuggestion {
+            knowledge_node_id: knowledge_node_id.to_owned(),
+            should_suggest: count >= 3,
+            qualifying_problem_count: count as u32,
+        })
+    }
+}
+
+impl KnowledgeDetailPort for DatabaseRuntime {
+    async fn load_knowledge_detail(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<KnowledgeDetailProjection, KnowledgeIndexError> {
+        self.rebuild_knowledge_relations().await?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
+        let node = load_knowledge_node(pool, knowledge_node_id)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(KnowledgeIndexError::KnowledgeNodeNotFound)?;
+        let understanding_row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT current_level, historical_highest_level, first_reached_highest_local_date \
+             FROM knowledge_understanding_states WHERE knowledge_node_id = ?1",
+        )
+        .bind(knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let understanding = understanding_row
+            .map(|(current, highest, first_on)| {
+                Ok(KnowledgeUnderstandingProjection {
+                    knowledge_node_id: knowledge_node_id.to_owned(),
+                    current: parse_understanding(&current)?,
+                    historical_highest: parse_understanding(&highest)?,
+                    first_reached_highest_on: acm_os_domain::LocalDate::parse_iso(&first_on)
+                        .map_err(|_| KnowledgeIndexError::IntegrityViolation)?,
+                })
+            })
+            .transpose()?;
+        let incoming = load_incoming_knowledge_nodes(pool, knowledge_node_id).await?;
+        let outgoing = load_outgoing_knowledge_nodes(pool, knowledge_node_id).await?;
+        let problem_rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
+            "SELECT p.id, p.external_contest_key, p.external_problem_key, p.title \
+             FROM knowledge_link_index l JOIN problems p ON CAST(l.source_id AS INTEGER) = p.id \
+             WHERE l.source_kind = 'problem' AND l.resolution = 'resolved' \
+               AND l.target_knowledge_node_id = ?1 \
+             ORDER BY p.external_contest_key, p.external_problem_key, p.id",
+        )
+        .bind(knowledge_node_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let related_problems = problem_rows
+            .into_iter()
+            .map(|(problem_id, contest_id, index, title)| {
+                let contest = acm_os_domain::CodeforcesContestIdentity::new(
+                    u64::try_from(contest_id)
+                        .map_err(|_| KnowledgeIndexError::IntegrityViolation)?,
+                )
+                .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
+                let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+                    .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
+                Ok(RelatedKnowledgeProblemProjection {
+                    problem_id: problem_id.to_string(),
+                    problem,
+                    title,
+                })
+            })
+            .collect::<Result<Vec<_>, KnowledgeIndexError>>()?;
+        Ok(KnowledgeDetailProjection {
+            node,
+            understanding,
+            incoming,
+            outgoing,
+            related_problems,
+        })
+    }
+}
+
+impl KnowledgeCandidatePort for DatabaseRuntime {
+    async fn list_knowledge_candidates(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        if identity_type != "personal" {
+            return Err(KnowledgeCandidateError::NotPersonal);
+        }
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT c.fingerprint, c.target_ref, c.disposition FROM knowledge_candidate_records c \
+             WHERE c.problem_id = ?1 AND NOT EXISTS (SELECT 1 FROM knowledge_link_index l \
+               WHERE l.source_kind = 'problem' AND l.source_id = CAST(c.problem_id AS TEXT) \
+               AND l.target_ref = c.target_ref AND l.resolution = 'resolved') \
+             ORDER BY c.fingerprint",
+        )
+        .bind(problem_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        rows.into_iter()
+            .map(|(fingerprint, target_ref, disposition)| {
+                Ok(KnowledgeCandidateProjection {
+                    problem: problem.clone(),
+                    fingerprint,
+                    target_ref,
+                    disposition: parse_candidate_disposition(&disposition)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn register_knowledge_candidate(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        target_ref: &str,
+    ) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        if identity_type != "personal" {
+            return Err(KnowledgeCandidateError::NotPersonal);
+        }
+        sqlx::query(
+            "INSERT INTO knowledge_candidate_records \
+                (problem_id, fingerprint, target_ref, disposition) \
+             VALUES (?1, ?2, ?3, 'pending') \
+             ON CONFLICT(problem_id, fingerprint) DO UPDATE SET \
+                target_ref = excluded.target_ref, \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(problem_id)
+        .bind(fingerprint)
+        .bind(target_ref)
+        .execute(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        load_candidate_projection(pool, problem, problem_id, fingerprint).await
+    }
+
+    async fn set_knowledge_candidate_disposition(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        disposition: KnowledgeCandidateDisposition,
+    ) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        if identity_type != "personal" {
+            return Err(KnowledgeCandidateError::NotPersonal);
+        }
+        let result = sqlx::query(
+            "UPDATE knowledge_candidate_records SET disposition = ?1, \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?2 AND fingerprint = ?3",
+        )
+        .bind(candidate_disposition_value(disposition))
+        .bind(problem_id)
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        if result.rows_affected() == 0 {
+            return Err(KnowledgeCandidateError::CandidateNotFound);
+        }
+        load_candidate_projection(pool, problem, problem_id, fingerprint).await
+    }
+
+    async fn accept_existing_knowledge_candidate(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        fingerprint: &str,
+        knowledge_node_id: &str,
+    ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        if identity_type != "personal" {
+            return Err(KnowledgeCandidateError::NotPersonal);
+        }
+        let candidate = load_candidate_projection(pool, problem, problem_id, fingerprint).await?;
+        if candidate.disposition == KnowledgeCandidateDisposition::Ignored {
+            return Err(KnowledgeCandidateError::IntegrityViolation);
+        }
+        let index = self
+            .rebuild_knowledge_index()
+            .await
+            .map_err(map_knowledge_to_candidate_error)?;
+        let matches = index
+            .nodes
+            .iter()
+            .filter(|node| candidate_target_matches(&candidate.target_ref, node))
+            .collect::<Vec<_>>();
+        let [target] = matches.as_slice() else {
+            return Err(KnowledgeCandidateError::IntegrityViolation);
+        };
+        if target.knowledge_node_id != knowledge_node_id {
+            return Err(KnowledgeCandidateError::IntegrityViolation);
+        }
+        acm_os_application::add_prerequisite_link(self, problem, candidate.target_ref.clone())
+            .await
+            .map_err(map_patch_to_candidate_error)?;
+        self.rebuild_knowledge_relations()
+            .await
+            .map_err(map_knowledge_to_candidate_error)?;
+        let verified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_link_index WHERE source_kind = 'problem' \
+             AND source_id = ?1 AND target_knowledge_node_id = ?2 AND resolution = 'resolved'",
+        )
+        .bind(problem_id.to_string())
+        .bind(knowledge_node_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        if verified != 1 {
+            return Err(KnowledgeCandidateError::IntegrityViolation);
+        }
+        Ok(AcceptedKnowledgeCandidateProjection {
+            knowledge_node_id: knowledge_node_id.to_owned(),
+            target_ref: candidate.target_ref,
+        })
+    }
+}
+
+fn candidate_target_matches(target_ref: &str, node: &KnowledgeNodeProjection) -> bool {
+    if target_ref.contains('/') {
+        node.vault_relative_path
+            .strip_suffix(".md")
+            .is_some_and(|path| path.eq_ignore_ascii_case(target_ref))
+    } else {
+        node.display_name.eq_ignore_ascii_case(target_ref)
+    }
+}
+
+fn map_knowledge_to_candidate_error(_: KnowledgeIndexError) -> KnowledgeCandidateError {
+    KnowledgeCandidateError::IntegrityViolation
+}
+
+fn map_patch_to_candidate_error(error: PersonalNotePatchError) -> KnowledgeCandidateError {
+    match error {
+        PersonalNotePatchError::PersistenceUnavailable => {
+            KnowledgeCandidateError::PersistenceUnavailable
+        }
+        PersonalNotePatchError::ProblemNotFound => KnowledgeCandidateError::ProblemNotFound,
+        PersonalNotePatchError::NotPersonal => KnowledgeCandidateError::NotPersonal,
+        _ => KnowledgeCandidateError::IntegrityViolation,
+    }
+}
+
+async fn candidate_problem_row(
+    pool: &SqlitePool,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<(i64, String), KnowledgeCandidateError> {
+    sqlx::query_as(
+        "SELECT id, identity_type FROM problems WHERE platform = 'codeforces' \
+         AND external_contest_key = ?1 AND external_problem_key = ?2",
+    )
+    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.index())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+    .ok_or(KnowledgeCandidateError::ProblemNotFound)
+}
+
+async fn load_candidate_projection(
+    pool: &SqlitePool,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem_id: i64,
+    fingerprint: &str,
+) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT fingerprint, target_ref, disposition FROM knowledge_candidate_records \
+         WHERE problem_id = ?1 AND fingerprint = ?2",
+    )
+    .bind(problem_id)
+    .bind(fingerprint)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+    let (fingerprint, target_ref, disposition) =
+        row.ok_or(KnowledgeCandidateError::CandidateNotFound)?;
+    Ok(KnowledgeCandidateProjection {
+        problem: problem.clone(),
+        fingerprint,
+        target_ref,
+        disposition: parse_candidate_disposition(&disposition)?,
+    })
+}
+
+fn candidate_disposition_value(disposition: KnowledgeCandidateDisposition) -> &'static str {
+    match disposition {
+        KnowledgeCandidateDisposition::Pending => "pending",
+        KnowledgeCandidateDisposition::AcceptedIntent => "accepted_intent",
+        KnowledgeCandidateDisposition::Ignored => "ignored",
+    }
+}
+
+fn parse_candidate_disposition(
+    value: &str,
+) -> Result<KnowledgeCandidateDisposition, KnowledgeCandidateError> {
+    match value {
+        "pending" => Ok(KnowledgeCandidateDisposition::Pending),
+        "accepted_intent" => Ok(KnowledgeCandidateDisposition::AcceptedIntent),
+        "ignored" => Ok(KnowledgeCandidateDisposition::Ignored),
+        _ => Err(KnowledgeCandidateError::IntegrityViolation),
+    }
+}
+
+type KnowledgeNodeRow = (String, String, String, String, Option<String>);
+
+async fn load_knowledge_node(
+    pool: &SqlitePool,
+    knowledge_node_id: &str,
+) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
+    let rows: Vec<KnowledgeNodeRow> = sqlx::query_as(
+        "SELECT i.knowledge_node_id, i.display_name, i.vault_relative_path, \
+                i.content_digest, b.windows_file_key \
+         FROM knowledge_discovery_index i JOIN knowledge_file_bindings b \
+           ON b.knowledge_node_id = i.knowledge_node_id \
+         WHERE i.knowledge_node_id = ?1",
+    )
+    .bind(knowledge_node_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+    Ok(map_knowledge_node_rows(rows))
+}
+
+async fn load_incoming_knowledge_nodes(
+    pool: &SqlitePool,
+    knowledge_node_id: &str,
+) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
+    let rows: Vec<KnowledgeNodeRow> = sqlx::query_as(
+        "SELECT i.knowledge_node_id, i.display_name, i.vault_relative_path, \
+                i.content_digest, b.windows_file_key \
+         FROM knowledge_discovery_index i JOIN knowledge_file_bindings b \
+           ON b.knowledge_node_id = i.knowledge_node_id \
+         WHERE EXISTS (SELECT 1 FROM knowledge_link_index l \
+           WHERE l.source_kind = 'knowledge' AND l.resolution = 'resolved' \
+             AND l.target_knowledge_node_id = ?1 AND l.source_id = i.knowledge_node_id) \
+         ORDER BY lower(i.display_name), i.knowledge_node_id",
+    )
+    .bind(knowledge_node_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+    Ok(map_knowledge_node_rows(rows))
+}
+
+async fn load_outgoing_knowledge_nodes(
+    pool: &SqlitePool,
+    knowledge_node_id: &str,
+) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
+    let rows: Vec<KnowledgeNodeRow> = sqlx::query_as(
+        "SELECT i.knowledge_node_id, i.display_name, i.vault_relative_path, \
+                i.content_digest, b.windows_file_key \
+         FROM knowledge_discovery_index i JOIN knowledge_file_bindings b \
+           ON b.knowledge_node_id = i.knowledge_node_id \
+         WHERE EXISTS (SELECT 1 FROM knowledge_link_index l \
+           WHERE l.source_kind = 'knowledge' AND l.resolution = 'resolved' \
+             AND l.source_id = ?1 AND l.target_knowledge_node_id = i.knowledge_node_id) \
+         ORDER BY lower(i.display_name), i.knowledge_node_id",
+    )
+    .bind(knowledge_node_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+    Ok(map_knowledge_node_rows(rows))
+}
+
+fn map_knowledge_node_rows(rows: Vec<KnowledgeNodeRow>) -> Vec<KnowledgeNodeProjection> {
+    rows.into_iter()
+        .map(
+            |(
+                knowledge_node_id,
+                display_name,
+                vault_relative_path,
+                content_digest,
+                windows_file_key,
+            )| KnowledgeNodeProjection {
+                knowledge_node_id,
+                display_name,
+                vault_relative_path,
+                content_digest,
+                windows_file_key,
+                location_state: KnowledgeLocationState::Ready,
+            },
+        )
+        .collect()
+}
+
+fn understanding_value(value: acm_os_domain::KnowledgeUnderstandingLevel) -> &'static str {
+    match value {
+        acm_os_domain::KnowledgeUnderstandingLevel::NotLearned => "not_learned",
+        acm_os_domain::KnowledgeUnderstandingLevel::Vague => "vague",
+        acm_os_domain::KnowledgeUnderstandingLevel::Basic => "basic",
+        acm_os_domain::KnowledgeUnderstandingLevel::Proficient => "proficient",
+        acm_os_domain::KnowledgeUnderstandingLevel::Deep => "deep",
+    }
+}
+fn parse_understanding(
+    value: &str,
+) -> Result<acm_os_domain::KnowledgeUnderstandingLevel, KnowledgeIndexError> {
+    match value {
+        "not_learned" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::NotLearned),
+        "vague" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Vague),
+        "basic" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Basic),
+        "proficient" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Proficient),
+        "deep" => Ok(acm_os_domain::KnowledgeUnderstandingLevel::Deep),
+        _ => Err(KnowledgeIndexError::IntegrityViolation),
     }
 }
 
@@ -3325,6 +4043,57 @@ impl PersonalNoteReadPort for DatabaseRuntime {
 }
 
 impl PersonalNotePatchPort for DatabaseRuntime {
+    async fn add_prerequisite_link(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        target: &PrerequisiteLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let state = self
+            .read_personal_note_projection(problem)
+            .await
+            .map_err(map_personal_note_read_to_patch_error)?;
+        let expected = match state {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            PersonalNoteReadState::LocationAnomaly { .. } => {
+                return Err(PersonalNotePatchError::LocationAnomaly)
+            }
+            PersonalNoteReadState::VaultUnavailable { .. } => {
+                return Err(PersonalNotePatchError::VaultUnavailable)
+            }
+        };
+        let configuration = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?
+            .ok_or(PersonalNotePatchError::VaultUnavailable)?;
+        let recovery_root = self
+            .recovery_root
+            .clone()
+            .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let active_vault = configuration.active_vault_path().to_owned();
+        let relative_path = expected.vault_relative_path.clone();
+        let recovery_key = format!(
+            "codeforces:{}:{}",
+            problem.contest().contest_id(),
+            problem.index()
+        );
+        let target = target.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::safe_patch::add_prerequisite_link(
+                &active_vault,
+                &relative_path,
+                &recovery_root,
+                &recovery_key,
+                &target,
+                |_| {},
+            )
+        })
+        .await
+        .map_err(|_| PersonalNotePatchError::WriteFailed)?
+        .map_err(map_safe_patch_error)?;
+        self.commit_patch_outcome(problem, &expected, outcome).await
+    }
+
     async fn add_extra_problem_link(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
@@ -3374,6 +4143,17 @@ impl PersonalNotePatchPort for DatabaseRuntime {
         .map_err(|_| PersonalNotePatchError::WriteFailed)?
         .map_err(map_safe_patch_error)?;
 
+        self.commit_patch_outcome(problem, &expected, outcome).await
+    }
+}
+
+impl DatabaseRuntime {
+    async fn commit_patch_outcome(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        expected: &PersonalNoteBinding,
+        outcome: crate::safe_patch::SafePatchOutcome,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
         let problem_id: i64 = sqlx::query_scalar(
             "SELECT id FROM problems WHERE platform = 'codeforces' \
              AND external_contest_key = ?1 AND external_problem_key = ?2",
@@ -4578,7 +5358,10 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
+    if !matches!(
+        schema_version,
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16
+    ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
@@ -4621,6 +5404,52 @@ async fn validate_schema_contract(
     }
     if schema_version >= 11 {
         validate_weekly_acm_budget_contract(pool).await?;
+    }
+    if schema_version >= 12 {
+        validate_knowledge_index_contract(pool).await?;
+    }
+    if schema_version >= 13 {
+        validate_table_columns(
+            pool,
+            "knowledge_link_index",
+            &[
+                "source_kind",
+                "source_id",
+                "target_ref",
+                "target_knowledge_node_id",
+                "resolution",
+            ],
+        )
+        .await?;
+    }
+    if schema_version >= 14 {
+        validate_table_columns(
+            pool,
+            "knowledge_understanding_states",
+            &[
+                "knowledge_node_id",
+                "current_level",
+                "historical_highest_level",
+                "first_reached_highest_local_date",
+                "updated_at_utc",
+            ],
+        )
+        .await?;
+    }
+    if schema_version >= 15 {
+        validate_table_columns(
+            pool,
+            "knowledge_candidate_records",
+            &[
+                "problem_id",
+                "fingerprint",
+                "target_ref",
+                "disposition",
+                "created_at_utc",
+                "updated_at_utc",
+            ],
+        )
+        .await?;
     }
 
     Ok(())
@@ -4776,6 +5605,69 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
             "weekly_acm_budgets".to_owned(),
             "weekly_acm_budgets".to_owned(),
         ));
+        expected_objects.sort();
+    }
+    if schema_version >= 12 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "knowledge_discovery_index_by_name".to_owned(),
+                "knowledge_discovery_index".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "knowledge_discovery_index".to_owned(),
+                "knowledge_discovery_index".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "knowledge_file_bindings".to_owned(),
+                "knowledge_file_bindings".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "knowledge_nodes".to_owned(),
+                "knowledge_nodes".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 13 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "knowledge_link_index_by_target".to_owned(),
+                "knowledge_link_index".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "knowledge_link_index".to_owned(),
+                "knowledge_link_index".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 14 {
+        expected_objects.push((
+            "table".to_owned(),
+            "knowledge_understanding_states".to_owned(),
+            "knowledge_understanding_states".to_owned(),
+        ));
+        expected_objects.sort();
+    }
+    if schema_version >= 15 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "knowledge_candidate_records_by_problem".to_owned(),
+                "knowledge_candidate_records".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "knowledge_candidate_records".to_owned(),
+                "knowledge_candidate_records".to_owned(),
+            ),
+        ]);
         expected_objects.sort();
     }
     expected_objects
@@ -5120,6 +6012,49 @@ async fn validate_weekly_acm_budget_contract(
     }
 }
 
+async fn validate_knowledge_index_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(pool, "knowledge_nodes", &["id", "created_at_utc"]).await?;
+    validate_table_columns(
+        pool,
+        "knowledge_file_bindings",
+        &[
+            "knowledge_node_id",
+            "vault_relative_path",
+            "windows_file_key",
+            "content_digest",
+            "location_state",
+            "updated_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "knowledge_discovery_index",
+        &[
+            "knowledge_node_id",
+            "display_name",
+            "vault_relative_path",
+            "content_digest",
+            "indexed_at_utc",
+        ],
+    )
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM knowledge_discovery_index i \
+         JOIN knowledge_file_bindings b ON b.knowledge_node_id = i.knowledge_node_id \
+         WHERE b.location_state != 'ready' OR b.vault_relative_path != i.vault_relative_path \
+            OR b.content_digest != i.content_digest",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -5142,6 +6077,12 @@ async fn validate_table_columns(
         "today_plans" => "PRAGMA table_xinfo('today_plans')",
         "today_plan_entries" => "PRAGMA table_xinfo('today_plan_entries')",
         "weekly_acm_budgets" => "PRAGMA table_xinfo('weekly_acm_budgets')",
+        "knowledge_nodes" => "PRAGMA table_xinfo('knowledge_nodes')",
+        "knowledge_file_bindings" => "PRAGMA table_xinfo('knowledge_file_bindings')",
+        "knowledge_discovery_index" => "PRAGMA table_xinfo('knowledge_discovery_index')",
+        "knowledge_link_index" => "PRAGMA table_xinfo('knowledge_link_index')",
+        "knowledge_understanding_states" => "PRAGMA table_xinfo('knowledge_understanding_states')",
+        "knowledge_candidate_records" => "PRAGMA table_xinfo('knowledge_candidate_records')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -5499,12 +6440,15 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        accept_today_extra_suggestion, add_extra_problem_link, apply_today_replan, complete_review,
-        complete_today_entry, configure_workspace, create_personal_note, delete_personal_note,
-        import_codeforces_contest, load_or_generate_today_snapshot,
-        preview_today_extra_suggestions, preview_today_replan, query_workspace_configuration,
-        reorder_today_snapshot, reveal_review_help, review_focus, review_help_drawer,
-        review_history, start_or_resume_review, transition_problem_lifecycle,
+        accept_existing_knowledge_candidate, accept_today_extra_suggestion, add_extra_problem_link,
+        apply_today_replan, complete_review, complete_today_entry, configure_workspace,
+        confirm_knowledge_understanding, create_personal_note, delete_personal_note,
+        import_codeforces_contest, list_knowledge_candidates, load_knowledge_detail,
+        load_or_generate_today_snapshot, preview_today_extra_suggestions, preview_today_replan,
+        query_workspace_configuration, rebuild_knowledge_index, rebuild_knowledge_relations,
+        register_knowledge_candidate, reorder_today_snapshot, reveal_review_help, review_focus,
+        review_help_drawer, review_history, search_knowledge_index,
+        set_knowledge_candidate_disposition, start_or_resume_review, transition_problem_lifecycle,
         update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
         ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
         ContestImportStatus, ContestProblemSlotDraft, ContestReadPort, PersonalNoteError,
@@ -5686,6 +6630,788 @@ mod tests {
         (vault, problems, knowledge)
     }
 
+    #[tokio::test]
+    async fn knowledge_discovery_uses_only_real_recursive_markdown_and_fresh_reindex() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::create_dir_all(knowledge.join("Graphs")).expect("nested knowledge");
+        fs::write(knowledge.join("Graphs/DFS.md"), "# ignored H1\n").expect("DFS markdown");
+        fs::write(knowledge.join("notes.txt"), "not markdown").expect("non markdown");
+
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("first discovery");
+        assert_eq!(first.nodes.len(), 1);
+        assert_eq!(first.nodes[0].display_name, "DFS");
+        assert_eq!(
+            first.nodes[0].vault_relative_path,
+            "Knowledge/Graphs/DFS.md"
+        );
+        assert!(first.location_anomalies.is_empty());
+
+        fs::write(knowledge.join("Segment Tree.MD"), "# external addition\n")
+            .expect("external markdown");
+        let before_reindex = search_knowledge_index(&runtime, "segment")
+            .await
+            .expect("derived search before reindex");
+        assert!(before_reindex.is_empty());
+        let refreshed = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("fresh reindex");
+        assert_eq!(refreshed.nodes.len(), 2);
+        assert_eq!(
+            search_knowledge_index(&runtime, "SEGMENT")
+                .await
+                .expect("case insensitive search")[0]
+                .display_name,
+            "Segment Tree"
+        );
+        assert_eq!(
+            fs::read_dir(&knowledge).expect("knowledge root").count(),
+            3,
+            "indexing must not create empty Markdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_move_preserves_identity_but_ambiguous_digest_does_not_guess() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        let original = knowledge.join("Old.md");
+        fs::write(&original, "unique content").expect("original markdown");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("first discovery");
+        let stable_id = first.nodes[0].knowledge_node_id.clone();
+
+        let moved = knowledge.join("Nested/New name.md");
+        fs::create_dir_all(moved.parent().expect("parent")).expect("nested root");
+        fs::rename(&original, &moved).expect("deterministic move");
+        let after_move = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("move reindex");
+        assert_eq!(after_move.nodes[0].knowledge_node_id, stable_id);
+        assert_eq!(after_move.nodes[0].display_name, "New name");
+
+        fs::remove_file(&moved).expect("remove moved file");
+        fs::write(knowledge.join("same-a.md"), "unique content").expect("same a");
+        fs::write(knowledge.join("same-b.md"), "unique content").expect("same b");
+        let ambiguous = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("ambiguous reindex");
+        assert_eq!(ambiguous.nodes.len(), 2);
+        assert!(ambiguous
+            .nodes
+            .iter()
+            .all(|node| node.knowledge_node_id != stable_id));
+        assert_eq!(ambiguous.location_anomalies.len(), 1);
+        assert_eq!(ambiguous.location_anomalies[0].knowledge_node_id, stable_id);
+    }
+
+    #[tokio::test]
+    async fn knowledge_derived_index_rebuild_ignores_orphan_database_nodes() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Real.md"), "real markdown").expect("real markdown");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        let stable_id = first.nodes[0].knowledge_node_id.clone();
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query("DELETE FROM knowledge_discovery_index")
+            .execute(pool)
+            .await
+            .expect("delete derived index");
+        sqlx::query("INSERT INTO knowledge_nodes (id) VALUES (?1)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .execute(pool)
+            .await
+            .expect("orphan identity record");
+
+        assert!(search_knowledge_index(&runtime, "")
+            .await
+            .expect("empty derived index")
+            .is_empty());
+        let rebuilt = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("rebuild from Markdown");
+        assert_eq!(rebuilt.nodes.len(), 1);
+        assert_eq!(rebuilt.nodes[0].knowledge_node_id, stable_id);
+        assert!(rebuilt.location_anomalies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn knowledge_relocation_requires_a_bijective_deterministic_match() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("One.md"), "same bytes").expect("one");
+        fs::write(knowledge.join("Two.md"), "same bytes").expect("two");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial same-digest nodes");
+        assert_eq!(first.nodes.len(), 2);
+
+        fs::remove_file(knowledge.join("One.md")).expect("remove one");
+        fs::remove_file(knowledge.join("Two.md")).expect("remove two");
+        fs::write(vault.join("moved-outside-root.md"), "same bytes")
+            .expect("one ambiguous relocation candidate");
+        let ambiguous = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("ambiguous relocation");
+        assert!(ambiguous.nodes.is_empty());
+        assert_eq!(ambiguous.location_anomalies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn knowledge_relations_resolve_unique_links_and_preserve_ambiguity() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Graphs.md"), "# Graphs\n").expect("graphs");
+        fs::write(
+            knowledge.join("Other.md"),
+            "# Other\n[[Graphs]] [[Missing]] [[Problems/Not Knowledge]]\n",
+        )
+        .expect("other");
+        fs::write(
+            directory.path().join("vault/Problems/Not Knowledge.md"),
+            "# Not Knowledge\n",
+        )
+        .expect("non-knowledge markdown");
+        fs::create_dir_all(knowledge.join("nested")).expect("nested");
+        fs::write(knowledge.join("nested/Graphs.md"), "# Duplicate\n").expect("duplicate target");
+
+        let relations = rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("rebuild relations");
+        assert_eq!(relations.len(), 3);
+        assert!(relations.iter().any(|relation| {
+            relation.target_ref == "Missing"
+                && relation.resolution == acm_os_application::KnowledgeLinkResolution::Unresolved
+        }));
+        assert!(relations.iter().any(|relation| {
+            relation.target_ref == "Graphs"
+                && relation.resolution == acm_os_application::KnowledgeLinkResolution::Ambiguous
+                && relation.target_knowledge_node_id.is_none()
+        }));
+        assert!(relations.iter().any(|relation| {
+            relation.target_ref == "Problems/Not Knowledge"
+                && relation.resolution
+                    == acm_os_application::KnowledgeLinkResolution::NonKnowledgeTarget
+                && relation.target_knowledge_node_id.is_none()
+        }));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_link_index")
+            .fetch_one(runtime._pool.as_ref().expect("pool"))
+            .await
+            .expect("relation index count");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn knowledge_relations_read_nodes_from_a_nested_knowledge_root() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let vault = directory.path().join("vault");
+        let problems = vault.join("Problems");
+        let knowledge = vault.join("Notes/Knowledge");
+        fs::create_dir_all(&problems).expect("problem root");
+        fs::create_dir_all(&knowledge).expect("nested knowledge root");
+        configure_workspace(
+            &runtime,
+            WorkspaceConfigurationDraft {
+                active_vault_path: vault.to_string_lossy().into_owned(),
+                problem_root_path: problems.to_string_lossy().into_owned(),
+                knowledge_root_path: knowledge.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("configure nested root");
+        fs::write(knowledge.join("Target.md"), "# Target\n").expect("target");
+        fs::write(knowledge.join("Source.md"), "# Source\n[[Target]]\n").expect("source");
+
+        let relations = rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("relations from nested root");
+        assert!(relations.iter().any(|relation| {
+            relation.source_kind == "knowledge"
+                && relation.target_ref == "Target"
+                && relation.resolution == acm_os_application::KnowledgeLinkResolution::Resolved
+        }));
+    }
+
+    #[tokio::test]
+    async fn problem_knowledge_relations_only_come_from_a_unique_prerequisite_section() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("read personal note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready personal note, got {other:?}"),
+        };
+        let knowledge = problems.parent().expect("vault").join("Knowledge");
+        fs::write(knowledge.join("Graphs.md"), "# Graphs\n").expect("knowledge markdown");
+        fs::write(
+            vault.join(&binding.vault_relative_path),
+            "# Problem\n\n[[IgnoredOutsideSection]]\n\n## 前置知识\n- [[Graphs#DFS|Traversal]]\n",
+        )
+        .expect("problem markdown");
+
+        let relations = rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("rebuild relations");
+        let problem_relations = relations
+            .iter()
+            .filter(|relation| relation.source_kind == "problem")
+            .collect::<Vec<_>>();
+        assert_eq!(problem_relations.len(), 1);
+        assert_eq!(problem_relations[0].target_ref, "Graphs");
+        assert_eq!(
+            problem_relations[0].resolution,
+            acm_os_application::KnowledgeLinkResolution::Resolved
+        );
+        assert!(problem_relations[0].target_knowledge_node_id.is_some());
+
+        fs::write(
+            vault.join(&binding.vault_relative_path),
+            "# Problem\n\n## 前置知识\n- [[Graphs]]\n\n## 前置知识\n- [[Graphs]]\n",
+        )
+        .expect("ambiguous problem markdown");
+        let rebuilt = rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("rebuild after duplicate section");
+        assert!(rebuilt
+            .iter()
+            .all(|relation| relation.source_kind != "problem"));
+        let persisted_problem_relations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_link_index WHERE source_kind = 'problem'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("problem relation count");
+        assert_eq!(persisted_problem_relations, 0);
+    }
+
+    #[tokio::test]
+    async fn knowledge_understanding_is_user_confirmed_and_preserves_historical_highest() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Flow.md"), "# Flow\n").expect("knowledge markdown");
+        let node = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("index")
+            .nodes
+            .remove(0);
+        let first_date = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("date");
+        let deep = confirm_knowledge_understanding(
+            &runtime,
+            &node.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Deep,
+            first_date,
+        )
+        .await
+        .expect("confirm deep");
+        assert_eq!(
+            deep.current,
+            acm_os_domain::KnowledgeUnderstandingLevel::Deep
+        );
+        let later = acm_os_domain::LocalDate::parse_iso("2026-08-20").expect("later");
+        let lowered = confirm_knowledge_understanding(
+            &runtime,
+            &node.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Vague,
+            later,
+        )
+        .await
+        .expect("confirm lower");
+        assert_eq!(
+            lowered.current,
+            acm_os_domain::KnowledgeUnderstandingLevel::Vague
+        );
+        assert_eq!(
+            lowered.historical_highest,
+            acm_os_domain::KnowledgeUnderstandingLevel::Deep
+        );
+        assert_eq!(lowered.first_reached_highest_on, first_date);
+        assert_eq!(
+            confirm_knowledge_understanding(
+                &runtime,
+                "00000000-0000-0000-0000-000000000000",
+                acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+                later
+            )
+            .await,
+            Err(acm_os_application::KnowledgeIndexError::IntegrityViolation)
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_detail_projects_fresh_neighbors_understanding_and_related_problems() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("read personal note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready personal note, got {other:?}"),
+        };
+        let knowledge = problems.parent().expect("vault").join("Knowledge");
+        fs::write(knowledge.join("Target.md"), "# Target\n[[Outgoing]]\n")
+            .expect("target markdown");
+        fs::write(knowledge.join("Outgoing.md"), "# Outgoing\n").expect("outgoing markdown");
+        fs::write(knowledge.join("Incoming.md"), "# Incoming\n[[Target]]\n")
+            .expect("incoming markdown");
+        fs::write(
+            vault.join(binding.vault_relative_path),
+            "# Problem\n\n## 前置知识\n- [[Target]]\n",
+        )
+        .expect("problem prerequisite");
+        let index = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("knowledge index");
+        let target = index
+            .nodes
+            .iter()
+            .find(|node| node.display_name == "Target")
+            .expect("target node");
+
+        let initial = load_knowledge_detail(&runtime, &target.knowledge_node_id)
+            .await
+            .expect("initial detail");
+        assert!(initial.understanding.is_none());
+        assert_eq!(
+            initial
+                .incoming
+                .iter()
+                .map(|node| node.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Incoming"]
+        );
+        assert_eq!(
+            initial
+                .outgoing
+                .iter()
+                .map(|node| node.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Outgoing"]
+        );
+        assert_eq!(initial.related_problems.len(), 1);
+        assert_eq!(initial.related_problems[0].problem, problem);
+        assert_eq!(initial.related_problems[0].title, "Problem A");
+
+        let confirmed_on = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("date");
+        confirm_knowledge_understanding(
+            &runtime,
+            &target.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+            confirmed_on,
+        )
+        .await
+        .expect("confirm understanding");
+        let confirmed = load_knowledge_detail(&runtime, &target.knowledge_node_id)
+            .await
+            .expect("confirmed detail");
+        assert_eq!(
+            confirmed.understanding.expect("understanding").current,
+            acm_os_domain::KnowledgeUnderstandingLevel::Basic
+        );
+        assert_eq!(
+            load_knowledge_detail(&runtime, "00000000-0000-0000-0000-000000000000").await,
+            Err(acm_os_application::KnowledgeIndexError::KnowledgeNodeNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_candidates_preserve_user_disposition_without_creating_authority() {
+        let (_directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("read personal note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready personal note, got {other:?}"),
+        };
+        let note_path = vault.join(&binding.vault_relative_path);
+        let original_markdown = fs::read(&note_path).expect("original markdown");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let nodes_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_nodes")
+            .fetch_one(pool)
+            .await
+            .expect("knowledge node count");
+        let relations_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_link_index")
+            .fetch_one(pool)
+            .await
+            .expect("knowledge relation count");
+        let fingerprint = "A1".repeat(32);
+
+        let pending =
+            register_knowledge_candidate(&runtime, &problem, &fingerprint, "  Segment Tree  ")
+                .await
+                .expect("register candidate");
+        assert_eq!(pending.fingerprint, fingerprint.to_ascii_lowercase());
+        assert_eq!(pending.target_ref, "Segment Tree");
+        assert_eq!(pending.disposition, KnowledgeCandidateDisposition::Pending);
+
+        let accepted_intent = set_knowledge_candidate_disposition(
+            &runtime,
+            &problem,
+            &fingerprint,
+            KnowledgeCandidateDisposition::AcceptedIntent,
+        )
+        .await
+        .expect("accept candidate intent");
+        assert_eq!(
+            accepted_intent.disposition,
+            KnowledgeCandidateDisposition::AcceptedIntent
+        );
+        let ignored = set_knowledge_candidate_disposition(
+            &runtime,
+            &problem,
+            &fingerprint,
+            KnowledgeCandidateDisposition::Ignored,
+        )
+        .await
+        .expect("ignore candidate");
+        assert_eq!(ignored.disposition, KnowledgeCandidateDisposition::Ignored);
+        let repeated =
+            register_knowledge_candidate(&runtime, &problem, &fingerprint, "Segment Trees")
+                .await
+                .expect("repeat candidate");
+        assert_eq!(repeated.disposition, KnowledgeCandidateDisposition::Ignored);
+        assert_eq!(repeated.target_ref, "Segment Trees");
+        let listed = list_knowledge_candidates(&runtime, &problem)
+            .await
+            .expect("list candidates");
+        assert_eq!(listed, vec![repeated]);
+
+        assert_eq!(
+            fs::read(&note_path).expect("unchanged markdown"),
+            original_markdown
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_nodes")
+                .fetch_one(pool)
+                .await
+                .expect("knowledge node count after"),
+            nodes_before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_link_index")
+                .fetch_one(pool)
+                .await
+                .expect("knowledge relation count after"),
+            relations_before
+        );
+
+        let lightweight = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("lightweight problem");
+        assert_eq!(
+            register_knowledge_candidate(&runtime, &lightweight, &"b".repeat(64), "Graphs").await,
+            Err(KnowledgeCandidateError::NotPersonal)
+        );
+        assert_eq!(
+            register_knowledge_candidate(&runtime, &problem, "bad", "Graphs").await,
+            Err(KnowledgeCandidateError::InvalidFingerprint)
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_reevaluation_suggestion_requires_three_distinct_new_mastered_problems() {
+        let (directory, runtime, _vault, problems, first_problem) = personal_note_fixture().await;
+        let knowledge = problems.parent().expect("vault").join("Knowledge");
+        fs::write(knowledge.join("Reevaluation.md"), "# Reevaluation\n")
+            .expect("knowledge markdown");
+        let target = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("knowledge index")
+            .nodes
+            .into_iter()
+            .find(|node| node.display_name == "Reevaluation")
+            .expect("target node");
+        let confirmed_on = acm_os_domain::LocalDate::parse_iso("2026-08-01").expect("date");
+        confirm_knowledge_understanding(
+            &runtime,
+            &target.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+            confirmed_on,
+        )
+        .await
+        .expect("initial confirmation");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query("UPDATE knowledge_understanding_states SET updated_at_utc = '2026-08-01T00:00:00.000Z' WHERE knowledge_node_id = ?1")
+            .bind(&target.knowledge_node_id).execute(pool).await.expect("fix confirmation time");
+
+        let mut problems_to_link = vec![first_problem];
+        for index in ["B", "C"] {
+            let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+                acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+                index,
+            )
+            .expect("problem");
+            if index == "C" {
+                sqlx::query("INSERT INTO problems (platform, external_contest_key, external_problem_key, title, rating, source_url) VALUES ('codeforces', 1979, 'C', 'Problem C', 1000, 'https://codeforces.com/contest/1979/problem/C')")
+                    .execute(pool).await.expect("third problem");
+                let problem_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'C'")
+                    .fetch_one(pool).await.expect("third problem id");
+                sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (?1)")
+                    .bind(problem_id)
+                    .execute(pool)
+                    .await
+                    .expect("third lifecycle");
+            }
+            create_personal_note(&runtime, &problem)
+                .await
+                .expect("personal note");
+            problems_to_link.push(problem);
+        }
+        for problem in &problems_to_link {
+            acm_os_application::add_prerequisite_link(&runtime, problem, "Reevaluation".to_owned())
+                .await
+                .expect("formal prerequisite link");
+        }
+        rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("relations");
+
+        for (position, problem) in problems_to_link.iter().enumerate() {
+            let problem_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = ?1")
+                .bind(problem.index()).fetch_one(pool).await.expect("problem id");
+            let cycle_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES (?1, ?2, 1, 'active', 0, 1, '2026-08-02')")
+                .bind(&cycle_id).bind(problem_id).execute(pool).await.expect("cycle");
+            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-02', 0, 1, '2026-08-02T00:00:00.000Z', ?4, 'mastered', '2026-08-02', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
+                .bind(uuid::Uuid::now_v7().to_string()).bind(problem_id).bind(&cycle_id)
+                .bind(format!("2026-08-02T00:00:0{position}.000Z")).execute(pool).await.expect("mastered review");
+            let suggestion = acm_os_application::load_knowledge_reevaluation_suggestion(
+                &runtime,
+                &target.knowledge_node_id,
+            )
+            .await
+            .expect("suggestion");
+            assert_eq!(suggestion.qualifying_problem_count, (position + 1) as u32);
+            assert_eq!(suggestion.should_suggest, position == 2);
+        }
+
+        let first_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'A'")
+            .fetch_one(pool).await.expect("first problem id");
+        let first_cycle: String =
+            sqlx::query_scalar("SELECT id FROM review_cycles WHERE problem_id = ?1")
+                .bind(first_id)
+                .fetch_one(pool)
+                .await
+                .expect("first cycle");
+        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-03', 0, 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z', 'mastered', '2026-08-03', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(first_id).bind(first_cycle).execute(pool).await.expect("duplicate mastered review");
+        assert_eq!(
+            acm_os_application::load_knowledge_reevaluation_suggestion(
+                &runtime,
+                &target.knowledge_node_id
+            )
+            .await
+            .expect("deduplicated")
+            .qualifying_problem_count,
+            3
+        );
+
+        confirm_knowledge_understanding(
+            &runtime,
+            &target.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+            acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("date"),
+        )
+        .await
+        .expect("reconfirm");
+        let reset = acm_os_application::load_knowledge_reevaluation_suggestion(
+            &runtime,
+            &target.knowledge_node_id,
+        )
+        .await
+        .expect("reset");
+        assert_eq!(reset.qualifying_problem_count, 0);
+        assert!(!reset.should_suggest);
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let after_restart = acm_os_application::load_knowledge_reevaluation_suggestion(
+            &restarted,
+            &target.knowledge_node_id,
+        )
+        .await
+        .expect("suggestion after restart");
+        assert_eq!(after_restart, reset);
+    }
+
+    #[tokio::test]
+    async fn accepting_existing_knowledge_candidate_patches_markdown_then_verifies_relation() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let knowledge = problems.parent().expect("vault").join("Knowledge");
+        fs::write(knowledge.join("Segment Tree.md"), "# Segment Tree\n")
+            .expect("knowledge markdown");
+        let target = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("knowledge index")
+            .nodes
+            .into_iter()
+            .find(|node| node.display_name == "Segment Tree")
+            .expect("target node");
+        let fingerprint = "cd".repeat(32);
+        register_knowledge_candidate(&runtime, &problem, &fingerprint, "Segment Tree")
+            .await
+            .expect("register candidate");
+
+        let accepted = accept_existing_knowledge_candidate(
+            &runtime,
+            &problem,
+            &fingerprint,
+            &target.knowledge_node_id,
+        )
+        .await
+        .expect("accept existing node");
+        assert_eq!(accepted.knowledge_node_id, target.knowledge_node_id);
+
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("fresh problem note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready note, got {other:?}"),
+        };
+        let markdown =
+            fs::read_to_string(vault.join(binding.vault_relative_path)).expect("patched markdown");
+        assert!(markdown.contains("## 前置知识\n- [[Segment Tree]]"));
+        assert!(list_knowledge_candidates(&runtime, &problem)
+            .await
+            .expect("remaining candidates")
+            .is_empty());
+        let detail = load_knowledge_detail(&runtime, &target.knowledge_node_id)
+            .await
+            .expect("knowledge detail");
+        assert!(detail
+            .related_problems
+            .iter()
+            .any(|item| item.problem == problem));
+    }
+
+    #[tokio::test]
+    async fn accepted_intent_waits_for_real_markdown_and_a_second_explicit_acceptance() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let fingerprint = "ac".repeat(32);
+        register_knowledge_candidate(&runtime, &problem, &fingerprint, "Fenwick Tree")
+            .await
+            .expect("register missing candidate");
+        set_knowledge_candidate_disposition(
+            &runtime,
+            &problem,
+            &fingerprint,
+            KnowledgeCandidateDisposition::AcceptedIntent,
+        )
+        .await
+        .expect("save accepted intent");
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("read note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready note, got {other:?}"),
+        };
+        let note_path = vault.join(&binding.vault_relative_path);
+        let before = fs::read(&note_path).expect("before markdown");
+
+        fs::write(
+            problems
+                .parent()
+                .expect("vault")
+                .join("Knowledge/Fenwick Tree.md"),
+            "# Fenwick Tree\n",
+        )
+        .expect("external knowledge markdown");
+        let target = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("fresh knowledge index")
+            .nodes
+            .into_iter()
+            .find(|node| node.display_name == "Fenwick Tree")
+            .expect("new real node");
+        let listed = list_knowledge_candidates(&runtime, &problem)
+            .await
+            .expect("candidate remains listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].disposition,
+            KnowledgeCandidateDisposition::AcceptedIntent
+        );
+        assert_eq!(fs::read(&note_path).expect("still unchanged"), before);
+
+        accept_existing_knowledge_candidate(
+            &runtime,
+            &problem,
+            &fingerprint,
+            &target.knowledge_node_id,
+        )
+        .await
+        .expect("second explicit Safe Patch acceptance");
+        assert!(fs::read_to_string(note_path)
+            .expect("patched markdown")
+            .contains("[[Fenwick Tree]]"));
+    }
+
+    #[tokio::test]
+    async fn accepting_ambiguous_knowledge_candidate_never_writes_markdown() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let knowledge = problems.parent().expect("vault").join("Knowledge");
+        fs::create_dir_all(knowledge.join("A")).expect("knowledge A");
+        fs::create_dir_all(knowledge.join("B")).expect("knowledge B");
+        fs::write(knowledge.join("A/Graphs.md"), "# A\n").expect("A graph");
+        fs::write(knowledge.join("B/Graphs.md"), "# B\n").expect("B graph");
+        let index = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("ambiguous index");
+        let target_id = index
+            .nodes
+            .first()
+            .expect("a node")
+            .knowledge_node_id
+            .clone();
+        let fingerprint = "ef".repeat(32);
+        register_knowledge_candidate(&runtime, &problem, &fingerprint, "Graphs")
+            .await
+            .expect("register candidate");
+        let binding = match runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("read note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready note, got {other:?}"),
+        };
+        let note_path = vault.join(binding.vault_relative_path);
+        let before = fs::read(&note_path).expect("before markdown");
+
+        assert_eq!(
+            accept_existing_knowledge_candidate(&runtime, &problem, &fingerprint, &target_id).await,
+            Err(KnowledgeCandidateError::IntegrityViolation)
+        );
+        assert_eq!(fs::read(note_path).expect("unchanged markdown"), before);
+    }
+
     async fn personal_note_fixture() -> (
         TempDir,
         DatabaseRuntime,
@@ -5832,6 +7558,15 @@ mod tests {
     async fn rewrite_as_legacy_m5_schema(pool: &SqlitePool) {
         let mut transaction = pool.begin().await.expect("legacy schema transaction");
         for statement in [
+            "DROP INDEX knowledge_candidate_records_by_problem",
+            "DROP TABLE knowledge_candidate_records",
+            "DROP TABLE knowledge_understanding_states",
+            "DROP INDEX knowledge_link_index_by_target",
+            "DROP TABLE knowledge_link_index",
+            "DROP INDEX knowledge_discovery_index_by_name",
+            "DROP TABLE knowledge_discovery_index",
+            "DROP TABLE knowledge_file_bindings",
+            "DROP TABLE knowledge_nodes",
             "DROP TABLE weekly_acm_budgets",
             "ALTER TABLE problem_learning_states RENAME TO problem_learning_states_current",
             LEGACY_M5_LEARNING_STATES_SQL,
@@ -5843,7 +7578,7 @@ mod tests {
             "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
             "DROP TABLE today_plan_entries_current",
             "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
-            "DELETE FROM _sqlx_migrations WHERE version = 11",
+            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15)",
             "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -5866,14 +7601,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 11 }
+            &StartupGateStatus::Ready { schema_version: 15 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 11);
+        assert_eq!(ledger_count, 15);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -5901,7 +7636,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 11 }
+            &StartupGateStatus::Ready { schema_version: 15 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -5936,7 +7671,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-11-"));
+            .starts_with("schema-10-to-15-"));
     }
 
     #[tokio::test]
@@ -8545,7 +10280,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 12), \
+                        CHECK (schema_generation < 16), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -8680,7 +10415,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 11 }
+            &StartupGateStatus::Ready { schema_version: 15 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -8714,7 +10449,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 11 }
+            &StartupGateStatus::Ready { schema_version: 15 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -9094,7 +10829,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 11 }
+            &StartupGateStatus::Ready { schema_version: 15 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
