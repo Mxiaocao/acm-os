@@ -56,6 +56,88 @@ pub struct ContestImportExecutionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualProblemDraft {
+    pub index: String,
+    pub title: String,
+    pub source_url: String,
+    pub statement_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualContestError {
+    InvalidIdentity,
+    InvalidInput,
+    DuplicateProblem,
+}
+
+pub fn build_manual_codeforces_contest(
+    contest_id: u64,
+    title: &str,
+    source_url: &str,
+    starts_at_utc: Option<String>,
+    problems: &[ManualProblemDraft],
+) -> Result<ContestImportExecutionPlan, ManualContestError> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(contest_id)
+        .map_err(|_| ManualContestError::InvalidIdentity)?;
+    if title.trim().is_empty() || source_url.trim().is_empty() || problems.is_empty() {
+        return Err(ManualContestError::InvalidInput);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut slots = Vec::with_capacity(problems.len());
+    let mut snapshots = Vec::with_capacity(problems.len());
+    for (position, item) in problems.iter().enumerate() {
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            contest.clone(),
+            item.index.trim().to_owned(),
+        )
+        .map_err(|_| ManualContestError::InvalidIdentity)?;
+        if !seen.insert(problem.clone()) {
+            return Err(ManualContestError::DuplicateProblem);
+        }
+        if item.title.trim().is_empty()
+            || item.source_url.trim().is_empty()
+            || item.statement_text.trim().is_empty()
+        {
+            return Err(ManualContestError::InvalidInput);
+        }
+        slots.push(ContestProblemSlotDraft {
+            ordinal: position as u32 + 1,
+            problem: problem.clone(),
+            title: item.title.trim().to_owned(),
+            rating: None,
+            source_url: item.source_url.trim().to_owned(),
+        });
+        let escaped = item
+            .statement_text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+            .replace("\r\n", "\n")
+            .replace('\n', "<br>");
+        snapshots.push(StatementSnapshotDraft {
+            problem,
+            source_html: item.statement_text.clone(),
+            sanitized_html: format!(
+                "<div class=\"problem-statement manual-statement\"><p>{escaped}</p></div>"
+            ),
+            assets: Vec::new(),
+        });
+    }
+    let manifest = ContestImportDraft::validated(
+        contest,
+        title.trim().to_owned(),
+        source_url.trim().to_owned(),
+        starts_at_utc,
+        slots,
+    )
+    .map_err(|_| ManualContestError::InvalidInput)?;
+    ContestImportExecutionPlan::validated(manifest, snapshots)
+        .map_err(|_| ManualContestError::InvalidInput)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContestImportExecutionError {
     SnapshotOutsideManifest,
     DuplicateSnapshotIdentity,
@@ -202,6 +284,7 @@ pub struct ContestShelfItem {
     pub import_status: ContestImportStatus,
     pub problem_count: u32,
     pub missing_snapshot_count: u32,
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,8 +292,244 @@ pub struct ContestDetail {
     pub contest: acm_os_domain::CodeforcesContestIdentity,
     pub title: String,
     pub source_url: String,
+    pub contest_date: Option<String>,
     pub import_status: ContestImportStatus,
-    pub problems: Vec<LightweightProblemItem>,
+    pub facts_status: ContestFactsStatus,
+    pub problems: Vec<ContestProblemDetailItem>,
+    pub corrections: Vec<ContestCorrectionEvent>,
+    pub ai_analysis: Option<ContestAiAnalysis>,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestDeletePreview {
+    pub contest_title: String,
+    pub relationship_count: u32,
+    pub cleanup_problem_count: u32,
+    pub preserved_problem_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestManagementError {
+    Unavailable,
+    NotFound,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestManagementPort {
+    async fn set_contest_archived(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        archived: bool,
+    ) -> Result<ContestDetail, ContestManagementError>;
+    async fn preview_delete_contest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDeletePreview, ContestManagementError>;
+    async fn delete_contest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDeletePreview, ContestManagementError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestAiAnalysis {
+    pub raw_text: String,
+    pub parse_status: ContestAiParseStatus,
+    pub parsed_projection_json: String,
+    pub updated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestAiParseStatus {
+    Complete,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestAiAnalysisPreview {
+    pub raw_text: String,
+    pub parse_status: ContestAiParseStatus,
+    pub parsed_projection_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestAiAnalysisError {
+    Unavailable,
+    NotFound,
+    Empty,
+    Invalid,
+}
+
+pub fn preview_contest_ai_analysis(
+    raw_text: &str,
+) -> Result<ContestAiAnalysisPreview, ContestAiAnalysisError> {
+    if raw_text.trim().is_empty() {
+        return Err(ContestAiAnalysisError::Empty);
+    }
+    let has_title = raw_text
+        .lines()
+        .any(|line| line.trim() == "# Contest AI Analysis");
+    if !has_title {
+        return Ok(ContestAiAnalysisPreview {
+            raw_text: raw_text.to_owned(),
+            parse_status: ContestAiParseStatus::Failed,
+            parsed_projection_json: "{}".to_owned(),
+        });
+    }
+    let has_overall = raw_text.lines().any(|line| line.trim() == "## Overall");
+    let problem_count = raw_text
+        .lines()
+        .filter(|line| line.trim().starts_with("## Problem "))
+        .count();
+    let status = if has_overall && problem_count > 0 {
+        ContestAiParseStatus::Complete
+    } else {
+        ContestAiParseStatus::Partial
+    };
+    let projection = format!(
+        r#"{{"overall":{},"problemCount":{}}}"#,
+        has_overall, problem_count
+    );
+    Ok(ContestAiAnalysisPreview {
+        raw_text: raw_text.to_owned(),
+        parse_status: status,
+        parsed_projection_json: projection,
+    })
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestAiAnalysisPort {
+    async fn preview_contest_ai_analysis(
+        &self,
+        raw_text: &str,
+    ) -> Result<ContestAiAnalysisPreview, ContestAiAnalysisError>;
+    async fn save_contest_ai_analysis(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        preview: &ContestAiAnalysisPreview,
+    ) -> Result<ContestDetail, ContestAiAnalysisError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestCorrectionField {
+    FinalContestResult,
+    UpsolveDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestCorrectionEvent {
+    pub correction_id: String,
+    pub problem_index: String,
+    pub field: ContestCorrectionField,
+    pub old_value: String,
+    pub new_value: String,
+    pub corrected_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestProblemCorrectionInput {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub final_contest_result: ContestFinalResult,
+    pub upsolve_decision: ContestUpsolveDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestCorrectionError {
+    Unavailable,
+    NotFound,
+    FactsNotCompleted,
+    NoChange,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestCorrectionPort {
+    async fn correct_contest_problem_facts(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        correction: &ContestProblemCorrectionInput,
+    ) -> Result<ContestDetail, ContestCorrectionError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestFactsStatus {
+    Pending,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestFinalResult {
+    Unknown,
+    NotAttempted,
+    Accepted,
+    WrongAnswer,
+    TimeLimitExceeded,
+    MemoryLimitExceeded,
+    RuntimeError,
+    CompilationError,
+    OtherFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestUpsolveDecision {
+    Planned,
+    NotPlanned,
+    Undecided,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestProblemDetailItem {
+    pub problem: LightweightProblemItem,
+    pub final_contest_result: Option<ContestFinalResult>,
+    pub upsolve_decision: ContestUpsolveDecision,
+    pub live_learning_status: acm_os_domain::LearningStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestProblemFactInput {
+    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub final_contest_result: ContestFinalResult,
+    pub upsolve_decision: ContestUpsolveDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestFactsError {
+    Unavailable,
+    NotFound,
+    ImportIncomplete,
+    ContestDateMissing,
+    ProblemSetMismatch,
+    AlreadyCompleted,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestFactsPort {
+    async fn complete_contest_facts(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        problems: &[ContestProblemFactInput],
+    ) -> Result<ContestDetail, ContestFactsError>;
+}
+
+pub fn validate_contest_facts_input(
+    contest: &acm_os_domain::CodeforcesContestIdentity,
+    contest_date: Option<&str>,
+    problems: &[ContestProblemFactInput],
+) -> Result<(), ContestFactsError> {
+    if contest_date.is_none() {
+        return Err(ContestFactsError::ContestDateMissing);
+    }
+    if problems.is_empty() {
+        return Err(ContestFactsError::ProblemSetMismatch);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in problems {
+        if item.problem.contest() != contest || !seen.insert(item.problem.index().to_owned()) {
+            return Err(ContestFactsError::ProblemSetMismatch);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2459,6 +2778,30 @@ mod tests {
         acm_os_domain::CodeforcesContestIdentity::new(1979).expect("valid contest")
     }
 
+    #[test]
+    fn contest_facts_require_date_and_exact_unique_problem_membership() {
+        let contest = contest_identity();
+        let facts = vec![ContestProblemFactInput {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                .expect("problem"),
+            final_contest_result: ContestFinalResult::Unknown,
+            upsolve_decision: ContestUpsolveDecision::Undecided,
+        }];
+        assert_eq!(
+            validate_contest_facts_input(&contest, None, &facts),
+            Err(ContestFactsError::ContestDateMissing)
+        );
+        assert_eq!(
+            validate_contest_facts_input(&contest, Some("2026-08-13"), &facts),
+            Ok(())
+        );
+        let duplicated = vec![facts[0].clone(), facts[0].clone()];
+        assert_eq!(
+            validate_contest_facts_input(&contest, Some("2026-08-13"), &duplicated),
+            Err(ContestFactsError::ProblemSetMismatch)
+        );
+    }
+
     fn problem_slot(
         contest: acm_os_domain::CodeforcesContestIdentity,
         ordinal: u32,
@@ -2739,6 +3082,64 @@ mod tests {
             StartupDestination::Recovery {
                 reason: StartupRecoveryReason::DatabaseUnavailable,
             }
+        );
+    }
+
+    #[test]
+    fn contest_ai_analysis_preview_distinguishes_complete_partial_and_failed() {
+        let complete = preview_contest_ai_analysis("# Contest AI Analysis\n\n## Overall\n\n### Overall Difficulty\nHard\n\n## Problem A\n\n### Analysis\nMissed invariant").expect("complete preview");
+        assert_eq!(complete.parse_status, ContestAiParseStatus::Complete);
+        assert_eq!(
+            complete.parsed_projection_json,
+            r#"{"overall":true,"problemCount":1}"#
+        );
+        assert_eq!(
+            preview_contest_ai_analysis("# Contest AI Analysis\n\n## Overall\nText")
+                .expect("partial")
+                .parse_status,
+            ContestAiParseStatus::Partial
+        );
+        assert_eq!(
+            preview_contest_ai_analysis("arbitrary response")
+                .expect("failed")
+                .parse_status,
+            ContestAiParseStatus::Failed
+        );
+        assert_eq!(
+            preview_contest_ai_analysis("  "),
+            Err(ContestAiAnalysisError::Empty)
+        );
+    }
+
+    #[test]
+    fn manual_contest_builder_uses_canonical_identity_and_escapes_statement_text() {
+        let problem = ManualProblemDraft {
+            index: "A".to_owned(),
+            title: "Manual A".to_owned(),
+            source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+            statement_text: "x < y && <script>alert(1)</script>".to_owned(),
+        };
+        let plan = build_manual_codeforces_contest(
+            1979,
+            "Manual Round",
+            "https://codeforces.com/contest/1979",
+            Some("2026-08-13T00:00:00Z".to_owned()),
+            std::slice::from_ref(&problem),
+        )
+        .expect("manual plan");
+        assert_eq!(plan.manifest.contest.contest_id(), 1979);
+        assert_eq!(plan.snapshots[0].problem.index(), "A");
+        assert!(plan.snapshots[0].sanitized_html.contains("&lt;script&gt;"));
+        assert!(!plan.snapshots[0].sanitized_html.contains("<script>"));
+        assert_eq!(
+            build_manual_codeforces_contest(
+                1979,
+                "Manual Round",
+                "https://codeforces.com/contest/1979",
+                None,
+                &[problem.clone(), problem]
+            ),
+            Err(ManualContestError::DuplicateProblem)
         );
     }
 }

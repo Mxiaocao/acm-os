@@ -6,15 +6,30 @@ export interface ContestShelfItemDto {
   importStatus: "incomplete" | "complete";
   problemCount: number;
   missingSnapshotCount: number;
+  archived: boolean;
 }
 
 export interface ContestDetailDto {
   contestId: number;
   title: string;
   sourceUrl: string;
+  contestDate: string | null;
   importStatus: "incomplete" | "complete";
-  problems: LightweightProblemItemDto[];
+  factsStatus: "pending" | "completed";
+  problems: ContestProblemDetailItemDto[];
+  corrections: ContestCorrectionEventDto[];
+  aiAnalysis: ContestAiAnalysisDto | null;
+  archived: boolean;
 }
+
+export interface ContestAiAnalysisDto { rawText: string; parseStatus: "complete" | "partial" | "failed"; parsedProjectionJson: string; updatedAtUtc: string; }
+export interface ContestAiAnalysisPreviewDto { rawText: string; parseStatus: "complete" | "partial" | "failed"; parsedProjectionJson: string; }
+
+export interface ContestCorrectionEventDto { correctionId: string; problemIndex: string; field: "finalContestResult" | "upsolveDecision"; oldValue: string; newValue: string; correctedAtUtc: string; }
+
+export type ContestFinalResultDto = "unknown" | "notAttempted" | "accepted" | "wrongAnswer" | "timeLimitExceeded" | "memoryLimitExceeded" | "runtimeError" | "compilationError" | "otherFailed";
+export type ContestUpsolveDecisionDto = "planned" | "notPlanned" | "undecided";
+export interface ContestProblemDetailItemDto extends LightweightProblemItemDto { finalContestResult: ContestFinalResultDto | null; upsolveDecision: ContestUpsolveDecisionDto; liveLearningStatus: LearningStatusDto; }
 
 export interface LightweightProblemItemDto {
   contestId: number;
@@ -271,6 +286,25 @@ export function getContestShelf(): Promise<ContestShelfItemDto[]> {
 export function getContestDetail(contestId: number): Promise<ContestDetailDto> {
   return invoke<ContestDetailDto>("contest_detail", { input: { contestId } });
 }
+
+export interface ManualProblemInputDto { index: string; title: string; sourceUrl: string; statementText: string; }
+export function importManualCodeforcesContest(input: { contestId: number; title: string; sourceUrl: string; startsAtUtc: string | null; problems: ManualProblemInputDto[] }): Promise<ContestImportRunDto> { return invoke<ContestImportRunDto>("import_manual_codeforces_contest", { input }); }
+
+export function completeContestFacts(contestId: number, problems: Array<{ index: string; finalContestResult: ContestFinalResultDto; upsolveDecision: ContestUpsolveDecisionDto }>): Promise<ContestDetailDto> {
+  return invoke<ContestDetailDto>("complete_contest_facts", { input: { contestId, problems } });
+}
+
+export function correctContestProblemFacts(contestId: number, index: string, finalContestResult: ContestFinalResultDto, upsolveDecision: ContestUpsolveDecisionDto): Promise<ContestDetailDto> {
+  return invoke<ContestDetailDto>("correct_contest_problem_facts", { input: { contestId, index, finalContestResult, upsolveDecision } });
+}
+
+export interface ContestDeletePreviewDto { contestTitle: string; relationshipCount: number; cleanupProblemCount: number; preservedProblemCount: number; }
+export function setContestArchived(contestId: number, archived: boolean): Promise<ContestDetailDto> { return invoke<ContestDetailDto>("set_contest_archived", { input: { contestId, archived } }); }
+export function previewDeleteContest(contestId: number): Promise<ContestDeletePreviewDto> { return invoke<ContestDeletePreviewDto>("preview_delete_contest", { input: { contestId } }); }
+export function deleteContest(contestId: number): Promise<ContestDeletePreviewDto> { return invoke<ContestDeletePreviewDto>("delete_contest", { input: { contestId } }); }
+
+export function previewContestAiAnalysis(contestId: number, rawText: string): Promise<ContestAiAnalysisPreviewDto> { return invoke<ContestAiAnalysisPreviewDto>("preview_contest_ai_analysis", { input: { contestId, rawText } }); }
+export function saveContestAiAnalysis(contestId: number, rawText: string): Promise<ContestDetailDto> { return invoke<ContestDetailDto>("save_contest_ai_analysis", { input: { contestId, rawText } }); }
 
 export function getLightweightProblems(): Promise<LightweightProblemItemDto[]> {
   return invoke<LightweightProblemItemDto[]>("lightweight_problems");

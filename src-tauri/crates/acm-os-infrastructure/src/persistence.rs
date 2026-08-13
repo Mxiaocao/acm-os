@@ -7,29 +7,35 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acm_os_application::{
-    AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CompletedReviewAttempt, ContestDetail,
-    ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
-    ContestReadError, ContestReadPort, ContestShelfItem, CreatedPersonalNoteFile,
-    ExtraProblemLinkTarget, KnowledgeCandidateDisposition, KnowledgeCandidateError,
-    KnowledgeCandidatePort, KnowledgeCandidateProjection, KnowledgeDetailPort,
-    KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort, KnowledgeIndexProjection,
-    KnowledgeLinkProjection, KnowledgeLinkResolution, KnowledgeLocationState,
-    KnowledgeNodeProjection, KnowledgeRelationPort, KnowledgeUnderstandingPort,
-    KnowledgeUnderstandingProjection, LightweightProblemDetail, LightweightProblemItem,
-    LocalStatementAsset, PersistedContestImport, PersonalNoteBinding, PersonalNoteCreationContext,
-    PersonalNoteDeletionError, PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError,
-    PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort,
-    PersonalNoteReadState, PreparedPersonalNoteDeletion, PrerequisiteLinkTarget,
-    ProblemIdentityType, ProblemLifecycleError, ProblemLifecyclePort, ProblemLifecycleState,
-    ProblemMarkdownProjection, ProblemMasteryProjection, RelatedKnowledgeProblemProjection,
-    RevealedReviewHelp, ReviewAttempt, ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus,
-    ReviewCompletionContext, ReviewCompletionInput, ReviewFailureReason, ReviewFocusView,
-    ReviewHelpDrawerView, ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, StartupGateStatus,
-    StartupRecoveryReason, StatementReadState, StatementSnapshotDraft, SubmissionFact,
-    TodayEntryOrigin, TodayEntryStatus, TodayGenerationCandidate, TodayGenerationContext,
-    TodayReplanPreview, TodaySnapshot, TodaySnapshotEntry, TodaySnapshotError, TodaySnapshotPort,
-    WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule, WorkspaceConfiguration,
-    WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
+    AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CompletedReviewAttempt,
+    ContestAiAnalysis, ContestAiAnalysisError, ContestAiAnalysisPort, ContestAiAnalysisPreview,
+    ContestAiParseStatus, ContestCorrectionError, ContestCorrectionEvent, ContestCorrectionField,
+    ContestCorrectionPort, ContestDeletePreview, ContestDetail, ContestFactsError,
+    ContestFactsPort, ContestFactsStatus, ContestFinalResult, ContestImportDraft,
+    ContestImportPersistenceError, ContestImportPort, ContestImportStatus, ContestManagementError,
+    ContestManagementPort, ContestProblemCorrectionInput, ContestProblemDetailItem,
+    ContestProblemFactInput, ContestReadError, ContestReadPort, ContestShelfItem,
+    CreatedPersonalNoteFile, ExtraProblemLinkTarget, KnowledgeCandidateDisposition,
+    KnowledgeCandidateError, KnowledgeCandidatePort, KnowledgeCandidateProjection,
+    KnowledgeDetailPort, KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort,
+    KnowledgeIndexProjection, KnowledgeLinkProjection, KnowledgeLinkResolution,
+    KnowledgeLocationState, KnowledgeNodeProjection, KnowledgeRelationPort,
+    KnowledgeUnderstandingPort, KnowledgeUnderstandingProjection, LightweightProblemDetail,
+    LightweightProblemItem, LocalStatementAsset, PersistedContestImport, PersonalNoteBinding,
+    PersonalNoteCreationContext, PersonalNoteDeletionError, PersonalNoteDeletionPort,
+    PersonalNoteError, PersonalNotePatchError, PersonalNotePatchPort, PersonalNotePort,
+    PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState,
+    PreparedPersonalNoteDeletion, PrerequisiteLinkTarget, ProblemIdentityType,
+    ProblemLifecycleError, ProblemLifecyclePort, ProblemLifecycleState, ProblemMarkdownProjection,
+    ProblemMasteryProjection, RelatedKnowledgeProblemProjection, RevealedReviewHelp, ReviewAttempt,
+    ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus, ReviewCompletionContext,
+    ReviewCompletionInput, ReviewFailureReason, ReviewFocusView, ReviewHelpDrawerView,
+    ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, StartupGateStatus, StartupRecoveryReason,
+    StatementReadState, StatementSnapshotDraft, SubmissionFact, TodayEntryOrigin, TodayEntryStatus,
+    TodayGenerationCandidate, TodayGenerationContext, TodayReplanPreview, TodaySnapshot,
+    TodaySnapshotEntry, TodaySnapshotError, TodaySnapshotPort, WeeklyAcmBudgetPort,
+    WeeklyAcmBudgetSchedule, WorkspaceConfiguration, WorkspaceConfigurationPort,
+    WorkspacePathResolutionError, WorkspacePersistenceError,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
@@ -4694,9 +4700,9 @@ impl ContestImportPort for DatabaseRuntime {
 
 impl ContestReadPort for DatabaseRuntime {
     async fn list_contests(&self) -> Result<Vec<ContestShelfItem>, ContestReadError> {
-        let rows: Vec<(i64, String, String, i64, i64)> = sqlx::query_as(
+        let rows: Vec<(i64, String, String, i64, i64, Option<String>)> = sqlx::query_as(
             "SELECT c.external_contest_key, c.title, c.import_status, COUNT(cp.problem_id), \
-                    SUM(CASE WHEN cp.import_state = 'pending_snapshot' THEN 1 ELSE 0 END) \
+                    SUM(CASE WHEN cp.import_state = 'pending_snapshot' THEN 1 ELSE 0 END), c.archived_at_utc \
              FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id \
              GROUP BY c.id ORDER BY c.created_at_utc DESC",
         )
@@ -4707,7 +4713,7 @@ impl ContestReadPort for DatabaseRuntime {
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
         rows.into_iter()
-            .map(|(id, title, status, count, missing)| {
+            .map(|(id, title, status, count, missing, archived_at)| {
                 Ok(ContestShelfItem {
                     contest: acm_os_domain::CodeforcesContestIdentity::new(id as u64)
                         .map_err(|_| ContestReadError::Unavailable)?,
@@ -4719,6 +4725,7 @@ impl ContestReadPort for DatabaseRuntime {
                     },
                     problem_count: count as u32,
                     missing_snapshot_count: missing as u32,
+                    archived: archived_at.is_some(),
                 })
             })
             .collect()
@@ -4731,16 +4738,17 @@ impl ContestReadPort for DatabaseRuntime {
         let pool = self
             .contest_pool()
             .map_err(|_| ContestReadError::Unavailable)?;
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT title, source_url, import_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        let row: Option<(String, String, Option<String>, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT title, source_url, starts_at_utc, import_status, facts_status, archived_at_utc FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
         .bind(contest.contest_id() as i64)
         .fetch_optional(pool)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        let (title, source_url, import_status) = row.ok_or(ContestReadError::NotFound)?;
-        let rows: Vec<(String, String, Option<i64>, i64, String)> = sqlx::query_as(
-            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
+        let (title, source_url, starts_at_utc, import_status, facts_status, archived_at_utc) =
+            row.ok_or(ContestReadError::NotFound)?;
+        let rows: Vec<(String, String, Option<i64>, i64, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type, cp.final_contest_result, cp.upsolve_decision, pls.learning_status FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
         )
         .bind(contest.contest_id() as i64)
         .fetch_all(pool)
@@ -4748,27 +4756,83 @@ impl ContestReadPort for DatabaseRuntime {
         .map_err(|_| ContestReadError::Unavailable)?;
         let problems = rows
             .into_iter()
-            .map(|(index, title, rating, snapshot, identity_type)| {
-                Ok(LightweightProblemItem {
-                    problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
-                        .map_err(|_| ContestReadError::Unavailable)?,
+            .map(
+                |(
+                    index,
                     title,
-                    rating: rating.map(|value| value as u32),
-                    has_statement_snapshot: snapshot != 0,
-                    identity_type: parse_problem_identity_type(&identity_type)?,
-                })
-            })
+                    rating,
+                    snapshot,
+                    identity_type,
+                    final_result,
+                    upsolve_decision,
+                    learning_status,
+                )| {
+                    Ok(ContestProblemDetailItem {
+                        problem: LightweightProblemItem {
+                            problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                                contest.clone(),
+                                index,
+                            )
+                            .map_err(|_| ContestReadError::Unavailable)?,
+                            title,
+                            rating: rating.map(|value| value as u32),
+                            has_statement_snapshot: snapshot != 0,
+                            identity_type: parse_problem_identity_type(&identity_type)?,
+                        },
+                        final_contest_result: final_result
+                            .as_deref()
+                            .map(parse_contest_final_result)
+                            .transpose()?,
+                        upsolve_decision: parse_contest_upsolve_decision(&upsolve_decision)?,
+                        live_learning_status: parse_learning_status(&learning_status)
+                            .map_err(|_| ContestReadError::Unavailable)?,
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        let correction_rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT e.id, p.external_problem_key, e.field_name, e.old_value, e.new_value, e.corrected_at_utc FROM contest_correction_events e JOIN problems p ON p.id = e.problem_id WHERE e.contest_id = (SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1) ORDER BY e.corrected_at_utc, e.id",
+        ).bind(contest.contest_id() as i64).fetch_all(pool).await.map_err(|_| ContestReadError::Unavailable)?;
+        let corrections = correction_rows
+            .into_iter()
+            .map(
+                |(correction_id, problem_index, field, old_value, new_value, corrected_at_utc)| {
+                    Ok(ContestCorrectionEvent {
+                        correction_id,
+                        problem_index,
+                        field: match field.as_str() {
+                            "final_contest_result" => ContestCorrectionField::FinalContestResult,
+                            "upsolve_decision" => ContestCorrectionField::UpsolveDecision,
+                            _ => return Err(ContestReadError::Unavailable),
+                        },
+                        old_value,
+                        new_value,
+                        corrected_at_utc,
+                    })
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ContestDetail {
             contest: contest.clone(),
             title,
             source_url,
+            contest_date: starts_at_utc.map(|value| value.chars().take(10).collect()),
             import_status: match import_status.as_str() {
                 "incomplete" => ContestImportStatus::Incomplete,
                 "complete" => ContestImportStatus::Complete,
                 _ => return Err(ContestReadError::Unavailable),
             },
+            facts_status: match facts_status.as_str() {
+                "pending" => ContestFactsStatus::Pending,
+                "completed" => ContestFactsStatus::Completed,
+                _ => return Err(ContestReadError::Unavailable),
+            },
             problems,
+            corrections,
+            ai_analysis: sqlx::query_as::<_, (String, String, String, String)>("SELECT raw_text, parse_status, parsed_projection_json, updated_at_utc FROM contest_ai_analyses WHERE contest_id = (SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1)")
+                .bind(contest.contest_id() as i64).fetch_optional(pool).await.map_err(|_| ContestReadError::Unavailable)?
+                .map(|(raw_text, status, parsed_projection_json, updated_at_utc)| ContestAiAnalysis { raw_text, parse_status: match status.as_str() { "complete" => ContestAiParseStatus::Complete, "partial" => ContestAiParseStatus::Partial, _ => ContestAiParseStatus::Failed }, parsed_projection_json, updated_at_utc }),
+            archived: archived_at_utc.is_some(),
         })
     }
 
@@ -4892,6 +4956,341 @@ impl ContestReadPort for DatabaseRuntime {
     }
 }
 
+impl ContestAiAnalysisPort for DatabaseRuntime {
+    async fn preview_contest_ai_analysis(
+        &self,
+        raw_text: &str,
+    ) -> Result<ContestAiAnalysisPreview, ContestAiAnalysisError> {
+        acm_os_application::preview_contest_ai_analysis(raw_text)
+    }
+    async fn save_contest_ai_analysis(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        preview: &ContestAiAnalysisPreview,
+    ) -> Result<ContestDetail, ContestAiAnalysisError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestAiAnalysisError::Unavailable)?;
+        let contest_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ContestAiAnalysisError::Unavailable)?
+        .ok_or(ContestAiAnalysisError::NotFound)?;
+        sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(contest_id) DO UPDATE SET raw_text = excluded.raw_text, parse_status = excluded.parse_status, parsed_projection_json = excluded.parsed_projection_json, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+            .bind(contest_id).bind(&preview.raw_text).bind(match preview.parse_status { ContestAiParseStatus::Complete => "complete", ContestAiParseStatus::Partial => "partial", ContestAiParseStatus::Failed => "failed" }).bind(&preview.parsed_projection_json).execute(pool).await.map_err(|_| ContestAiAnalysisError::Unavailable)?;
+        self.contest_detail(contest)
+            .await
+            .map_err(|_| ContestAiAnalysisError::Unavailable)
+    }
+}
+
+impl ContestManagementPort for DatabaseRuntime {
+    async fn set_contest_archived(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        archived: bool,
+    ) -> Result<ContestDetail, ContestManagementError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestManagementError::Unavailable)?;
+        let result = sqlx::query("UPDATE contests SET archived_at_utc = CASE WHEN ?1 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE platform = 'codeforces' AND external_contest_key = ?2")
+            .bind(archived).bind(contest.contest_id() as i64).execute(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
+        if result.rows_affected() == 0 {
+            return Err(ContestManagementError::NotFound);
+        }
+        self.contest_detail(contest)
+            .await
+            .map_err(|error| match error {
+                ContestReadError::NotFound => ContestManagementError::NotFound,
+                _ => ContestManagementError::Unavailable,
+            })
+    }
+
+    async fn preview_delete_contest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDeletePreview, ContestManagementError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestManagementError::Unavailable)?;
+        contest_delete_preview(pool, contest).await
+    }
+
+    async fn delete_contest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ContestDeletePreview, ContestManagementError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestManagementError::Unavailable)?;
+        let preview = contest_delete_preview(pool, contest).await?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        let contest_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ContestManagementError::Unavailable)?
+        .ok_or(ContestManagementError::NotFound)?;
+        let cleanup_ids: Vec<i64> = sqlx::query_scalar(CLEANUP_PROBLEM_IDS_SQL)
+            .bind(contest_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        sqlx::query("DELETE FROM contest_correction_events WHERE contest_id = ?1")
+            .bind(contest_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        sqlx::query("DELETE FROM contest_ai_analyses WHERE contest_id = ?1")
+            .bind(contest_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        sqlx::query("DELETE FROM contest_problems WHERE contest_id = ?1")
+            .bind(contest_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        sqlx::query("DELETE FROM contests WHERE id = ?1")
+            .bind(contest_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        for problem_id in cleanup_ids {
+            sqlx::query("DELETE FROM problem_statement_assets WHERE problem_id = ?1")
+                .bind(problem_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+            sqlx::query("DELETE FROM problem_statement_snapshots WHERE problem_id = ?1")
+                .bind(problem_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+            sqlx::query("DELETE FROM problem_learning_states WHERE problem_id = ?1")
+                .bind(problem_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+            sqlx::query("DELETE FROM problems WHERE id = ?1")
+                .bind(problem_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        Ok(preview)
+    }
+}
+
+const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id)";
+
+async fn contest_delete_preview(
+    pool: &SqlitePool,
+    contest: &acm_os_domain::CodeforcesContestIdentity,
+) -> Result<ContestDeletePreview, ContestManagementError> {
+    let row: Option<(i64, String)> = sqlx::query_as("SELECT id, title FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1").bind(contest.contest_id() as i64).fetch_optional(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
+    let (contest_id, contest_title) = row.ok_or(ContestManagementError::NotFound)?;
+    let relationship_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems WHERE contest_id = ?1")
+            .bind(contest_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+    let cleanup_problem_count = sqlx::query_scalar::<_, i64>(CLEANUP_PROBLEM_IDS_SQL)
+        .bind(contest_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ContestManagementError::Unavailable)?
+        .len() as i64;
+    Ok(ContestDeletePreview {
+        contest_title,
+        relationship_count: relationship_count as u32,
+        cleanup_problem_count: cleanup_problem_count as u32,
+        preserved_problem_count: (relationship_count - cleanup_problem_count) as u32,
+    })
+}
+
+impl ContestCorrectionPort for DatabaseRuntime {
+    async fn correct_contest_problem_facts(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        correction: &ContestProblemCorrectionInput,
+    ) -> Result<ContestDetail, ContestCorrectionError> {
+        if correction.problem.contest() != contest {
+            return Err(ContestCorrectionError::NotFound);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestCorrectionError::Unavailable)?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| ContestCorrectionError::Unavailable)?;
+        let row: Option<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 AND p.external_problem_key = ?2",
+        ).bind(contest.contest_id() as i64).bind(correction.problem.index()).fetch_optional(&mut *tx).await.map_err(|_| ContestCorrectionError::Unavailable)?;
+        let (contest_id, problem_id, facts_status, old_result, old_upsolve) =
+            row.ok_or(ContestCorrectionError::NotFound)?;
+        if facts_status != "completed" {
+            return Err(ContestCorrectionError::FactsNotCompleted);
+        }
+        let old_result = old_result.ok_or(ContestCorrectionError::Unavailable)?;
+        let new_result = contest_final_result_value(correction.final_contest_result);
+        let new_upsolve = contest_upsolve_decision_value(correction.upsolve_decision);
+        if old_result == new_result && old_upsolve == new_upsolve {
+            return Err(ContestCorrectionError::NoChange);
+        }
+        if old_result != new_result {
+            insert_contest_correction_event(
+                &mut tx,
+                contest_id,
+                problem_id,
+                "final_contest_result",
+                &old_result,
+                new_result,
+            )
+            .await?;
+        }
+        if old_upsolve != new_upsolve {
+            insert_contest_correction_event(
+                &mut tx,
+                contest_id,
+                problem_id,
+                "upsolve_decision",
+                &old_upsolve,
+                new_upsolve,
+            )
+            .await?;
+        }
+        sqlx::query("UPDATE contest_problems SET final_contest_result = ?1, upsolve_decision = ?2 WHERE contest_id = ?3 AND problem_id = ?4")
+            .bind(new_result).bind(new_upsolve).bind(contest_id).bind(problem_id).execute(&mut *tx).await.map_err(|_| ContestCorrectionError::Unavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| ContestCorrectionError::Unavailable)?;
+        self.contest_detail(contest)
+            .await
+            .map_err(|error| match error {
+                ContestReadError::NotFound => ContestCorrectionError::NotFound,
+                ContestReadError::Unavailable => ContestCorrectionError::Unavailable,
+            })
+    }
+}
+
+async fn insert_contest_correction_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    contest_id: i64,
+    problem_id: i64,
+    field_name: &str,
+    old_value: &str,
+    new_value: &str,
+) -> Result<(), ContestCorrectionError> {
+    sqlx::query("INSERT INTO contest_correction_events (id, contest_id, problem_id, field_name, old_value, new_value) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+        .bind(uuid::Uuid::now_v7().to_string()).bind(contest_id).bind(problem_id).bind(field_name).bind(old_value).bind(new_value)
+        .execute(&mut **tx).await.map_err(|_| ContestCorrectionError::Unavailable)?;
+    Ok(())
+}
+
+impl ContestFactsPort for DatabaseRuntime {
+    async fn complete_contest_facts(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        problems: &[ContestProblemFactInput],
+    ) -> Result<ContestDetail, ContestFactsError> {
+        let pool = self._pool.as_ref().ok_or(ContestFactsError::Unavailable)?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| ContestFactsError::Unavailable)?;
+        let contest_row: Option<(i64, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT id, starts_at_utc, import_status, facts_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ContestFactsError::Unavailable)?;
+        let (contest_id, starts_at, import_status, facts_status) =
+            contest_row.ok_or(ContestFactsError::NotFound)?;
+        if import_status != "complete" {
+            return Err(ContestFactsError::ImportIncomplete);
+        }
+        if facts_status == "completed" {
+            return Err(ContestFactsError::AlreadyCompleted);
+        }
+        acm_os_application::validate_contest_facts_input(contest, starts_at.as_deref(), problems)?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT p.id, p.external_problem_key FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+        ).bind(contest_id).fetch_all(&mut *tx).await.map_err(|_| ContestFactsError::Unavailable)?;
+        if rows.len() != problems.len()
+            || rows
+                .iter()
+                .any(|(_, index)| !problems.iter().any(|item| item.problem.index() == index))
+        {
+            return Err(ContestFactsError::ProblemSetMismatch);
+        }
+        for (problem_id, index) in rows {
+            let input = problems
+                .iter()
+                .find(|item| item.problem.index() == index)
+                .ok_or(ContestFactsError::ProblemSetMismatch)?;
+            sqlx::query("UPDATE contest_problems SET final_contest_result = ?1, upsolve_decision = ?2 WHERE contest_id = ?3 AND problem_id = ?4")
+                .bind(contest_final_result_value(input.final_contest_result))
+                .bind(contest_upsolve_decision_value(input.upsolve_decision))
+                .bind(contest_id).bind(problem_id).execute(&mut *tx).await.map_err(|_| ContestFactsError::Unavailable)?;
+        }
+        sqlx::query("UPDATE contests SET facts_status = 'completed', facts_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1")
+            .bind(contest_id).execute(&mut *tx).await.map_err(|_| ContestFactsError::Unavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| ContestFactsError::Unavailable)?;
+        self.contest_detail(contest)
+            .await
+            .map_err(|error| match error {
+                ContestReadError::NotFound => ContestFactsError::NotFound,
+                ContestReadError::Unavailable => ContestFactsError::Unavailable,
+            })
+    }
+}
+
+fn contest_final_result_value(value: ContestFinalResult) -> &'static str {
+    match value {
+        ContestFinalResult::Unknown => "unknown",
+        ContestFinalResult::NotAttempted => "not_attempted",
+        ContestFinalResult::Accepted => "accepted",
+        ContestFinalResult::WrongAnswer => "wrong_answer",
+        ContestFinalResult::TimeLimitExceeded => "time_limit_exceeded",
+        ContestFinalResult::MemoryLimitExceeded => "memory_limit_exceeded",
+        ContestFinalResult::RuntimeError => "runtime_error",
+        ContestFinalResult::CompilationError => "compilation_error",
+        ContestFinalResult::OtherFailed => "other_failed",
+    }
+}
+
+fn contest_upsolve_decision_value(
+    value: acm_os_application::ContestUpsolveDecision,
+) -> &'static str {
+    match value {
+        acm_os_application::ContestUpsolveDecision::Planned => "planned",
+        acm_os_application::ContestUpsolveDecision::NotPlanned => "not_planned",
+        acm_os_application::ContestUpsolveDecision::Undecided => "undecided",
+    }
+}
+
 impl DatabaseRuntime {
     fn personal_note_pool(&self) -> Result<&SqlitePool, PersonalNoteError> {
         self._pool
@@ -4955,6 +5354,32 @@ fn parse_problem_identity_type(value: &str) -> Result<ProblemIdentityType, Conte
     match value {
         "lightweight" => Ok(ProblemIdentityType::Lightweight),
         "personal" => Ok(ProblemIdentityType::Personal),
+        _ => Err(ContestReadError::Unavailable),
+    }
+}
+
+fn parse_contest_final_result(value: &str) -> Result<ContestFinalResult, ContestReadError> {
+    match value {
+        "unknown" => Ok(ContestFinalResult::Unknown),
+        "not_attempted" => Ok(ContestFinalResult::NotAttempted),
+        "accepted" => Ok(ContestFinalResult::Accepted),
+        "wrong_answer" => Ok(ContestFinalResult::WrongAnswer),
+        "time_limit_exceeded" => Ok(ContestFinalResult::TimeLimitExceeded),
+        "memory_limit_exceeded" => Ok(ContestFinalResult::MemoryLimitExceeded),
+        "runtime_error" => Ok(ContestFinalResult::RuntimeError),
+        "compilation_error" => Ok(ContestFinalResult::CompilationError),
+        "other_failed" => Ok(ContestFinalResult::OtherFailed),
+        _ => Err(ContestReadError::Unavailable),
+    }
+}
+
+fn parse_contest_upsolve_decision(
+    value: &str,
+) -> Result<acm_os_application::ContestUpsolveDecision, ContestReadError> {
+    match value {
+        "planned" => Ok(acm_os_application::ContestUpsolveDecision::Planned),
+        "not_planned" => Ok(acm_os_application::ContestUpsolveDecision::NotPlanned),
+        "undecided" => Ok(acm_os_application::ContestUpsolveDecision::Undecided),
         _ => Err(ContestReadError::Unavailable),
     }
 }
@@ -5360,7 +5785,7 @@ async fn validate_schema_contract(
 
     if !matches!(
         schema_version,
-        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -5451,7 +5876,36 @@ async fn validate_schema_contract(
         )
         .await?;
     }
-
+    if schema_version >= 18 {
+        validate_table_columns(
+            pool,
+            "contest_correction_events",
+            &[
+                "id",
+                "contest_id",
+                "problem_id",
+                "field_name",
+                "old_value",
+                "new_value",
+                "corrected_at_utc",
+            ],
+        )
+        .await?;
+    }
+    if schema_version >= 19 {
+        validate_table_columns(
+            pool,
+            "contest_ai_analyses",
+            &[
+                "contest_id",
+                "raw_text",
+                "parse_status",
+                "parsed_projection_json",
+                "updated_at_utc",
+            ],
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -5670,6 +6124,29 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
         ]);
         expected_objects.sort();
     }
+    if schema_version >= 18 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "contest_correction_events_by_contest".to_owned(),
+                "contest_correction_events".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "contest_correction_events".to_owned(),
+                "contest_correction_events".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 19 {
+        expected_objects.push((
+            "table".to_owned(),
+            "contest_ai_analyses".to_owned(),
+            "contest_ai_analyses".to_owned(),
+        ));
+        expected_objects.sort();
+    }
     expected_objects
 }
 
@@ -5677,10 +6154,8 @@ async fn validate_contest_import_contract(
     pool: &SqlitePool,
     schema_version: i64,
 ) -> Result<(), StartupRecoveryReason> {
-    validate_table_columns(
-        pool,
-        "contests",
-        &[
+    let contest_columns = if schema_version >= 20 {
+        vec![
             "id",
             "platform",
             "external_contest_key",
@@ -5689,9 +6164,36 @@ async fn validate_contest_import_contract(
             "starts_at_utc",
             "import_status",
             "created_at_utc",
-        ],
-    )
-    .await?;
+            "facts_status",
+            "facts_completed_at_utc",
+            "archived_at_utc",
+        ]
+    } else if schema_version >= 16 {
+        vec![
+            "id",
+            "platform",
+            "external_contest_key",
+            "title",
+            "source_url",
+            "starts_at_utc",
+            "import_status",
+            "created_at_utc",
+            "facts_status",
+            "facts_completed_at_utc",
+        ]
+    } else {
+        vec![
+            "id",
+            "platform",
+            "external_contest_key",
+            "title",
+            "source_url",
+            "starts_at_utc",
+            "import_status",
+            "created_at_utc",
+        ]
+    };
+    validate_table_columns(pool, "contests", &contest_columns).await?;
     let problem_columns = if schema_version >= 4 {
         vec![
             "id",
@@ -5717,12 +6219,27 @@ async fn validate_contest_import_contract(
         ]
     };
     validate_table_columns(pool, "problems", &problem_columns).await?;
-    validate_table_columns(
-        pool,
-        "contest_problems",
-        &["contest_id", "problem_id", "ordinal", "import_state"],
-    )
-    .await?;
+    let contest_problem_columns = if schema_version >= 17 {
+        vec![
+            "contest_id",
+            "problem_id",
+            "ordinal",
+            "import_state",
+            "final_contest_result",
+            "upsolve_decision",
+        ]
+    } else if schema_version >= 16 {
+        vec![
+            "contest_id",
+            "problem_id",
+            "ordinal",
+            "import_state",
+            "final_contest_result",
+        ]
+    } else {
+        vec!["contest_id", "problem_id", "ordinal", "import_state"]
+    };
+    validate_table_columns(pool, "contest_problems", &contest_problem_columns).await?;
     validate_table_columns(
         pool,
         "problem_statement_snapshots",
@@ -6083,6 +6600,8 @@ async fn validate_table_columns(
         "knowledge_link_index" => "PRAGMA table_xinfo('knowledge_link_index')",
         "knowledge_understanding_states" => "PRAGMA table_xinfo('knowledge_understanding_states')",
         "knowledge_candidate_records" => "PRAGMA table_xinfo('knowledge_candidate_records')",
+        "contest_correction_events" => "PRAGMA table_xinfo('contest_correction_events')",
+        "contest_ai_analyses" => "PRAGMA table_xinfo('contest_ai_analyses')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -7568,6 +8087,14 @@ mod tests {
             "DROP TABLE knowledge_file_bindings",
             "DROP TABLE knowledge_nodes",
             "DROP TABLE weekly_acm_budgets",
+            "DROP TABLE contest_ai_analyses",
+            "ALTER TABLE contests DROP COLUMN archived_at_utc",
+            "ALTER TABLE contests DROP COLUMN facts_completed_at_utc",
+            "ALTER TABLE contests DROP COLUMN facts_status",
+            "ALTER TABLE contest_problems DROP COLUMN final_contest_result",
+            "ALTER TABLE contest_problems DROP COLUMN upsolve_decision",
+            "DROP INDEX contest_correction_events_by_contest",
+            "DROP TABLE contest_correction_events",
             "ALTER TABLE problem_learning_states RENAME TO problem_learning_states_current",
             LEGACY_M5_LEARNING_STATES_SQL,
             "INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) SELECT problem_id, learning_status, learning_status_since_utc FROM problem_learning_states_current",
@@ -7578,7 +8105,7 @@ mod tests {
             "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
             "DROP TABLE today_plan_entries_current",
             "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
-            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15)",
+            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20)",
             "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -7601,14 +8128,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 15 }
+            &StartupGateStatus::Ready { schema_version: 20 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 15);
+        assert_eq!(ledger_count, 20);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -7636,7 +8163,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 15 }
+            &StartupGateStatus::Ready { schema_version: 20 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -7671,7 +8198,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-15-"));
+            .starts_with("schema-10-to-20-"));
     }
 
     #[tokio::test]
@@ -9957,7 +10484,7 @@ mod tests {
             .await
             .expect("contest detail");
         assert_eq!(contest_detail.problems.len(), 2);
-        assert_eq!(contest_detail.problems[0].problem.index(), "A");
+        assert_eq!(contest_detail.problems[0].problem.problem.index(), "A");
         let ready = runtime
             .lightweight_problem_detail(
                 &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
@@ -9988,6 +10515,420 @@ mod tests {
             .await
             .expect("pending problem detail");
         assert_eq!(pending.statement, StatementReadState::Pending);
+    }
+
+    #[tokio::test]
+    async fn completed_contest_snapshot_keeps_result_separate_from_live_learning_status() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let mut draft = contest_draft();
+        draft.starts_at_utc = Some("2026-08-10T12:00:00Z".to_owned());
+        runtime
+            .persist_manifest(&draft)
+            .await
+            .expect("persist manifest");
+        for index in ["A", "B"] {
+            runtime
+                .persist_first_snapshot(&snapshot(index, "source", "<p>safe</p>"))
+                .await
+                .expect("persist snapshot");
+        }
+        let contest = draft.contest.clone();
+        let facts = vec![
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                    .expect("A"),
+                final_contest_result: ContestFinalResult::WrongAnswer,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+            },
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B")
+                    .expect("B"),
+                final_contest_result: ContestFinalResult::Unknown,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Undecided,
+            },
+        ];
+        let completed = runtime
+            .complete_contest_facts(&contest, &facts)
+            .await
+            .expect("complete facts");
+        assert_eq!(completed.facts_status, ContestFactsStatus::Completed);
+        assert_eq!(completed.contest_date.as_deref(), Some("2026-08-10"));
+        assert_eq!(
+            completed.problems[0].final_contest_result,
+            Some(ContestFinalResult::WrongAnswer)
+        );
+        assert_eq!(
+            completed.problems[0].upsolve_decision,
+            acm_os_application::ContestUpsolveDecision::Planned
+        );
+        let pool = runtime._pool.as_ref().expect("pool");
+        sqlx::query("UPDATE problem_learning_states SET learning_status = 'long_term_review' WHERE problem_id = (SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'A')")
+            .execute(pool).await.expect("change live learning status");
+        let refreshed = runtime
+            .contest_detail(&contest)
+            .await
+            .expect("refreshed detail");
+        assert_eq!(
+            refreshed.problems[0].final_contest_result,
+            Some(ContestFinalResult::WrongAnswer)
+        );
+        assert_eq!(
+            refreshed.problems[0].live_learning_status,
+            acm_os_domain::LearningStatus::LongTermReview
+        );
+        assert_eq!(
+            runtime.complete_contest_facts(&contest, &facts).await,
+            Err(ContestFactsError::AlreadyCompleted)
+        );
+    }
+
+    #[tokio::test]
+    async fn contest_correction_updates_current_fact_and_appends_history_atomically() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let mut draft = contest_draft();
+        draft.starts_at_utc = Some("2026-08-10T12:00:00Z".to_owned());
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        for index in ["A", "B"] {
+            runtime
+                .persist_first_snapshot(&snapshot(index, "source", "<p>safe</p>"))
+                .await
+                .expect("snapshot");
+        }
+        let contest = draft.contest.clone();
+        runtime
+            .complete_contest_facts(
+                &contest,
+                &[
+                    ContestProblemFactInput {
+                        problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                            contest.clone(),
+                            "A",
+                        )
+                        .expect("A"),
+                        final_contest_result: ContestFinalResult::WrongAnswer,
+                        upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+                    },
+                    ContestProblemFactInput {
+                        problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                            contest.clone(),
+                            "B",
+                        )
+                        .expect("B"),
+                        final_contest_result: ContestFinalResult::Unknown,
+                        upsolve_decision: acm_os_application::ContestUpsolveDecision::Undecided,
+                    },
+                ],
+            )
+            .await
+            .expect("facts");
+        let corrected = runtime
+            .correct_contest_problem_facts(
+                &contest,
+                &ContestProblemCorrectionInput {
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                        .expect("A"),
+                    final_contest_result: ContestFinalResult::Accepted,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                },
+            )
+            .await
+            .expect("correction");
+        assert_eq!(
+            corrected.problems[0].final_contest_result,
+            Some(ContestFinalResult::Accepted)
+        );
+        assert_eq!(corrected.corrections.len(), 2);
+        assert_eq!(corrected.corrections[0].old_value, "wrong_answer");
+        assert_eq!(
+            runtime
+                .correct_contest_problem_facts(
+                    &contest,
+                    &ContestProblemCorrectionInput {
+                        problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                            contest.clone(),
+                            "A"
+                        )
+                        .expect("A"),
+                        final_contest_result: ContestFinalResult::Accepted,
+                        upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                    }
+                )
+                .await,
+            Err(ContestCorrectionError::NoChange)
+        );
+    }
+
+    #[tokio::test]
+    async fn contest_ai_analysis_preview_save_and_replace_never_change_contest_facts() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        let contest = draft.contest.clone();
+        let before = runtime.contest_detail(&contest).await.expect("before");
+        let partial = runtime
+            .preview_contest_ai_analysis("# Contest AI Analysis\n\n## Overall\nDraft")
+            .await
+            .expect("preview");
+        assert_eq!(partial.parse_status, ContestAiParseStatus::Partial);
+        assert!(runtime
+            .contest_detail(&contest)
+            .await
+            .expect("preview remains read only")
+            .ai_analysis
+            .is_none());
+        let saved = runtime
+            .save_contest_ai_analysis(&contest, &partial)
+            .await
+            .expect("save");
+        assert_eq!(
+            saved.ai_analysis.as_ref().expect("analysis").raw_text,
+            partial.raw_text
+        );
+        assert_eq!(saved.facts_status, before.facts_status);
+        assert_eq!(saved.problems, before.problems);
+        let failed = runtime
+            .preview_contest_ai_analysis("unstructured raw text")
+            .await
+            .expect("failed preview");
+        let replaced = runtime
+            .save_contest_ai_analysis(&contest, &failed)
+            .await
+            .expect("replace");
+        assert_eq!(
+            replaced
+                .ai_analysis
+                .as_ref()
+                .expect("replacement")
+                .parse_status,
+            ContestAiParseStatus::Failed
+        );
+        assert_eq!(
+            replaced.ai_analysis.as_ref().expect("replacement").raw_text,
+            "unstructured raw text"
+        );
+        assert_eq!(replaced.problems, before.problems);
+    }
+
+    #[tokio::test]
+    async fn manual_contest_uses_first_snapshot_contract_and_never_overwrites_statement() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let first_problem = acm_os_application::ManualProblemDraft {
+            index: "A".to_owned(),
+            title: "Manual A".to_owned(),
+            source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+            statement_text: "first <unsafe>".to_owned(),
+        };
+        let first = acm_os_application::build_manual_codeforces_contest(
+            1979,
+            "Manual Round",
+            "https://codeforces.com/contest/1979",
+            Some("2026-08-13T00:00:00Z".to_owned()),
+            std::slice::from_ref(&first_problem),
+        )
+        .expect("first plan");
+        let persisted = runtime
+            .persist_manifest(&first.manifest)
+            .await
+            .expect("manifest");
+        assert_eq!(persisted.status, ContestImportStatus::Incomplete);
+        runtime
+            .persist_first_snapshot(&first.snapshots[0])
+            .await
+            .expect("first snapshot");
+        let mut second_problem = first_problem;
+        second_problem.statement_text = "replacement must not win".to_owned();
+        let second = acm_os_application::build_manual_codeforces_contest(
+            1979,
+            "Manual Round",
+            "https://codeforces.com/contest/1979",
+            Some("2026-08-13T00:00:00Z".to_owned()),
+            &[second_problem],
+        )
+        .expect("second plan");
+        assert!(runtime
+            .persist_manifest(&second.manifest)
+            .await
+            .expect("same manifest")
+            .missing_snapshot_problems
+            .is_empty());
+        assert!(second.snapshots_for_missing(&[]).is_empty());
+        let detail = runtime
+            .lightweight_problem_detail(&second.manifest.slots[0].problem)
+            .await
+            .expect("detail");
+        match detail.statement {
+            StatementReadState::Ready { sanitized_html } => {
+                assert!(sanitized_html.contains("first &lt;unsafe&gt;"));
+                assert!(!sanitized_html.contains("replacement"));
+            }
+            _ => panic!("manual snapshot missing"),
+        }
+    }
+
+    #[tokio::test]
+    async fn contest_archive_and_delete_preserve_historical_problem_and_clean_only_pure_lightweight(
+    ) {
+        let (directory, runtime, _vault, _problems, personal_problem) =
+            personal_note_fixture().await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let archived = runtime
+            .set_contest_archived(&contest, true)
+            .await
+            .expect("archive");
+        assert!(archived.archived);
+        assert!(
+            runtime
+                .set_contest_archived(&contest, false)
+                .await
+                .expect("restore")
+                .archived
+                == false
+        );
+        let pool = runtime._pool.as_ref().expect("pool");
+        sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) SELECT id, 'raw', 'failed', '{}' FROM contests WHERE external_contest_key = 1979").execute(pool).await.expect("analysis");
+        let pure_problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
+        let preview = runtime
+            .preview_delete_contest(&contest)
+            .await
+            .expect("preview");
+        assert_eq!(preview.relationship_count, 2);
+        assert_eq!(preview.cleanup_problem_count, 1);
+        assert_eq!(preview.preserved_problem_count, 1);
+        let deleted = runtime.delete_contest(&contest).await.expect("delete");
+        assert_eq!(deleted, preview);
+        assert_eq!(
+            runtime.contest_detail(&contest).await,
+            Err(ContestReadError::NotFound)
+        );
+        assert!(runtime
+            .lightweight_problem_detail(&personal_problem)
+            .await
+            .is_ok());
+        assert_eq!(
+            runtime.lightweight_problem_detail(&pure_problem).await,
+            Err(ContestReadError::NotFound)
+        );
+        let analysis_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contest_ai_analyses")
+            .fetch_one(pool)
+            .await
+            .expect("analysis count");
+        assert_eq!(analysis_count, 0);
+        drop(runtime);
+        drop(directory);
+    }
+
+    #[tokio::test]
+    async fn contest_delete_preserves_lightweight_problem_with_a_knowledge_link() {
+        let (directory, runtime, _vault, _problems, _personal_problem) =
+            personal_note_fixture().await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let linked_problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'B'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query("INSERT INTO knowledge_link_index (source_kind, source_id, target_ref, resolution) VALUES ('problem', ?1, 'dp', 'unresolved')")
+            .bind(problem_id.to_string())
+            .execute(pool)
+            .await
+            .expect("knowledge link");
+
+        let preview = runtime
+            .preview_delete_contest(&contest)
+            .await
+            .expect("preview");
+        assert_eq!(preview.cleanup_problem_count, 0);
+        assert_eq!(preview.preserved_problem_count, 2);
+        runtime.delete_contest(&contest).await.expect("delete");
+        assert!(runtime
+            .lightweight_problem_detail(&linked_problem)
+            .await
+            .is_ok());
+        let link_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_link_index WHERE source_kind = 'problem' AND source_id = ?1",
+        )
+        .bind(problem_id.to_string())
+        .fetch_one(pool)
+        .await
+        .expect("link count");
+        assert_eq!(link_count, 1);
+        drop(runtime);
+        drop(directory);
+    }
+
+    #[tokio::test]
+    async fn contest_delete_preserves_lightweight_problem_with_correction_history() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let mut draft = contest_draft();
+        draft.starts_at_utc = Some("2026-08-10T12:00:00Z".to_owned());
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        for index in ["A", "B"] {
+            runtime
+                .persist_first_snapshot(&snapshot(index, "source", "<p>safe</p>"))
+                .await
+                .expect("snapshot");
+        }
+        let contest = draft.contest.clone();
+        let corrected_problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("A");
+        runtime
+            .complete_contest_facts(
+                &contest,
+                &[
+                    ContestProblemFactInput {
+                        problem: corrected_problem.clone(),
+                        final_contest_result: ContestFinalResult::Accepted,
+                        upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                    },
+                    ContestProblemFactInput {
+                        problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                            contest.clone(),
+                            "B",
+                        )
+                        .expect("B"),
+                        final_contest_result: ContestFinalResult::Unknown,
+                        upsolve_decision: acm_os_application::ContestUpsolveDecision::Undecided,
+                    },
+                ],
+            )
+            .await
+            .expect("facts");
+        runtime
+            .correct_contest_problem_facts(
+                &contest,
+                &ContestProblemCorrectionInput {
+                    problem: corrected_problem.clone(),
+                    final_contest_result: ContestFinalResult::WrongAnswer,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+                },
+            )
+            .await
+            .expect("correction");
+
+        let preview = runtime
+            .preview_delete_contest(&contest)
+            .await
+            .expect("preview");
+        assert_eq!(preview.relationship_count, 2);
+        assert_eq!(preview.cleanup_problem_count, 1);
+        assert_eq!(preview.preserved_problem_count, 1);
+        runtime.delete_contest(&contest).await.expect("delete");
+        assert!(runtime
+            .lightweight_problem_detail(&corrected_problem)
+            .await
+            .is_ok());
+        drop(runtime);
+        drop(directory);
     }
 
     #[tokio::test]
@@ -10280,7 +11221,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 16), \
+                        CHECK (schema_generation < 21), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -10415,7 +11356,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 15 }
+            &StartupGateStatus::Ready { schema_version: 20 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -10449,7 +11390,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 15 }
+            &StartupGateStatus::Ready { schema_version: 20 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -10829,7 +11770,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 15 }
+            &StartupGateStatus::Ready { schema_version: 20 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

@@ -294,6 +294,50 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 }
 .list-link span { color: var(--ink-muted); }
 .list-link:hover strong, .list-link:focus-visible strong { text-decoration: underline; }
+.contest-management h2, .contest-facts h2, .contest-analysis h2 { margin-top: 0; }
+.contest-management > .action-row { align-items: center; }
+.contest-facts-list {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+  padding: 0;
+  list-style: none;
+}
+.contest-facts-list li {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 190px) minmax(150px, 190px) auto;
+  align-items: end;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+.contest-facts-list .list-link { align-self: center; }
+.contest-facts-list label, .contest-analysis label { display: grid; gap: 6px; font-weight: 650; }
+.contest-facts-list select {
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+}
+.contest-analysis textarea {
+  display: block;
+  width: 100%;
+  min-height: 180px;
+  max-height: 420px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: inherit;
+}
+.contest-analysis .action-row { margin-top: 12px; }
+.contest-analysis pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .statement-view { max-width: 960px; overflow: auto; }
 .statement-view img { max-width: 100%; height: auto; }
 .statement-view table { width: 100%; border-collapse: collapse; }
@@ -381,4 +425,11 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
   .detail-list { grid-template-columns: 1fr; gap: 5px; }
   .today-toolbar form, .today-suggestions li { align-items: stretch; flex-direction: column; }
   .detail-list dd { margin-bottom: 10px; }
+  .contest-facts-list li { grid-template-columns: 1fr; align-items: stretch; }
+  .contest-facts-list li > button { justify-self: start; }
+}
+
+@media (min-width: 761px) and (max-width: 1120px) {
+  .contest-facts-list li { grid-template-columns: minmax(200px, 1fr) minmax(150px, 190px); }
+  .contest-facts-list li > button { justify-self: start; }
 }

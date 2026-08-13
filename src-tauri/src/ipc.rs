@@ -23,6 +23,7 @@ pub struct ContestShelfItemDto {
     import_status: &'static str,
     problem_count: u32,
     missing_snapshot_count: u32,
+    archived: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -37,8 +38,95 @@ pub struct ContestDetailDto {
     contest_id: u64,
     title: String,
     source_url: String,
+    contest_date: Option<String>,
     import_status: &'static str,
-    problems: Vec<LightweightProblemItemDto>,
+    facts_status: &'static str,
+    problems: Vec<ContestProblemDetailItemDto>,
+    corrections: Vec<ContestCorrectionEventDto>,
+    ai_analysis: Option<ContestAiAnalysisDto>,
+    archived: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestDeletePreviewDto {
+    contest_title: String,
+    relationship_count: u32,
+    cleanup_problem_count: u32,
+    preserved_problem_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestAiAnalysisDto {
+    raw_text: String,
+    parse_status: &'static str,
+    parsed_projection_json: String,
+    updated_at_utc: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestCorrectionEventDto {
+    correction_id: String,
+    problem_index: String,
+    field: &'static str,
+    old_value: String,
+    new_value: String,
+    corrected_at_utc: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestProblemDetailItemDto {
+    contest_id: u64,
+    index: String,
+    title: String,
+    rating: Option<u32>,
+    has_statement_snapshot: bool,
+    identity_type: &'static str,
+    final_contest_result: Option<&'static str>,
+    upsolve_decision: &'static str,
+    live_learning_status: &'static str,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteContestFactsInput {
+    contest_id: u64,
+    problems: Vec<ContestProblemFactInputDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestProblemFactInputDto {
+    index: String,
+    final_contest_result: String,
+    upsolve_decision: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectContestProblemFactsInput {
+    contest_id: u64,
+    index: String,
+    final_contest_result: String,
+    upsolve_decision: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestAiAnalysisInput {
+    contest_id: u64,
+    raw_text: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestAiAnalysisPreviewDto {
+    raw_text: String,
+    parse_status: &'static str,
+    parsed_projection_json: String,
 }
 
 #[derive(serde::Serialize)]
@@ -678,6 +766,25 @@ pub struct ContestImportInput {
     contest_url: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualContestInput {
+    contest_id: u64,
+    title: String,
+    source_url: String,
+    starts_at_utc: Option<String>,
+    problems: Vec<ManualProblemInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualProblemInput {
+    index: String,
+    title: String,
+    source_url: String,
+    statement_text: String,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContestImportRunDto {
@@ -724,6 +831,68 @@ pub async fn import_codeforces_contest(
             .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
             .collect(),
     })
+}
+
+#[tauri::command]
+pub async fn import_manual_codeforces_contest(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ManualContestInput,
+) -> Result<ContestImportRunDto, &'static str> {
+    use acm_os_application::ContestImportPort;
+    let problems = input
+        .problems
+        .into_iter()
+        .map(|item| acm_os_application::ManualProblemDraft {
+            index: item.index,
+            title: item.title,
+            source_url: item.source_url,
+            statement_text: item.statement_text,
+        })
+        .collect::<Vec<_>>();
+    let plan = acm_os_application::build_manual_codeforces_contest(
+        input.contest_id,
+        &input.title,
+        &input.source_url,
+        input.starts_at_utc,
+        &problems,
+    )
+    .map_err(manual_contest_error_code)?;
+    let mut persisted =
+        database
+            .persist_manifest(&plan.manifest)
+            .await
+            .map_err(|error| match error {
+                acm_os_application::ContestImportPersistenceError::ManifestConflict => {
+                    "manual_manifest_conflict"
+                }
+                _ => "manual_import_unavailable",
+            })?;
+    for snapshot in plan.snapshots_for_missing(&persisted.missing_snapshot_problems) {
+        persisted = database
+            .persist_first_snapshot(snapshot)
+            .await
+            .map_err(|_| "manual_import_unavailable")?;
+    }
+    Ok(ContestImportRunDto {
+        import_status: match persisted.status {
+            acm_os_application::ContestImportStatus::Complete => "complete",
+            acm_os_application::ContestImportStatus::Incomplete => "incomplete",
+        },
+        missing_snapshot_problems: persisted
+            .missing_snapshot_problems
+            .iter()
+            .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
+            .collect(),
+        failed_snapshot_problems: Vec::new(),
+    })
+}
+
+fn manual_contest_error_code(error: acm_os_application::ManualContestError) -> &'static str {
+    match error {
+        acm_os_application::ManualContestError::InvalidIdentity => "manual_invalid_identity",
+        acm_os_application::ManualContestError::InvalidInput => "manual_invalid_input",
+        acm_os_application::ManualContestError::DuplicateProblem => "manual_duplicate_problem",
+    }
 }
 
 fn contest_import_error_code(error: acm_os_application::ContestImportSourceError) -> &'static str {
@@ -828,6 +997,136 @@ pub async fn contest_detail(
         .await
         .map(contest_detail_dto)
         .map_err(contest_read_error_code)
+}
+
+#[tauri::command]
+pub async fn complete_contest_facts(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CompleteContestFactsInput,
+) -> Result<ContestDetailDto, &'static str> {
+    use acm_os_application::ContestFactsPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    let facts = input
+        .problems
+        .into_iter()
+        .map(|item| {
+            Ok(acm_os_application::ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), item.index)
+                    .map_err(|_| "invalid_problem_identity")?,
+                final_contest_result: parse_contest_final_result_dto(&item.final_contest_result)?,
+                upsolve_decision: parse_contest_upsolve_decision_dto(&item.upsolve_decision)?,
+            })
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    database
+        .complete_contest_facts(&contest, &facts)
+        .await
+        .map(contest_detail_dto)
+        .map_err(contest_facts_error_code)
+}
+
+#[tauri::command]
+pub async fn correct_contest_problem_facts(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CorrectContestProblemFactsInput,
+) -> Result<ContestDetailDto, &'static str> {
+    use acm_os_application::ContestCorrectionPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    let correction = acm_os_application::ContestProblemCorrectionInput {
+        problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), input.index)
+            .map_err(|_| "invalid_problem_identity")?,
+        final_contest_result: parse_contest_final_result_dto(&input.final_contest_result)?,
+        upsolve_decision: parse_contest_upsolve_decision_dto(&input.upsolve_decision)?,
+    };
+    database
+        .correct_contest_problem_facts(&contest, &correction)
+        .await
+        .map(contest_detail_dto)
+        .map_err(contest_correction_error_code)
+}
+
+#[tauri::command]
+pub async fn set_contest_archived(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestArchiveInput,
+) -> Result<ContestDetailDto, &'static str> {
+    use acm_os_application::ContestManagementPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    database
+        .set_contest_archived(&contest, input.archived)
+        .await
+        .map(contest_detail_dto)
+        .map_err(contest_management_error_code)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestArchiveInput {
+    contest_id: u64,
+    archived: bool,
+}
+
+#[tauri::command]
+pub async fn preview_delete_contest(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestDetailInput,
+) -> Result<ContestDeletePreviewDto, &'static str> {
+    use acm_os_application::ContestManagementPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    database
+        .preview_delete_contest(&contest)
+        .await
+        .map(contest_delete_preview_dto)
+        .map_err(contest_management_error_code)
+}
+
+#[tauri::command]
+pub async fn delete_contest(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestDetailInput,
+) -> Result<ContestDeletePreviewDto, &'static str> {
+    use acm_os_application::ContestManagementPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    database
+        .delete_contest(&contest)
+        .await
+        .map(contest_delete_preview_dto)
+        .map_err(contest_management_error_code)
+}
+
+#[tauri::command]
+pub async fn preview_contest_ai_analysis(
+    input: ContestAiAnalysisInput,
+) -> Result<ContestAiAnalysisPreviewDto, &'static str> {
+    let _ = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    acm_os_application::preview_contest_ai_analysis(&input.raw_text)
+        .map(contest_ai_analysis_preview_dto)
+        .map_err(contest_ai_analysis_error_code)
+}
+
+#[tauri::command]
+pub async fn save_contest_ai_analysis(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestAiAnalysisInput,
+) -> Result<ContestDetailDto, &'static str> {
+    use acm_os_application::ContestAiAnalysisPort;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    let preview = database
+        .preview_contest_ai_analysis(&input.raw_text)
+        .await
+        .map_err(contest_ai_analysis_error_code)?;
+    database
+        .save_contest_ai_analysis(&contest, &preview)
+        .await
+        .map(contest_detail_dto)
+        .map_err(contest_ai_analysis_error_code)
 }
 
 #[tauri::command]
@@ -1675,6 +1974,7 @@ fn contest_shelf_item_dto(item: acm_os_application::ContestShelfItem) -> Contest
         },
         problem_count: item.problem_count,
         missing_snapshot_count: item.missing_snapshot_count,
+        archived: item.archived,
     }
 }
 
@@ -1683,15 +1983,183 @@ fn contest_detail_dto(item: acm_os_application::ContestDetail) -> ContestDetailD
         contest_id: item.contest.contest_id(),
         title: item.title,
         source_url: item.source_url,
+        contest_date: item.contest_date,
         import_status: match item.import_status {
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
             acm_os_application::ContestImportStatus::Complete => "complete",
         },
+        facts_status: match item.facts_status {
+            acm_os_application::ContestFactsStatus::Pending => "pending",
+            acm_os_application::ContestFactsStatus::Completed => "completed",
+        },
         problems: item
             .problems
             .into_iter()
-            .map(lightweight_problem_item_dto)
+            .map(contest_problem_detail_item_dto)
             .collect(),
+        corrections: item
+            .corrections
+            .into_iter()
+            .map(|event| ContestCorrectionEventDto {
+                correction_id: event.correction_id,
+                problem_index: event.problem_index,
+                field: match event.field {
+                    acm_os_application::ContestCorrectionField::FinalContestResult => {
+                        "finalContestResult"
+                    }
+                    acm_os_application::ContestCorrectionField::UpsolveDecision => {
+                        "upsolveDecision"
+                    }
+                },
+                old_value: event.old_value,
+                new_value: event.new_value,
+                corrected_at_utc: event.corrected_at_utc,
+            })
+            .collect(),
+        ai_analysis: item.ai_analysis.map(|analysis| ContestAiAnalysisDto {
+            raw_text: analysis.raw_text,
+            parse_status: contest_ai_parse_status_dto(analysis.parse_status),
+            parsed_projection_json: analysis.parsed_projection_json,
+            updated_at_utc: analysis.updated_at_utc,
+        }),
+        archived: item.archived,
+    }
+}
+
+fn contest_delete_preview_dto(
+    item: acm_os_application::ContestDeletePreview,
+) -> ContestDeletePreviewDto {
+    ContestDeletePreviewDto {
+        contest_title: item.contest_title,
+        relationship_count: item.relationship_count,
+        cleanup_problem_count: item.cleanup_problem_count,
+        preserved_problem_count: item.preserved_problem_count,
+    }
+}
+fn contest_management_error_code(
+    error: acm_os_application::ContestManagementError,
+) -> &'static str {
+    match error {
+        acm_os_application::ContestManagementError::Unavailable => "contest_management_unavailable",
+        acm_os_application::ContestManagementError::NotFound => "contest_not_found",
+    }
+}
+
+fn contest_ai_analysis_preview_dto(
+    item: acm_os_application::ContestAiAnalysisPreview,
+) -> ContestAiAnalysisPreviewDto {
+    ContestAiAnalysisPreviewDto {
+        raw_text: item.raw_text,
+        parse_status: contest_ai_parse_status_dto(item.parse_status),
+        parsed_projection_json: item.parsed_projection_json,
+    }
+}
+
+fn contest_ai_parse_status_dto(status: acm_os_application::ContestAiParseStatus) -> &'static str {
+    match status {
+        acm_os_application::ContestAiParseStatus::Complete => "complete",
+        acm_os_application::ContestAiParseStatus::Partial => "partial",
+        acm_os_application::ContestAiParseStatus::Failed => "failed",
+    }
+}
+
+fn contest_ai_analysis_error_code(
+    error: acm_os_application::ContestAiAnalysisError,
+) -> &'static str {
+    match error {
+        acm_os_application::ContestAiAnalysisError::Unavailable => {
+            "contest_ai_analysis_unavailable"
+        }
+        acm_os_application::ContestAiAnalysisError::NotFound => "contest_not_found",
+        acm_os_application::ContestAiAnalysisError::Empty => "contest_ai_analysis_empty",
+        acm_os_application::ContestAiAnalysisError::Invalid => "contest_ai_analysis_invalid",
+    }
+}
+
+fn contest_problem_detail_item_dto(
+    item: acm_os_application::ContestProblemDetailItem,
+) -> ContestProblemDetailItemDto {
+    ContestProblemDetailItemDto {
+        contest_id: item.problem.problem.contest().contest_id(),
+        index: item.problem.problem.index().to_owned(),
+        title: item.problem.title,
+        rating: item.problem.rating,
+        has_statement_snapshot: item.problem.has_statement_snapshot,
+        identity_type: problem_identity_type_dto(item.problem.identity_type),
+        final_contest_result: item.final_contest_result.map(contest_final_result_dto),
+        upsolve_decision: contest_upsolve_decision_dto(item.upsolve_decision),
+        live_learning_status: learning_status_dto(item.live_learning_status),
+    }
+}
+
+fn parse_contest_final_result_dto(
+    value: &str,
+) -> Result<acm_os_application::ContestFinalResult, &'static str> {
+    match value {
+        "unknown" => Ok(acm_os_application::ContestFinalResult::Unknown),
+        "notAttempted" => Ok(acm_os_application::ContestFinalResult::NotAttempted),
+        "accepted" => Ok(acm_os_application::ContestFinalResult::Accepted),
+        "wrongAnswer" => Ok(acm_os_application::ContestFinalResult::WrongAnswer),
+        "timeLimitExceeded" => Ok(acm_os_application::ContestFinalResult::TimeLimitExceeded),
+        "memoryLimitExceeded" => Ok(acm_os_application::ContestFinalResult::MemoryLimitExceeded),
+        "runtimeError" => Ok(acm_os_application::ContestFinalResult::RuntimeError),
+        "compilationError" => Ok(acm_os_application::ContestFinalResult::CompilationError),
+        "otherFailed" => Ok(acm_os_application::ContestFinalResult::OtherFailed),
+        _ => Err("invalid_contest_result"),
+    }
+}
+fn contest_final_result_dto(value: acm_os_application::ContestFinalResult) -> &'static str {
+    match value {
+        acm_os_application::ContestFinalResult::Unknown => "unknown",
+        acm_os_application::ContestFinalResult::NotAttempted => "notAttempted",
+        acm_os_application::ContestFinalResult::Accepted => "accepted",
+        acm_os_application::ContestFinalResult::WrongAnswer => "wrongAnswer",
+        acm_os_application::ContestFinalResult::TimeLimitExceeded => "timeLimitExceeded",
+        acm_os_application::ContestFinalResult::MemoryLimitExceeded => "memoryLimitExceeded",
+        acm_os_application::ContestFinalResult::RuntimeError => "runtimeError",
+        acm_os_application::ContestFinalResult::CompilationError => "compilationError",
+        acm_os_application::ContestFinalResult::OtherFailed => "otherFailed",
+    }
+}
+fn parse_contest_upsolve_decision_dto(
+    value: &str,
+) -> Result<acm_os_application::ContestUpsolveDecision, &'static str> {
+    match value {
+        "planned" => Ok(acm_os_application::ContestUpsolveDecision::Planned),
+        "notPlanned" => Ok(acm_os_application::ContestUpsolveDecision::NotPlanned),
+        "undecided" => Ok(acm_os_application::ContestUpsolveDecision::Undecided),
+        _ => Err("invalid_contest_upsolve_decision"),
+    }
+}
+fn contest_upsolve_decision_dto(value: acm_os_application::ContestUpsolveDecision) -> &'static str {
+    match value {
+        acm_os_application::ContestUpsolveDecision::Planned => "planned",
+        acm_os_application::ContestUpsolveDecision::NotPlanned => "notPlanned",
+        acm_os_application::ContestUpsolveDecision::Undecided => "undecided",
+    }
+}
+fn contest_facts_error_code(error: acm_os_application::ContestFactsError) -> &'static str {
+    match error {
+        acm_os_application::ContestFactsError::Unavailable => "contest_facts_unavailable",
+        acm_os_application::ContestFactsError::NotFound => "contest_not_found",
+        acm_os_application::ContestFactsError::ImportIncomplete => "contest_import_incomplete",
+        acm_os_application::ContestFactsError::ContestDateMissing => "contest_date_missing",
+        acm_os_application::ContestFactsError::ProblemSetMismatch => "contest_problem_set_mismatch",
+        acm_os_application::ContestFactsError::AlreadyCompleted => {
+            "contest_facts_already_completed"
+        }
+    }
+}
+fn contest_correction_error_code(
+    error: acm_os_application::ContestCorrectionError,
+) -> &'static str {
+    match error {
+        acm_os_application::ContestCorrectionError::Unavailable => "contest_correction_unavailable",
+        acm_os_application::ContestCorrectionError::NotFound => "contest_problem_not_found",
+        acm_os_application::ContestCorrectionError::FactsNotCompleted => {
+            "contest_facts_not_completed"
+        }
+        acm_os_application::ContestCorrectionError::NoChange => "contest_correction_no_change",
     }
 }
 

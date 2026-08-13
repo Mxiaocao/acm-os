@@ -25,6 +25,90 @@ const readyFoundation = {
   state: "ready",
   foundation: { status: "ready", core: "acm-os" },
 };
+
+test("Contest AI analysis previews before explicit save and preserves failed raw text", { concurrency: false }, async () => {
+  const calls = [];
+  let detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "preview_contest_ai_analysis") { calls.push(command); return { rawText: args.input.rawText, parseStatus: "failed", parsedProjectionJson: "{}" }; }
+    if (command === "save_contest_ai_analysis") { calls.push(command); detail = { ...detail, aiAnalysis: { rawText: args.input.rawText, parseStatus: "failed", parsedProjectionJson: "{}", updatedAtUtc: "2026-08-13T00:00:00Z" } }; return detail; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const textarea = view.document.querySelector('textarea[aria-label="Contest AI analysis raw text"]');
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "unstructured raw"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await settle();
+    const buttons = [...view.document.querySelectorAll("button")];
+    const preview = buttons.find((button) => button.textContent === "Parse preview");
+    let save = buttons.find((button) => button.textContent === "Save analysis");
+    assert.equal(save.disabled, true);
+    await act(async () => preview.click()); await settle();
+    assert.deepEqual(calls, ["preview_contest_ai_analysis"]);
+    assert.match(view.document.body.textContent, /Preview: FAILED/);
+    save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save analysis");
+    assert.equal(save.disabled, false);
+    await act(async () => save.click()); await settle();
+    assert.deepEqual(calls, ["preview_contest_ai_analysis", "save_contest_ai_analysis"]);
+    assert.match(view.document.body.textContent, /Saved raw analysis \(FAILED\)/);
+  } finally { await view.cleanup(); }
+});
+
+test("Manual Contest submits explicit identities and statement text through one command", { concurrency: false }, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_shelf") return [];
+    if (command === "import_manual_codeforces_contest") { calls.push(args.input); return { importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const details = view.document.querySelector("details"); details.open = true;
+    const inputs = [...details.querySelectorAll("input")];
+    const values = ["1979", "Manual Round", "2026-08-13", "A", "Manual A", "https://codeforces.com/contest/1979/problem/A"];
+    await act(async () => { inputs.forEach((input, index) => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, values[index]); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); }); const textarea = details.querySelector("textarea"); Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "x < y"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await act(async () => details.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].contestId, 1979);
+    assert.equal(calls[0].problems[0].index, "A");
+    assert.equal(calls[0].problems[0].statementText, "x < y");
+    assert.match(view.document.body.textContent, /canonical import and statement snapshot contract/);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest delete requires consequence preview and archive stays reversible", { concurrency: false }, async () => {
+  const calls = [];
+  let detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null, archived: false };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "set_contest_archived") { calls.push(command); detail = { ...detail, archived: args.input.archived }; return detail; }
+    if (command === "preview_delete_contest") { calls.push(command); return { contestTitle: "Contest", relationshipCount: 2, cleanupProblemCount: 1, preservedProblemCount: 1 }; }
+    if (command === "delete_contest") { calls.push(command); return { contestTitle: "Contest", relationshipCount: 2, cleanupProblemCount: 1, preservedProblemCount: 1 }; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const archive = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Archive Contest");
+    await act(async () => archive.click()); await settle();
+    assert.deepEqual(calls, ["set_contest_archived"]);
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Restore Contest"));
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Preview delete");
+    assert.equal(calls.includes("delete_contest"), false);
+    await act(async () => preview.click()); await settle();
+    assert.match(view.document.body.textContent, /Preserve 1 global Problems/);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Delete Contest");
+    await act(async () => confirm.click()); await settle();
+    assert.deepEqual(calls, ["set_contest_archived", "preview_delete_contest", "delete_contest"]);
+    assert.equal(view.window.location.pathname, "/contests");
+  } finally { await view.cleanup(); }
+});
 const lightweightLifecycle = {
   learningStatus: "unstarted",
   learningStatusSinceUtc: "2026-08-11T00:00:00.000Z",
@@ -288,6 +372,74 @@ test("Contest import exposes a specific Chinese error instead of swallowing the 
   } finally {
     await view.cleanup();
   }
+});
+
+test("Contest facts snapshot preserves contest result beside live learning status", { concurrency: false }, async () => {
+  let completed = false;
+  let submitted;
+  const detail = () => ({
+    contestId: 1979, title: "Codeforces Round", sourceUrl: "https://codeforces.com/contest/1979",
+    contestDate: "2026-08-10", importStatus: "complete", factsStatus: completed ? "completed" : "pending", corrections: [],
+    problems: [{ contestId: 1979, index: "A", title: "Problem A", rating: 800, hasStatementSnapshot: true, identityType: "personal", finalContestResult: completed ? "wrongAnswer" : null, upsolveDecision: completed ? "planned" : "undecided", liveLearningStatus: "longTermReview" }],
+  });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail();
+    if (command === "complete_contest_facts") { submitted = args.input; completed = true; return detail(); }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /当前学习状态：长期复习/);
+    const [resultSelect, upsolveSelect] = view.document.querySelectorAll("select");
+    const form = view.document.querySelector("form");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(resultSelect, "wrongAnswer");
+      resultSelect.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(upsolveSelect, "planned");
+      upsolveSelect.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    assert.equal(submitted.problems[0].finalContestResult, "wrongAnswer");
+    assert.equal(submitted.problems[0].upsolveDecision, "planned");
+    assert.match(view.document.body.textContent, /赛后整理已完成/);
+    assert.equal([...view.document.querySelectorAll("select")].every((select) => !select.disabled), true);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent.includes("瀹屾垚璧涘悗鏁寸悊")), false);
+    assert.match(view.document.body.textContent, /当前学习状态：长期复习/);
+  } finally { await view.cleanup(); }
+});
+
+test("Completed Contest correction updates facts and keeps an explicit history event", { concurrency: false }, async () => {
+  let corrected = false;
+  const detail = () => ({ contestId: 1979, title: "Round", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed",
+    problems: [{ contestId: 1979, index: "A", title: "A", rating: 800, hasStatementSnapshot: true, identityType: "personal", finalContestResult: corrected ? "accepted" : "wrongAnswer", upsolveDecision: corrected ? "notPlanned" : "planned", liveLearningStatus: "longTermReview" }],
+    corrections: corrected ? [{ correctionId: "c1", problemIndex: "A", field: "finalContestResult", oldValue: "wrong_answer", newValue: "accepted", correctedAtUtc: "2026-08-13T00:00:00Z" }] : [] });
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail();
+    if (command === "correct_contest_problem_facts") { corrected = true; return detail(); }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const [resultSelect] = view.document.querySelectorAll("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(resultSelect, "accepted"); resultSelect.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    const correct = view.document.querySelector(
+      'form[aria-label="Contest facts snapshot"] button.secondary-action',
+    );
+    assert.ok(correct);
+    await act(async () => correct.dispatchEvent(new view.window.MouseEvent("click", { bubbles: true })));
+    await settle();
+    assert.match(view.document.body.textContent, /纠错已保存/);
+    assert.match(view.document.body.textContent, /Correction history/);
+    assert.match(view.document.body.textContent, /wrong_answer → accepted/);
+    assert.match(view.document.body.textContent, /当前学习状态：长期复习/);
+  } finally { await view.cleanup(); }
 });
 
 test("Problem detail creates a Personal Markdown through business IPC and re-queries Core", {

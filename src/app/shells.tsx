@@ -39,6 +39,14 @@ import {
   getReviewHistory,
   getStatementAssets,
   importCodeforcesContest,
+  importManualCodeforcesContest,
+  completeContestFacts,
+  correctContestProblemFacts,
+  previewContestAiAnalysis,
+  saveContestAiAnalysis,
+  setContestArchived,
+  previewDeleteContest,
+  deleteContest,
   openPersonalNoteInObsidian,
   revealReviewHelp,
   startOrResumeReview,
@@ -48,6 +56,10 @@ import {
   type CompleteReviewInputDto,
   type CompletedReviewAttemptDto,
   type ContestDetailDto,
+  type ContestAiAnalysisPreviewDto,
+  type ContestDeletePreviewDto,
+  type ContestFinalResultDto,
+  type ContestUpsolveDecisionDto,
   type ContestShelfItemDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
@@ -972,6 +984,11 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
   const [contestUrl, setContestUrl] = useState("");
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [manualContestId, setManualContestId] = useState("");
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualDate, setManualDate] = useState("");
+  const [manualProblems, setManualProblems] = useState([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
+  const [showArchived, setShowArchived] = useState(false);
   useEffect(() => { getContestShelf().then(setItems).catch(() => setFailed(true)); }, []);
   const submitImport = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -996,6 +1013,17 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
       setImportMessage(contestImportErrorMessage(error));
     } finally { setImporting(false); }
   };
+  const submitManual = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (importing) return; setImporting(true); setImportMessage(null);
+    try {
+      const contestId = Number(manualContestId);
+      await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setImportMessage("Manual Contest saved through the canonical import and statement snapshot contract.");
+      setItems(await getContestShelf());
+    } catch (error) { const code = String(error); setImportMessage(code.includes("manual_manifest_conflict") ? "This Contest identity already has a different manifest. Existing data was not changed." : "Manual Contest was not saved. Check the explicit identities and all required fields."); }
+    finally { setImporting(false); }
+  };
+  const updateManualProblem = (position: number, patch: Partial<(typeof manualProblems)[number]>) => setManualProblems((current) => current.map((item, index) => index === position ? { ...item, ...patch } : item));
   return (
     <>
       <PageHeader eyebrow="M1 · 比赛导入" headingRef={headingRef} title="比赛" />
@@ -1006,9 +1034,10 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
         <button className="primary-action" disabled={importing} type="submit">{importing ? "导入中…" : "导入比赛"}</button>
         {importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}
       </form>
+      <details className="content-panel"><summary>Manual Contest fallback</summary><form onSubmit={submitManual}><p>Use an explicit Codeforces contest ID and canonical problem indexes. Weak similarity is never used to merge Problems.</p><label>Contest ID<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>Contest title<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>Contest date<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset key={position}><legend>Problem {position + 1}</legend><label>Index<input aria-label={`Manual problem ${position + 1} index`} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>Title<input aria-label={`Manual problem ${position + 1} title`} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>Source URL<input aria-label={`Manual problem ${position + 1} source URL`} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>Statement text<textarea aria-label={`Manual problem ${position + 1} statement`} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">Add problem</button><button className="primary-action" disabled={importing} type="submit">Save Manual Contest</button></div></form></details>
       {failed ? <section className="empty-state" role="alert"><h2>比赛数据暂不可用</h2><p>无法读取本地系统事实，任何导入状态都没有改变。</p></section> : null}
       {items?.length === 0 ? <section className="empty-state"><h2>尚未导入比赛</h2><p>请输入完整的 Codeforces 比赛网址，例如 https://codeforces.com/contest/1979。</p></section> : null}
-      {items?.length ? <section className="content-panel" aria-label="已导入比赛"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} 道题 · {item.importStatus === "complete" ? "导入完整" : `${item.missingSnapshotCount} 道题面缺失`}</span></button>{item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">重试缺失题面</button> : null}</li>)}</ul></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="已导入比赛"><button className="secondary-action" onClick={() => setShowArchived((current) => !current)} type="button">{showArchived ? "View active Contests" : "View archived Contests"}</button><ul className="detail-list">{items.filter((item) => item.archived === showArchived).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} 道题 · {item.archived ? "Archived" : item.importStatus === "complete" ? "导入完整" : `${item.missingSnapshotCount} 道题面缺失`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">重试缺失题面</button> : null}</li>)}</ul></section> : null}
       {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>正在读取本地比赛…</p></section> : null}
     </>
   );
@@ -1048,15 +1077,64 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [detail, setDetail] = useState<ContestDetailDto | null>(null);
   const [failed, setFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [facts, setFacts] = useState<Record<string, ContestFinalResultDto>>({});
+  const [upsolveDecisions, setUpsolveDecisions] = useState<Record<string, ContestUpsolveDecisionDto>>({});
+  const [correctingIndex, setCorrectingIndex] = useState<string | null>(null);
+  const [analysisRaw, setAnalysisRaw] = useState("");
+  const [analysisPreview, setAnalysisPreview] = useState<ContestAiAnalysisPreviewDto | null>(null);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [deletePreview, setDeletePreview] = useState<ContestDeletePreviewDto | null>(null);
+  const [managing, setManaging] = useState(false);
   useEffect(() => { getContestDetail(contestId).then(setDetail).catch(() => setFailed(true)); }, [contestId]);
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Contest is unavailable</h1><p>The local contest detail could not be read.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading contest</h1></section>;
+  const submitFacts = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setSaving(true); setMessage(null);
+    try {
+      const next = await completeContestFacts(contestId, detail.problems.map((problem) => ({ index: problem.index, finalContestResult: facts[problem.index] ?? "unknown", upsolveDecision: upsolveDecisions[problem.index] ?? "undecided" })));
+      setDetail(next); setMessage("赛后事实快照已完成。比赛结果将保留为历史事实。");
+    } catch (error) { setMessage(contestFactsErrorMessage(error)); }
+    finally { setSaving(false); }
+  };
+  const correctFacts = async (problem: ContestDetailDto["problems"][number]) => {
+    const finalContestResult = facts[problem.index] ?? problem.finalContestResult ?? "unknown";
+    const upsolveDecision = upsolveDecisions[problem.index] ?? problem.upsolveDecision;
+    setCorrectingIndex(problem.index); setMessage(null);
+    try { setDetail(await correctContestProblemFacts(contestId, problem.index, finalContestResult, upsolveDecision)); setMessage("纠错已保存，并保留 Correction Event。"); }
+    catch (error) { setMessage(contestCorrectionErrorMessage(error)); }
+    finally { setCorrectingIndex(null); }
+  };
+  const previewAnalysis = async () => {
+    setAnalysisBusy(true); setMessage(null);
+    try { setAnalysisPreview(await previewContestAiAnalysis(contestId, analysisRaw)); }
+    catch { setMessage("Analysis preview failed. Raw text was not saved."); }
+    finally { setAnalysisBusy(false); }
+  };
+  const saveAnalysis = async () => {
+    setAnalysisBusy(true); setMessage(null);
+    try { const next = await saveContestAiAnalysis(contestId, analysisRaw); setDetail(next); setAnalysisPreview(null); setMessage("Post-contest analysis saved without changing contest facts or learning state."); }
+    catch { setMessage("Analysis was not saved. Existing analysis and contest facts are unchanged."); }
+    finally { setAnalysisBusy(false); }
+  };
+  const toggleArchive = async () => { setManaging(true); setMessage(null); try { setDetail(await setContestArchived(contestId, !detail.archived)); } catch { setMessage("Contest archive state was not changed."); } finally { setManaging(false); } };
+  const loadDeletePreview = async () => { setManaging(true); setMessage(null); try { setDeletePreview(await previewDeleteContest(contestId)); } catch { setMessage("Delete preview is unavailable; nothing was deleted."); } finally { setManaging(false); } };
+  const confirmDelete = async () => { setManaging(true); setMessage(null); try { await deleteContest(contestId); navigate("/contests", { replace: true }); } catch { setMessage("Contest was not deleted. Existing facts and Problems are unchanged."); setManaging(false); } };
   return <>
-    <PageHeader eyebrow="M1 · Contest detail" headingRef={headingRef} title={detail.title} />
-    <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.importStatus}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original contest</a></section>
-    <section className="content-panel" aria-label="Contest problems"><h2>Problems</h2><ul className="detail-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {problem.title}</strong><span>{problem.rating ? `Rating ${problem.rating} · ` : ""}{problem.hasStatementSnapshot ? "statement captured" : "statement pending"}</span></button></li>)}</ul></section>
+    <PageHeader eyebrow="M7 · Contest facts" headingRef={headingRef} title={detail.title} />
+    <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original contest</a></section>
+    <section className="content-panel contest-management" aria-label="Contest management"><h2>Contest management</h2><div className="action-row"><button className="secondary-action" disabled={managing} onClick={() => void toggleArchive()} type="button">{detail.archived ? "Restore Contest" : "Archive Contest"}</button>{deletePreview ? null : <button className="danger-action" disabled={managing} onClick={() => void loadDeletePreview()} type="button">Preview delete</button>}</div>{deletePreview ? <div role="alert"><p>Delete {deletePreview.contestTitle}: remove the Contest, its Facts, Analysis, and {deletePreview.relationshipCount} Contest-Problem relationships.</p><p>Preserve {deletePreview.preservedProblemCount} global Problems with identity or history. Clean up {deletePreview.cleanupProblemCount} unreferenced history-free Lightweight Problems.</p><div className="action-row"><button className="secondary-action" onClick={() => setDeletePreview(null)} type="button">Cancel</button><button className="danger-action" disabled={managing} onClick={() => void confirmDelete()} type="button">Delete Contest</button></div></div> : null}</section>
+    <form className="content-panel contest-facts" onSubmit={submitFacts} aria-label="Contest facts snapshot"><h2>Problems</h2><p>比赛结果与赛后补题决策是历史快照；当前学习状态始终实时读取，不会覆盖它们。</p><ul className="contest-facts-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {problem.title}</strong><span>当前学习状态：{learningStatusLabel(problem.liveLearningStatus)}</span></button><label>比赛最终结果<select disabled={saving || correctingIndex === problem.index} value={facts[problem.index] ?? problem.finalContestResult ?? "unknown"} onChange={(event) => { const value = event.currentTarget.value as ContestFinalResultDto; setFacts((current) => ({ ...current, [problem.index]: value })); }}>{contestResultOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>比赛结束时补题决策<select disabled={saving || correctingIndex === problem.index} value={upsolveDecisions[problem.index] ?? problem.upsolveDecision} onChange={(event) => { const value = event.currentTarget.value as ContestUpsolveDecisionDto; setUpsolveDecisions((current) => ({ ...current, [problem.index]: value })); }}>{contestUpsolveOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{detail.factsStatus === "completed" ? <button className="secondary-action" disabled={correctingIndex === problem.index} onClick={() => void correctFacts(problem)} type="button">{correctingIndex === problem.index ? "保存纠错中…" : "保存纠错"}</button> : null}</li>)}</ul>{detail.factsStatus === "pending" ? <button className="primary-action" disabled={saving || detail.importStatus !== "complete" || detail.contestDate === null} type="submit">{saving ? "保存中…" : "完成赛后整理"}</button> : null}{message ? <p aria-live="polite" className="system-caption">{message}</p> : null}</form>
+    {detail.corrections.length ? <section className="content-panel"><h2>Correction history</h2><ul className="detail-list">{detail.corrections.map((event) => <li key={event.correctionId}><strong>{event.problemIndex} · {event.field === "finalContestResult" ? "比赛结果" : "补题决策"}</strong><span>{event.oldValue} → {event.newValue} · {event.correctedAtUtc}</span></li>)}</ul></section> : null}
+    <section className="content-panel contest-analysis" aria-label="Post-contest AI analysis"><h2>Post-Contest AI Analysis</h2><p>Paste the fixed external AI template. Preview never saves; Save/Replace stores raw text and parsed sections only.</p><label>Raw text<textarea aria-label="Contest AI analysis raw text" rows={8} value={analysisRaw} onInput={(event) => { setAnalysisRaw(event.currentTarget.value); setAnalysisPreview(null); }} /></label><div className="action-row"><button className="secondary-action" disabled={analysisBusy || analysisRaw.trim() === ""} onClick={() => void previewAnalysis()} type="button">Parse preview</button><button className="primary-action" disabled={analysisBusy || !analysisPreview} onClick={() => void saveAnalysis()} type="button">{detail.aiAnalysis ? "Replace analysis" : "Save analysis"}</button></div>{analysisPreview ? <div aria-live="polite"><strong>Preview: {analysisPreview.parseStatus.toUpperCase()}</strong><pre>{analysisPreview.parsedProjectionJson}</pre></div> : null}{detail.aiAnalysis ? <details><summary>Saved raw analysis ({detail.aiAnalysis.parseStatus.toUpperCase()})</summary><pre>{detail.aiAnalysis.rawText}</pre><p>Updated {detail.aiAnalysis.updatedAtUtc}</p></details> : <p>No saved analysis.</p>}</section>
   </>;
 }
+
+const contestResultOptions: Array<[ContestFinalResultDto, string]> = [["unknown", "未知 / 未记录"], ["notAttempted", "未尝试"], ["accepted", "AC"], ["wrongAnswer", "WA"], ["timeLimitExceeded", "TLE"], ["memoryLimitExceeded", "MLE"], ["runtimeError", "RE"], ["compilationError", "CE"], ["otherFailed", "其他未通过"]];
+const contestUpsolveOptions: Array<[ContestUpsolveDecisionDto, string]> = [["undecided", "未决定"], ["planned", "计划补"], ["notPlanned", "暂不补"]];
+function contestFactsErrorMessage(error: unknown): string { const code = String(error); if (code.includes("contest_import_incomplete")) return "全部题面导入完整后才能完成赛后整理。"; if (code.includes("contest_date_missing")) return "比赛日期缺失，暂时不能形成正式快照。"; if (code.includes("contest_problem_set_mismatch")) return "题目列表发生变化，请重新加载后再试。"; if (code.includes("contest_facts_already_completed")) return "赛后事实快照已经完成；后续修改必须通过纠错事件。"; return "赛后事实未保存，本地已有历史保持不变。"; }
+function contestCorrectionErrorMessage(error: unknown): string { const code = String(error); if (code.includes("contest_correction_no_change")) return "没有需要保存的事实变化。"; if (code.includes("contest_facts_not_completed")) return "完成赛后整理后才能记录纠错。"; return "纠错未保存，现有比赛事实保持不变。"; }
 
 function ProblemDetail({ contestId, index, navigate }: { contestId: number; index: string; navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
