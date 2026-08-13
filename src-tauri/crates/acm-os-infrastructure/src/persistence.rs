@@ -7,25 +7,25 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acm_os_application::{
-    ContestImportDraft, ContestImportPersistenceError, ContestImportPort, ContestImportStatus,
-    ContestDetail, ContestReadError, ContestReadPort, ContestShelfItem, LightweightProblemDetail,
-    LightweightProblemItem, LocalStatementAsset, PersistedContestImport, StatementReadState,
-    ExtraProblemLinkTarget, PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteError,
-    PersonalNotePatchError, PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError,
-    PersonalNoteReadPort, PersonalNoteReadState, ProblemMarkdownProjection,
-    PersonalNoteDeletionError, PersonalNoteDeletionPort, PreparedPersonalNoteDeletion,
-    ProblemIdentityType, ActiveReviewCycle, ProblemLifecycleError, ProblemLifecyclePort,
-    CompletedReviewAttempt, ProblemLifecycleState, RevealedReviewHelp, ReviewAttempt,
-    ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus, ReviewCompletionContext,
-    ReviewCompletionInput, ReviewFailureReason, ReviewFocusView, ReviewHelpDrawerView,
-    ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, ProblemMasteryProjection, SubmissionFact,
-    CreatedPersonalNoteFile, StartupGateStatus, StartupRecoveryReason,
-    StatementSnapshotDraft, WorkspaceConfiguration,
+    ActiveReviewCycle, CompletedReviewAttempt, ContestDetail, ContestImportDraft,
+    ContestImportPersistenceError, ContestImportPort, ContestImportStatus, ContestReadError,
+    ContestReadPort, ContestShelfItem, CreatedPersonalNoteFile, ExtraProblemLinkTarget,
+    LightweightProblemDetail, LightweightProblemItem, LocalStatementAsset, PersistedContestImport,
+    PersonalNoteBinding, PersonalNoteCreationContext, PersonalNoteDeletionError,
+    PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError, PersonalNotePatchPort,
+    PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState,
+    PreparedPersonalNoteDeletion, ProblemIdentityType, ProblemLifecycleError, ProblemLifecyclePort,
+    ProblemLifecycleState, ProblemMarkdownProjection, ProblemMasteryProjection, RevealedReviewHelp,
+    ReviewAttempt, ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus,
+    ReviewCompletionContext, ReviewCompletionInput, ReviewFailureReason, ReviewFocusView,
+    ReviewHelpDrawerView, ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, StartupGateStatus,
+    StartupRecoveryReason, StatementReadState, StatementSnapshotDraft, SubmissionFact,
+    TodayEntryOrigin, TodayEntryStatus, TodayGenerationCandidate, TodayGenerationContext,
+    TodayReplanPreview, TodaySnapshot, TodaySnapshotEntry, TodaySnapshotError, TodaySnapshotPort,
+    WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule, WorkspaceConfiguration,
     WorkspaceConfigurationPort, WorkspacePathResolutionError, WorkspacePersistenceError,
 };
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
 use crate::file_binding::{
@@ -72,7 +72,13 @@ impl DatabaseRuntime {
     async fn review_help_sources(
         &self,
         attempt_id: &str,
-    ) -> Result<Vec<(acm_os_domain::ReviewHelpLevel, Option<crate::markdown::ReviewHelpContent>)>, ReviewAttemptError> {
+    ) -> Result<
+        Vec<(
+            acm_os_domain::ReviewHelpLevel,
+            Option<crate::markdown::ReviewHelpContent>,
+        )>,
+        ReviewAttemptError,
+    > {
         let row: Option<(i64, String)> = sqlx::query_as(
             "SELECT p.external_contest_key, p.external_problem_key \
              FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
@@ -187,8 +193,7 @@ impl DatabaseRuntime {
         .await
         {
             Ok(result) => result,
-            Err(sqlx::Error::Database(database_error))
-                if database_error.is_unique_violation() => {
+            Err(sqlx::Error::Database(database_error)) if database_error.is_unique_violation() => {
                 return Ok(false);
             }
             Err(_) => return Err(PersonalNoteReadError::PersistenceUnavailable),
@@ -405,7 +410,9 @@ impl ProblemLifecyclePort for DatabaseRuntime {
     }
 }
 
-fn parse_learning_status(value: &str) -> Result<acm_os_domain::LearningStatus, ProblemLifecycleError> {
+fn parse_learning_status(
+    value: &str,
+) -> Result<acm_os_domain::LearningStatus, ProblemLifecycleError> {
     match value {
         "unstarted" => Ok(acm_os_domain::LearningStatus::Unstarted),
         "upsolve_pending" => Ok(acm_os_domain::LearningStatus::UpsolvePending),
@@ -428,24 +435,1244 @@ fn learning_status_value(value: acm_os_domain::LearningStatus) -> &'static str {
     }
 }
 
+impl WeeklyAcmBudgetPort for DatabaseRuntime {
+    async fn load_weekly_acm_budget(&self) -> Result<WeeklyAcmBudgetSchedule, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT weekday, budget_minutes FROM weekly_acm_budgets ORDER BY weekday",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let mut values = [None; 7];
+        for (weekday, minutes) in rows {
+            let index =
+                usize::try_from(weekday - 1).map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            let slot = values
+                .get_mut(index)
+                .ok_or(TodaySnapshotError::IntegrityViolation)?;
+            if slot.is_some() {
+                return Err(TodaySnapshotError::IntegrityViolation);
+            }
+            *slot =
+                Some(u32::try_from(minutes).map_err(|_| TodaySnapshotError::IntegrityViolation)?);
+        }
+        Ok(WeeklyAcmBudgetSchedule {
+            monday: values[0],
+            tuesday: values[1],
+            wednesday: values[2],
+            thursday: values[3],
+            friday: values[4],
+            saturday: values[5],
+            sunday: values[6],
+        })
+    }
+
+    async fn save_weekly_acm_budget(
+        &self,
+        schedule: &WeeklyAcmBudgetSchedule,
+    ) -> Result<WeeklyAcmBudgetSchedule, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        sqlx::query("DELETE FROM weekly_acm_budgets")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        for (weekday, minutes) in [
+            schedule.monday,
+            schedule.tuesday,
+            schedule.wednesday,
+            schedule.thursday,
+            schedule.friday,
+            schedule.saturday,
+            schedule.sunday,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(minutes) = minutes {
+                sqlx::query(
+                    "INSERT INTO weekly_acm_budgets (weekday, budget_minutes) VALUES (?1, ?2)",
+                )
+                .bind(
+                    i64::try_from(weekday + 1)
+                        .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                )
+                .bind(i64::from(minutes))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        Ok(schedule.clone())
+    }
+}
+
+impl TodaySnapshotPort for DatabaseRuntime {
+    async fn load_today_snapshot(
+        &self,
+        local_date: acm_os_domain::LocalDate,
+    ) -> Result<Option<TodaySnapshot>, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let plan: Option<(String, String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, local_date, budget_minutes, planned_minutes, over_budget_minutes, \
+                    review_only_streak \
+             FROM today_plans WHERE local_date = ?1",
+        )
+        .bind(local_date.to_iso_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let Some((plan_id, stored_date, budget, planned, over_budget, streak)) = plan else {
+            return Ok(None);
+        };
+        let rows: Vec<(
+            String,
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT e.id, CAST(e.problem_id AS TEXT), p.external_contest_key, \
+                    p.external_problem_key, p.title, e.review_attempt_id, e.lane, e.reason, \
+                    e.planning_cost_minutes, e.position, e.entry_origin, e.entry_status \
+             FROM today_plan_entries e JOIN problems p ON p.id = e.problem_id \
+             WHERE e.today_plan_id = ?1 ORDER BY e.position",
+        )
+        .bind(&plan_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let entries = rows
+            .into_iter()
+            .map(
+                |(
+                    entry_id,
+                    problem_id,
+                    contest_id,
+                    problem_index,
+                    problem_title,
+                    review_attempt_id,
+                    lane,
+                    reason,
+                    cost,
+                    position,
+                    origin,
+                    status,
+                )| {
+                    Ok(TodaySnapshotEntry {
+                        entry_id,
+                        problem_id,
+                        contest_id: u64::try_from(contest_id)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        problem_index,
+                        problem_title,
+                        review_attempt_id,
+                        lane: parse_today_lane(&lane)?,
+                        reason: parse_today_reason(&reason)?,
+                        planning_cost_minutes: u32::try_from(cost)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        position: u32::try_from(position)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        origin: parse_today_entry_origin(&origin)?,
+                        status: parse_today_entry_status(&status)?,
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, TodaySnapshotError>>()?;
+        let stored_date = acm_os_domain::LocalDate::parse_iso(&stored_date)
+            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+        if stored_date != local_date
+            || entries
+                .iter()
+                .enumerate()
+                .any(|(position, entry)| entry.position as usize != position)
+        {
+            return Err(TodaySnapshotError::IntegrityViolation);
+        }
+        Ok(Some(TodaySnapshot {
+            plan_id,
+            local_date: stored_date,
+            budget_minutes: u32::try_from(budget)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+            planned_minutes: u32::try_from(planned)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+            over_budget_minutes: u32::try_from(over_budget)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+            review_only_streak: u8::try_from(streak)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+            entries,
+        }))
+    }
+
+    async fn load_today_generation_context(
+        &self,
+        local_date: acm_os_domain::LocalDate,
+    ) -> Result<TodayGenerationContext, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let rows: Vec<(String, i64, String, String, String, String, i64, Option<String>, Option<String>, Option<String>, String)> =
+            sqlx::query_as(
+                "SELECT CAST(p.id AS TEXT), p.external_contest_key, p.external_problem_key, p.title, pls.learning_status, \
+                        substr(pls.learning_status_since_utc, 1, 10), pls.pinned_priority, \
+                        rc.next_due_local_date, ra.id, ra.scheduled_due_local_date, fb.binding_state \
+                 FROM problems p \
+                 JOIN problem_learning_states pls ON pls.problem_id = p.id \
+                 JOIN file_bindings fb ON fb.problem_id = p.id \
+                 LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+                 LEFT JOIN review_attempts ra ON ra.problem_id = p.id AND ra.attempt_status = 'in_progress' \
+                 WHERE p.identity_type = 'personal' ORDER BY p.id",
+            )
+            .fetch_all(pool)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let candidates = rows
+            .into_iter()
+            .map(
+                |(
+                    problem_id,
+                    contest_id,
+                    problem_index,
+                    problem_title,
+                    status,
+                    since,
+                    pinned,
+                    due,
+                    attempt_id,
+                    attempt_due,
+                    binding_state,
+                )| {
+                    Ok(TodayGenerationCandidate {
+                        problem_id,
+                        contest_id: u64::try_from(contest_id)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        problem_index,
+                        problem_title,
+                        learning_status: parse_learning_status(&status)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        learning_status_since: acm_os_domain::LocalDate::parse_iso(&since)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        pinned: match pinned {
+                            0 => false,
+                            1 => true,
+                            _ => return Err(TodaySnapshotError::IntegrityViolation),
+                        },
+                        active_review_due: due
+                            .map(|value| acm_os_domain::LocalDate::parse_iso(&value))
+                            .transpose()
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        in_progress_review_attempt_id: attempt_id,
+                        in_progress_review_due: attempt_due
+                            .map(|value| acm_os_domain::LocalDate::parse_iso(&value))
+                            .transpose()
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        available_for_today: binding_state == "linked",
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, TodaySnapshotError>>()?;
+        let prior_streak: Option<i64> = sqlx::query_scalar(
+            "SELECT review_only_streak FROM today_plans WHERE local_date < ?1 \
+             ORDER BY local_date DESC LIMIT 1",
+        )
+        .bind(local_date.to_iso_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        Ok(TodayGenerationContext {
+            candidates,
+            prior_review_only_streak: u8::try_from(prior_streak.unwrap_or(0))
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+        })
+    }
+
+    async fn reconcile_today_snapshot(
+        &self,
+        local_date: acm_os_domain::LocalDate,
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let learning_entries: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT p.external_contest_key, p.external_problem_key \
+             FROM today_plans tp \
+             JOIN today_plan_entries e ON e.today_plan_id = tp.id \
+             JOIN problems p ON p.id = e.problem_id \
+             WHERE tp.local_date = ?1 AND e.entry_status != 'completed' \
+               AND e.reason IN ('continue_learning', 'relearn', 'upsolve') \
+             ORDER BY e.position",
+        )
+        .bind(local_date.to_iso_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        for (contest_id, index) in learning_entries {
+            let contest = acm_os_domain::CodeforcesContestIdentity::new(
+                u64::try_from(contest_id).map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+            )
+            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            match self.read_personal_note_projection(&problem).await {
+                Ok(PersonalNoteReadState::Ready { .. })
+                | Ok(PersonalNoteReadState::LocationAnomaly { .. })
+                | Ok(PersonalNoteReadState::VaultUnavailable { .. })
+                | Err(PersonalNoteReadError::BindingUnavailable)
+                | Err(PersonalNoteReadError::FileReadFailed)
+                | Err(PersonalNoteReadError::InvalidUtf8) => {}
+                Err(PersonalNoteReadError::ProblemNotFound)
+                | Err(PersonalNoteReadError::NotPersonal) => {
+                    return Err(TodaySnapshotError::IntegrityViolation);
+                }
+                Err(PersonalNoteReadError::PersistenceUnavailable) => {
+                    return Err(TodaySnapshotError::PersistenceUnavailable);
+                }
+            }
+        }
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let plan_id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM today_plans WHERE local_date = ?1")
+                .bind(local_date.to_iso_string())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let plan_id = plan_id.ok_or(TodaySnapshotError::IntegrityViolation)?;
+
+        sqlx::query(
+            "DELETE FROM today_plan_entries \
+             WHERE today_plan_id = ?1 AND entry_origin = 'auto' \
+               AND reason = 'continue_review' AND reconciliation_added = 1 \
+               AND EXISTS (SELECT 1 FROM review_attempts ra \
+                   WHERE ra.id = today_plan_entries.review_attempt_id \
+                     AND ra.attempt_status = 'void')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        sqlx::query(
+            "UPDATE today_plan_entries SET lane = 'review', \
+                    reason = CASE pls.learning_status \
+                        WHEN 'waiting_cold_start' THEN 'due_first_cold_start' \
+                        WHEN 'long_term_review' THEN 'due_long_term_review' END, \
+                    entry_status = 'not_started', review_attempt_id = NULL \
+             FROM today_plans tp, problem_learning_states pls, review_cycles rc, review_attempts ra \
+             WHERE today_plan_entries.today_plan_id = ?1 \
+               AND tp.id = today_plan_entries.today_plan_id \
+               AND pls.problem_id = today_plan_entries.problem_id \
+               AND rc.problem_id = today_plan_entries.problem_id AND rc.cycle_status = 'active' \
+               AND ra.id = today_plan_entries.review_attempt_id AND ra.attempt_status = 'void' \
+               AND today_plan_entries.reason = 'continue_review' \
+               AND today_plan_entries.reconciliation_added = 0 \
+               AND rc.next_due_local_date <= tp.local_date",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        sqlx::query(
+            "DELETE FROM today_plan_entries \
+             WHERE today_plan_id = ?1 AND reason = 'continue_review' \
+               AND reconciliation_added = 0 \
+               AND EXISTS (SELECT 1 FROM review_attempts ra \
+                   WHERE ra.id = today_plan_entries.review_attempt_id \
+                     AND ra.attempt_status = 'void')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let remaining_entry_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM today_plan_entries WHERE today_plan_id = ?1 ORDER BY position, id",
+        )
+        .bind(&plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        for (position, entry_id) in remaining_entry_ids.iter().enumerate() {
+            sqlx::query("UPDATE today_plan_entries SET position = ?2 WHERE id = ?1")
+                .bind(entry_id)
+                .bind(
+                    1_000_000_i64
+                        + i64::try_from(position)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
+        for (position, entry_id) in remaining_entry_ids.iter().enumerate() {
+            sqlx::query("UPDATE today_plan_entries SET position = ?2 WHERE id = ?1")
+                .bind(entry_id)
+                .bind(i64::try_from(position).map_err(|_| TodaySnapshotError::IntegrityViolation)?)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
+        sqlx::query(
+            "UPDATE today_plan_entries SET entry_status = 'not_started', review_attempt_id = NULL \
+             WHERE today_plan_id = ?1 AND review_attempt_id IS NOT NULL \
+               AND EXISTS (SELECT 1 FROM review_attempts ra \
+                   WHERE ra.id = today_plan_entries.review_attempt_id \
+                     AND ra.attempt_status = 'void')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+
+        sqlx::query(
+            "UPDATE today_plan_entries SET entry_status = 'completed' \
+             WHERE today_plan_id = ?1 AND review_attempt_id IS NOT NULL \
+               AND entry_status != 'completed' \
+               AND EXISTS (SELECT 1 FROM review_attempts ra \
+                   WHERE ra.id = today_plan_entries.review_attempt_id \
+                     AND ra.attempt_status = 'completed')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+
+        sqlx::query(
+            "UPDATE today_plan_entries SET entry_status = 'in_progress', \
+                    review_attempt_id = (SELECT ra.id FROM review_attempts ra \
+                        WHERE ra.problem_id = today_plan_entries.problem_id \
+                          AND ra.attempt_status = 'in_progress') \
+             WHERE today_plan_id = ?1 AND entry_status = 'not_started' \
+               AND EXISTS (SELECT 1 FROM review_attempts ra \
+                   WHERE ra.problem_id = today_plan_entries.problem_id \
+                     AND ra.attempt_status = 'in_progress')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+
+        sqlx::query(
+            "UPDATE today_plan_entries SET entry_status = 'unavailable' \
+             WHERE today_plan_id = ?1 AND entry_status != 'completed' \
+               AND reason IN ('continue_learning', 'relearn', 'upsolve') \
+               AND EXISTS (SELECT 1 FROM file_bindings fb \
+                   WHERE fb.problem_id = today_plan_entries.problem_id \
+                     AND fb.binding_state IN ('external_source_unavailable', 'location_anomaly'))",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        sqlx::query(
+            "UPDATE today_plan_entries SET entry_status = \
+                 CASE reason WHEN 'continue_learning' THEN 'in_progress' ELSE 'not_started' END \
+             WHERE today_plan_id = ?1 AND entry_status = 'unavailable' \
+               AND reason IN ('continue_learning', 'relearn', 'upsolve') \
+               AND EXISTS (SELECT 1 FROM file_bindings fb \
+                   WHERE fb.problem_id = today_plan_entries.problem_id \
+                     AND fb.binding_state = 'linked')",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+
+        let next_position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM today_plan_entries \
+             WHERE today_plan_id = ?1",
+        )
+        .bind(&plan_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let started: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT ra.problem_id, ra.id FROM review_attempts ra \
+             JOIN problems p ON p.id = ra.problem_id \
+             WHERE ra.attempt_status = 'in_progress' AND p.identity_type = 'personal' \
+               AND NOT EXISTS (SELECT 1 FROM today_plan_entries e \
+                   WHERE e.today_plan_id = ?1 AND e.problem_id = ra.problem_id) \
+             ORDER BY ra.started_at_utc, ra.problem_id",
+        )
+        .bind(&plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        for (offset, (problem_id, attempt_id)) in started.into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO today_plan_entries \
+                    (id, today_plan_id, problem_id, review_attempt_id, lane, reason, \
+                     planning_cost_minutes, position, entry_origin, entry_status, reconciliation_added) \
+                 VALUES (?1, ?2, ?3, ?4, 'carry_in', 'continue_review', 30, ?5, 'auto', 'in_progress', 1)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&plan_id)
+            .bind(problem_id)
+            .bind(attempt_id)
+            .bind(next_position + i64::try_from(offset).map_err(|_| TodaySnapshotError::IntegrityViolation)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
+        sqlx::query(
+            "UPDATE today_plans SET \
+                 planned_minutes = COALESCE((SELECT SUM(planning_cost_minutes) \
+                     FROM today_plan_entries e WHERE e.today_plan_id = today_plans.id), 0), \
+                 over_budget_minutes = MAX(0, COALESCE((SELECT SUM(planning_cost_minutes) \
+                     FROM today_plan_entries e WHERE e.today_plan_id = today_plans.id), 0) - budget_minutes) \
+             WHERE id = ?1",
+        )
+        .bind(&plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.load_today_snapshot(local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+
+    async fn reorder_today_snapshot(
+        &self,
+        plan_id: &str,
+        ordered_entry_ids: &[String],
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date: Option<String> =
+            sqlx::query_scalar("SELECT local_date FROM today_plans WHERE id = ?1")
+                .bind(plan_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date = local_date.ok_or(TodaySnapshotError::InvalidReorder)?;
+        let stored_entry_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM today_plan_entries WHERE today_plan_id = ?1 ORDER BY position",
+        )
+        .bind(plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if stored_entry_ids.len() != ordered_entry_ids.len() {
+            return Err(TodaySnapshotError::InvalidReorder);
+        }
+        let stored = stored_entry_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let requested = ordered_entry_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        if stored.len() != stored_entry_ids.len()
+            || requested.len() != ordered_entry_ids.len()
+            || stored != requested
+        {
+            return Err(TodaySnapshotError::InvalidReorder);
+        }
+
+        for (position, entry_id) in ordered_entry_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE today_plan_entries SET position = ?2 \
+                 WHERE id = ?1 AND today_plan_id = ?3",
+            )
+            .bind(entry_id)
+            .bind(
+                1_000_000_i64
+                    + i64::try_from(position).map_err(|_| TodaySnapshotError::InvalidReorder)?,
+            )
+            .bind(plan_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
+        for (position, entry_id) in ordered_entry_ids.iter().enumerate() {
+            let updated = sqlx::query(
+                "UPDATE today_plan_entries SET position = ?2 \
+                 WHERE id = ?1 AND today_plan_id = ?3",
+            )
+            .bind(entry_id)
+            .bind(i64::try_from(position).map_err(|_| TodaySnapshotError::InvalidReorder)?)
+            .bind(plan_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(TodaySnapshotError::InvalidReorder);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date = acm_os_domain::LocalDate::parse_iso(&local_date)
+            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+        self.load_today_snapshot(local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+
+    async fn complete_today_entry(
+        &self,
+        plan_id: &str,
+        entry_id: &str,
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date: Option<String> =
+            sqlx::query_scalar("SELECT local_date FROM today_plans WHERE id = ?1")
+                .bind(plan_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date = local_date.ok_or(TodaySnapshotError::InvalidTodayDone)?;
+        let entry: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT lane, reason, entry_status, review_attempt_id FROM today_plan_entries \
+             WHERE id = ?1 AND today_plan_id = ?2",
+        )
+        .bind(entry_id)
+        .bind(plan_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let (lane, reason, status, review_attempt_id) =
+            entry.ok_or(TodaySnapshotError::InvalidTodayDone)?;
+        let legal_learning_entry = matches!(
+            (lane.as_str(), reason.as_str()),
+            ("carry_in", "continue_learning") | ("study", "relearn" | "upsolve")
+        );
+        if !legal_learning_entry
+            || review_attempt_id.is_some()
+            || status == "unavailable"
+            || !matches!(status.as_str(), "not_started" | "in_progress" | "completed")
+        {
+            return Err(TodaySnapshotError::InvalidTodayDone);
+        }
+        if status != "completed" {
+            let updated = sqlx::query(
+                "UPDATE today_plan_entries SET entry_status = 'completed' \
+                 WHERE id = ?1 AND today_plan_id = ?2 AND entry_status = ?3",
+            )
+            .bind(entry_id)
+            .bind(plan_id)
+            .bind(&status)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(TodaySnapshotError::InvalidTodayDone);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date = acm_os_domain::LocalDate::parse_iso(&local_date)
+            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+        self.load_today_snapshot(local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+
+    async fn add_manual_today_entry(
+        &self,
+        expected_snapshot: &TodaySnapshot,
+        suggestion: &acm_os_application::TodayExtraSuggestion,
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let problem_id = suggestion
+            .problem_id
+            .parse::<i64>()
+            .map_err(|_| TodaySnapshotError::InvalidExtraSuggestion)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let plan: Option<(String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT local_date, budget_minutes, planned_minutes, over_budget_minutes, review_only_streak \
+             FROM today_plans WHERE id = ?1",
+        )
+        .bind(&expected_snapshot.plan_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let plan = plan.ok_or(TodaySnapshotError::InvalidExtraSuggestion)?;
+        if plan
+            != (
+                expected_snapshot.local_date.to_iso_string(),
+                i64::from(expected_snapshot.budget_minutes),
+                i64::from(expected_snapshot.planned_minutes),
+                i64::from(expected_snapshot.over_budget_minutes),
+                i64::from(expected_snapshot.review_only_streak),
+            )
+        {
+            return Err(TodaySnapshotError::StaleExtraSuggestions);
+        }
+        let versions: Vec<(String, i64, String, String)> = sqlx::query_as(
+            "SELECT id, position, entry_origin, entry_status FROM today_plan_entries \
+             WHERE today_plan_id = ?1 ORDER BY position",
+        )
+        .bind(&expected_snapshot.plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if versions.len() != expected_snapshot.entries.len()
+            || versions.iter().zip(&expected_snapshot.entries).any(
+                |((id, position, origin, status), expected)| {
+                    id != &expected.entry_id
+                        || *position != i64::from(expected.position)
+                        || origin != today_entry_origin_value(expected.origin)
+                        || status != today_entry_status_value(expected.status)
+                },
+            )
+        {
+            return Err(TodaySnapshotError::StaleExtraSuggestions);
+        }
+        if versions
+            .iter()
+            .any(|(_, _, _, status)| status != "completed")
+            || suggestion.planning_cost_minutes
+                > expected_snapshot
+                    .budget_minutes
+                    .saturating_sub(expected_snapshot.planned_minutes)
+            || !matches!(
+                (
+                    suggestion.lane,
+                    suggestion.reason,
+                    suggestion.planning_cost_minutes
+                ),
+                (
+                    acm_os_domain::TodayCandidateLane::CarryIn,
+                    acm_os_domain::TodayCandidateReason::ContinueReview,
+                    30
+                ) | (
+                    acm_os_domain::TodayCandidateLane::CarryIn,
+                    acm_os_domain::TodayCandidateReason::ContinueLearning,
+                    60
+                ) | (
+                    acm_os_domain::TodayCandidateLane::Review,
+                    acm_os_domain::TodayCandidateReason::DueFirstColdStart
+                        | acm_os_domain::TodayCandidateReason::DueLongTermReview,
+                    30
+                ) | (
+                    acm_os_domain::TodayCandidateLane::Study,
+                    acm_os_domain::TodayCandidateReason::Relearn
+                        | acm_os_domain::TodayCandidateReason::Upsolve,
+                    60
+                )
+            )
+            || (suggestion.reason == acm_os_domain::TodayCandidateReason::ContinueReview)
+                != suggestion.review_attempt_id.is_some()
+        {
+            return Err(TodaySnapshotError::InvalidExtraSuggestion);
+        }
+        let candidate_valid: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM problems p \
+             JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             JOIN file_bindings fb ON fb.problem_id = p.id AND fb.binding_state = 'linked' \
+             LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+             LEFT JOIN review_attempts ra ON ra.id = ?4 AND ra.problem_id = p.id \
+             WHERE p.id = ?1 AND p.identity_type = 'personal' \
+               AND NOT EXISTS (SELECT 1 FROM today_plan_entries e \
+                   WHERE e.today_plan_id = ?2 AND e.problem_id = p.id) \
+               AND ((?3 = 'continue_learning' AND pls.learning_status = 'learning') \
+                 OR (?3 = 'relearn' AND pls.learning_status = 'relearning') \
+                 OR (?3 = 'upsolve' AND pls.learning_status = 'upsolve_pending') \
+                 OR (?3 = 'due_first_cold_start' AND pls.learning_status = 'waiting_cold_start' \
+                     AND rc.next_due_local_date <= ?5 AND ?4 IS NULL) \
+                 OR (?3 = 'due_long_term_review' AND pls.learning_status = 'long_term_review' \
+                     AND rc.next_due_local_date <= ?5 AND ?4 IS NULL) \
+                 OR (?3 = 'continue_review' AND ra.attempt_status = 'in_progress'))",
+        )
+        .bind(problem_id)
+        .bind(&expected_snapshot.plan_id)
+        .bind(today_reason_value(suggestion.reason))
+        .bind(&suggestion.review_attempt_id)
+        .bind(expected_snapshot.local_date.to_iso_string())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if candidate_valid != 1 {
+            return Err(TodaySnapshotError::InvalidExtraSuggestion);
+        }
+        let position = i64::try_from(expected_snapshot.entries.len())
+            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+        sqlx::query(
+            "INSERT INTO today_plan_entries \
+                (id, today_plan_id, problem_id, review_attempt_id, lane, reason, \
+                 planning_cost_minutes, position, entry_origin, entry_status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'manual', ?9)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&expected_snapshot.plan_id)
+        .bind(problem_id)
+        .bind(&suggestion.review_attempt_id)
+        .bind(today_lane_value(suggestion.lane))
+        .bind(today_reason_value(suggestion.reason))
+        .bind(i64::from(suggestion.planning_cost_minutes))
+        .bind(position)
+        .bind(
+            if suggestion.lane == acm_os_domain::TodayCandidateLane::CarryIn {
+                "in_progress"
+            } else {
+                "not_started"
+            },
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::InvalidExtraSuggestion)?;
+        sqlx::query(
+            "UPDATE today_plans SET planned_minutes = planned_minutes + ?2, \
+                 over_budget_minutes = MAX(0, planned_minutes + ?2 - budget_minutes) \
+             WHERE id = ?1",
+        )
+        .bind(&expected_snapshot.plan_id)
+        .bind(i64::from(suggestion.planning_cost_minutes))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.load_today_snapshot(expected_snapshot.local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+
+    async fn apply_today_replan(
+        &self,
+        preview: &TodayReplanPreview,
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let current = self
+            .reconcile_today_snapshot(preview.expected_snapshot.local_date)
+            .await?;
+        if current != preview.expected_snapshot {
+            return Err(TodaySnapshotError::StaleReplanPreview);
+        }
+        let computed_minutes = preview.entries.iter().try_fold(0_u32, |total, entry| {
+            total
+                .checked_add(entry.planning_cost_minutes)
+                .ok_or(TodaySnapshotError::IntegrityViolation)
+        })?;
+        if computed_minutes != preview.proposed_planned_minutes
+            || preview.proposed_over_budget_minutes
+                != computed_minutes.saturating_sub(preview.proposed_budget_minutes)
+        {
+            return Err(TodaySnapshotError::IntegrityViolation);
+        }
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let current_version: Option<(i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT budget_minutes, planned_minutes, over_budget_minutes, review_only_streak \
+             FROM today_plans WHERE id = ?1 AND local_date = ?2",
+        )
+        .bind(&preview.expected_snapshot.plan_id)
+        .bind(preview.expected_snapshot.local_date.to_iso_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if current_version
+            != Some((
+                i64::from(preview.expected_snapshot.budget_minutes),
+                i64::from(preview.expected_snapshot.planned_minutes),
+                i64::from(preview.expected_snapshot.over_budget_minutes),
+                i64::from(preview.expected_snapshot.review_only_streak),
+            ))
+        {
+            return Err(TodaySnapshotError::StaleReplanPreview);
+        }
+        let entry_versions: Vec<(
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, CAST(problem_id AS TEXT), review_attempt_id, lane, reason, \
+                    planning_cost_minutes, position, entry_origin, entry_status \
+             FROM today_plan_entries \
+             WHERE today_plan_id = ?1 ORDER BY position",
+        )
+        .bind(&preview.expected_snapshot.plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if entry_versions.len() != preview.expected_snapshot.entries.len()
+            || entry_versions
+                .iter()
+                .zip(&preview.expected_snapshot.entries)
+                .any(
+                    |(
+                        (
+                            id,
+                            problem_id,
+                            review_attempt_id,
+                            lane,
+                            reason,
+                            cost,
+                            position,
+                            origin,
+                            status,
+                        ),
+                        expected,
+                    )| {
+                        id != &expected.entry_id
+                            || problem_id != &expected.problem_id
+                            || review_attempt_id != &expected.review_attempt_id
+                            || lane != today_lane_value(expected.lane)
+                            || reason != today_reason_value(expected.reason)
+                            || *cost != i64::from(expected.planning_cost_minutes)
+                            || *position != i64::from(expected.position)
+                            || origin != today_entry_origin_value(expected.origin)
+                            || status != today_entry_status_value(expected.status)
+                    },
+                )
+        {
+            return Err(TodaySnapshotError::StaleReplanPreview);
+        }
+
+        let protected_ids = preview
+            .expected_snapshot
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.origin == TodayEntryOrigin::Manual
+                    || entry.status != TodayEntryStatus::NotStarted
+            })
+            .map(|entry| entry.entry_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let proposed_existing_ids = preview
+            .entries
+            .iter()
+            .filter_map(|entry| entry.existing_entry_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        if proposed_existing_ids != protected_ids
+            || preview.entries.iter().any(|entry| {
+                entry.existing_entry_id.is_some()
+                    && !(entry.origin == TodayEntryOrigin::Manual
+                        || entry.status != TodayEntryStatus::NotStarted)
+            })
+        {
+            return Err(TodaySnapshotError::IntegrityViolation);
+        }
+
+        sqlx::query(
+            "DELETE FROM today_plan_entries WHERE today_plan_id = ?1 \
+             AND entry_origin = 'auto' AND entry_status = 'not_started'",
+        )
+        .bind(&preview.expected_snapshot.plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        for (position, entry) in preview.entries.iter().enumerate() {
+            let position =
+                i64::try_from(position).map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            if let Some(entry_id) = &entry.existing_entry_id {
+                let updated = sqlx::query(
+                    "UPDATE today_plan_entries SET position = ?2 \
+                     WHERE id = ?1 AND today_plan_id = ?3",
+                )
+                .bind(entry_id)
+                .bind(1_000_000_i64 + position)
+                .bind(&preview.expected_snapshot.plan_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+                if updated.rows_affected() != 1 {
+                    return Err(TodaySnapshotError::StaleReplanPreview);
+                }
+            }
+        }
+        for (position, entry) in preview.entries.iter().enumerate() {
+            let position =
+                i64::try_from(position).map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            if let Some(entry_id) = &entry.existing_entry_id {
+                sqlx::query("UPDATE today_plan_entries SET position = ?2 WHERE id = ?1")
+                    .bind(entry_id)
+                    .bind(position)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            } else {
+                let problem_id = entry
+                    .problem_id
+                    .parse::<i64>()
+                    .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+                sqlx::query(
+                    "INSERT INTO today_plan_entries \
+                        (id, today_plan_id, problem_id, review_attempt_id, lane, reason, \
+                         planning_cost_minutes, position, entry_origin, entry_status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(&preview.expected_snapshot.plan_id)
+                .bind(problem_id)
+                .bind(&entry.review_attempt_id)
+                .bind(today_lane_value(entry.lane))
+                .bind(today_reason_value(entry.reason))
+                .bind(i64::from(entry.planning_cost_minutes))
+                .bind(position)
+                .bind(today_entry_origin_value(entry.origin))
+                .bind(today_entry_status_value(entry.status))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            }
+        }
+        let updated_plan = sqlx::query(
+            "UPDATE today_plans SET budget_minutes = ?2, planned_minutes = ?3, \
+                 over_budget_minutes = ?4, review_only_streak = ?5 WHERE id = ?1",
+        )
+        .bind(&preview.expected_snapshot.plan_id)
+        .bind(i64::from(preview.proposed_budget_minutes))
+        .bind(i64::from(preview.proposed_planned_minutes))
+        .bind(i64::from(preview.proposed_over_budget_minutes))
+        .bind(i64::from(preview.proposed_review_only_streak))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if updated_plan.rows_affected() != 1 {
+            return Err(TodaySnapshotError::StaleReplanPreview);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.load_today_snapshot(preview.expected_snapshot.local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+
+    async fn create_or_load_today_snapshot(
+        &self,
+        local_date: acm_os_domain::LocalDate,
+        draft: &acm_os_domain::TodayPlanDraft,
+    ) -> Result<TodaySnapshot, TodaySnapshotError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let plan_id = uuid::Uuid::now_v7().to_string();
+        let inserted = sqlx::query(
+            "INSERT INTO today_plans \
+                (id, local_date, budget_minutes, planned_minutes, over_budget_minutes, review_only_streak) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(local_date) DO NOTHING",
+        )
+        .bind(&plan_id)
+        .bind(local_date.to_iso_string())
+        .bind(i64::from(draft.budget_minutes))
+        .bind(i64::from(draft.planned_minutes))
+        .bind(i64::from(draft.over_budget_minutes))
+        .bind(i64::from(draft.next_review_only_streak))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if inserted.rows_affected() == 0 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            return self
+                .load_today_snapshot(local_date)
+                .await?
+                .ok_or(TodaySnapshotError::IntegrityViolation);
+        }
+
+        for (position, entry) in draft.entries.iter().enumerate() {
+            let problem_id = entry
+                .problem_id
+                .parse::<i64>()
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            sqlx::query(
+                "INSERT INTO today_plan_entries \
+                    (id, today_plan_id, problem_id, review_attempt_id, lane, reason, \
+                     planning_cost_minutes, position, entry_origin, entry_status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'auto', ?9)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&plan_id)
+            .bind(problem_id)
+            .bind(&entry.review_attempt_id)
+            .bind(today_lane_value(entry.lane))
+            .bind(today_reason_value(entry.reason))
+            .bind(i64::from(entry.planning_cost_minutes))
+            .bind(i64::try_from(position).map_err(|_| TodaySnapshotError::IntegrityViolation)?)
+            .bind(
+                if entry.lane == acm_os_domain::TodayCandidateLane::CarryIn {
+                    "in_progress"
+                } else {
+                    "not_started"
+                },
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.load_today_snapshot(local_date)
+            .await?
+            .ok_or(TodaySnapshotError::IntegrityViolation)
+    }
+}
+
+fn today_lane_value(value: acm_os_domain::TodayCandidateLane) -> &'static str {
+    match value {
+        acm_os_domain::TodayCandidateLane::CarryIn => "carry_in",
+        acm_os_domain::TodayCandidateLane::Review => "review",
+        acm_os_domain::TodayCandidateLane::Study => "study",
+    }
+}
+
+fn parse_today_lane(value: &str) -> Result<acm_os_domain::TodayCandidateLane, TodaySnapshotError> {
+    match value {
+        "carry_in" => Ok(acm_os_domain::TodayCandidateLane::CarryIn),
+        "review" => Ok(acm_os_domain::TodayCandidateLane::Review),
+        "study" => Ok(acm_os_domain::TodayCandidateLane::Study),
+        _ => Err(TodaySnapshotError::IntegrityViolation),
+    }
+}
+
+fn today_reason_value(value: acm_os_domain::TodayCandidateReason) -> &'static str {
+    match value {
+        acm_os_domain::TodayCandidateReason::ContinueReview => "continue_review",
+        acm_os_domain::TodayCandidateReason::ContinueLearning => "continue_learning",
+        acm_os_domain::TodayCandidateReason::DueFirstColdStart => "due_first_cold_start",
+        acm_os_domain::TodayCandidateReason::DueLongTermReview => "due_long_term_review",
+        acm_os_domain::TodayCandidateReason::Relearn => "relearn",
+        acm_os_domain::TodayCandidateReason::Upsolve => "upsolve",
+    }
+}
+
+fn parse_today_reason(
+    value: &str,
+) -> Result<acm_os_domain::TodayCandidateReason, TodaySnapshotError> {
+    match value {
+        "continue_review" => Ok(acm_os_domain::TodayCandidateReason::ContinueReview),
+        "continue_learning" => Ok(acm_os_domain::TodayCandidateReason::ContinueLearning),
+        "due_first_cold_start" => Ok(acm_os_domain::TodayCandidateReason::DueFirstColdStart),
+        "due_long_term_review" => Ok(acm_os_domain::TodayCandidateReason::DueLongTermReview),
+        "relearn" => Ok(acm_os_domain::TodayCandidateReason::Relearn),
+        "upsolve" => Ok(acm_os_domain::TodayCandidateReason::Upsolve),
+        _ => Err(TodaySnapshotError::IntegrityViolation),
+    }
+}
+
+fn parse_today_entry_origin(value: &str) -> Result<TodayEntryOrigin, TodaySnapshotError> {
+    match value {
+        "auto" => Ok(TodayEntryOrigin::Auto),
+        "manual" => Ok(TodayEntryOrigin::Manual),
+        _ => Err(TodaySnapshotError::IntegrityViolation),
+    }
+}
+
+fn today_entry_origin_value(value: TodayEntryOrigin) -> &'static str {
+    match value {
+        TodayEntryOrigin::Auto => "auto",
+        TodayEntryOrigin::Manual => "manual",
+    }
+}
+
+fn today_entry_status_value(value: TodayEntryStatus) -> &'static str {
+    match value {
+        TodayEntryStatus::NotStarted => "not_started",
+        TodayEntryStatus::InProgress => "in_progress",
+        TodayEntryStatus::Completed => "completed",
+        TodayEntryStatus::Unavailable => "unavailable",
+    }
+}
+
+fn parse_today_entry_status(value: &str) -> Result<TodayEntryStatus, TodaySnapshotError> {
+    match value {
+        "not_started" => Ok(TodayEntryStatus::NotStarted),
+        "in_progress" => Ok(TodayEntryStatus::InProgress),
+        "completed" => Ok(TodayEntryStatus::Completed),
+        "unavailable" => Ok(TodayEntryStatus::Unavailable),
+        _ => Err(TodaySnapshotError::IntegrityViolation),
+    }
+}
+
 fn build_review_help_sources(
     active_vault: &str,
     note_relative_path: &str,
     knowledge_root: &str,
 ) -> Result<
-    Vec<(acm_os_domain::ReviewHelpLevel, Option<crate::markdown::ReviewHelpContent>)>,
+    Vec<(
+        acm_os_domain::ReviewHelpLevel,
+        Option<crate::markdown::ReviewHelpContent>,
+    )>,
     ReviewAttemptError,
 > {
-    let vault = std::fs::canonicalize(active_vault)
-        .map_err(|_| ReviewAttemptError::NoteUnavailable)?;
+    let vault =
+        std::fs::canonicalize(active_vault).map_err(|_| ReviewAttemptError::NoteUnavailable)?;
     let note = std::fs::canonicalize(vault.join(note_relative_path))
         .map_err(|_| ReviewAttemptError::NoteUnavailable)?;
     if !note.starts_with(&vault) {
         return Err(ReviewAttemptError::NoteUnavailable);
     }
     let bytes = std::fs::read(&note).map_err(|_| ReviewAttemptError::NoteUnavailable)?;
-    let markdown = std::str::from_utf8(&bytes)
-        .map_err(|_| ReviewAttemptError::InvalidMarkdown)?;
+    let markdown = std::str::from_utf8(&bytes).map_err(|_| ReviewAttemptError::InvalidMarkdown)?;
     let mut sources = Vec::new();
     for level_number in 1..=5 {
         let level = acm_os_domain::ReviewHelpLevel::from_number(level_number)
@@ -599,7 +1826,9 @@ fn debug_independence_value(value: acm_os_domain::DebugIndependence) -> &'static
     }
 }
 
-fn parse_debug_independence(value: &str) -> Result<acm_os_domain::DebugIndependence, ReviewAttemptError> {
+fn parse_debug_independence(
+    value: &str,
+) -> Result<acm_os_domain::DebugIndependence, ReviewAttemptError> {
     match value {
         "not_needed" => Ok(acm_os_domain::DebugIndependence::NotNeeded),
         "independent" => Ok(acm_os_domain::DebugIndependence::Independent),
@@ -616,7 +1845,9 @@ fn external_help_value(value: acm_os_domain::ExternalHelpLevel) -> &'static str 
     }
 }
 
-fn parse_external_help(value: &str) -> Result<acm_os_domain::ExternalHelpLevel, ReviewAttemptError> {
+fn parse_external_help(
+    value: &str,
+) -> Result<acm_os_domain::ExternalHelpLevel, ReviewAttemptError> {
     match value {
         "none" => Ok(acm_os_domain::ExternalHelpLevel::None),
         "solving_hint" => Ok(acm_os_domain::ExternalHelpLevel::SolvingHint),
@@ -655,7 +1886,10 @@ fn failure_reason_value(reason: &ReviewFailureReason) -> (&'static str, Option<&
     }
 }
 
-fn parse_failure_reason(code: &str, other: Option<String>) -> Result<ReviewFailureReason, ReviewAttemptError> {
+fn parse_failure_reason(
+    code: &str,
+    other: Option<String>,
+) -> Result<ReviewFailureReason, ReviewAttemptError> {
     match (code, other) {
         ("no_idea", None) => Ok(ReviewFailureReason::NoIdea),
         ("key_property_blocked", None) => Ok(ReviewFailureReason::KeyPropertyBlocked),
@@ -739,8 +1973,9 @@ async fn load_review_history_item_from_pool(
     };
     let judgement = row.judgement.as_deref().map(parse_judgement).transpose()?;
     let evidence_codes: Vec<String> = match row.evidence_codes_json {
-        Some(value) => serde_json::from_str(&value)
-            .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
+        Some(value) => {
+            serde_json::from_str(&value).map_err(|_| ReviewAttemptError::IntegrityViolation)?
+        }
         None => Vec::new(),
     };
     let completion_input = match status {
@@ -946,8 +2181,8 @@ impl ReviewAttemptPort for DatabaseRuntime {
         if statement_problem_id != Some(problem_id) {
             return Err(ReviewAttemptError::StatementMissing);
         }
-        let status = parse_learning_status(&status)
-            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        let status =
+            parse_learning_status(&status).map_err(|_| ReviewAttemptError::IntegrityViolation)?;
         if due != eligibility.scheduled_due_local_date.to_iso_string() {
             return Err(ReviewAttemptError::IntegrityViolation);
         }
@@ -1003,8 +2238,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
             attempt_type: eligibility.attempt_type,
             scheduled_due_local_date: eligibility.scheduled_due_local_date,
             started_early: eligibility.started_early,
-            judgement_rule_version:
-                acm_os_domain::ReviewEligibilityEngine::JUDGEMENT_RULE_VERSION,
+            judgement_rule_version: acm_os_domain::ReviewEligibilityEngine::JUDGEMENT_RULE_VERSION,
             started_at_utc: started_at,
         })
     }
@@ -1226,7 +2460,14 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         Ok(ReviewCompletionContext {
             attempt: review_attempt_from_row((
-                id, contest_id, index, attempt_type, due, early, rule, started,
+                id,
+                contest_id,
+                index,
+                attempt_type,
+                due,
+                early,
+                rule,
+                started,
             ))?,
             learning_status: parse_learning_status(&status)
                 .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
@@ -1302,11 +2543,9 @@ impl ReviewAttemptPort for DatabaseRuntime {
         if highest_help != context.highest_help_level {
             return Err(ReviewAttemptError::IntegrityViolation);
         }
-        let verified_judgement = acm_os_domain::ReviewJudgementEngine::judge(
-            &input.domain_facts(),
-            highest_help,
-        )
-        .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
+        let verified_judgement =
+            acm_os_domain::ReviewJudgementEngine::judge(&input.domain_facts(), highest_help)
+                .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
         if &verified_judgement != judgement {
             return Err(ReviewAttemptError::IntegrityViolation);
         }
@@ -1472,13 +2711,12 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         if changed.rows_affected() != 1 {
-            let exists: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM review_attempts WHERE id = ?1",
-            )
-            .bind(attempt_id)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            let exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts WHERE id = ?1")
+                    .bind(attempt_id)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
             return Err(if exists == 0 {
                 ReviewAttemptError::AttemptNotFound
             } else {
@@ -1728,8 +2966,8 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         if !target.starts_with(&vault) || !target.is_file() {
             return Err(PersonalNoteDeletionError::BindingUnavailable);
         }
-        let bytes = std::fs::read(&target)
-            .map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        let bytes =
+            std::fs::read(&target).map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
         if sha256_hex(&bytes) != binding.content_digest {
             return Err(PersonalNoteDeletionError::ConcurrentModification);
         }
@@ -1768,8 +3006,7 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         if sha256_hex(&final_bytes) != binding.content_digest {
             return Err(PersonalNoteDeletionError::ConcurrentModification);
         }
-        std::fs::remove_file(&target)
-            .map_err(|_| PersonalNoteDeletionError::FileDeleteFailed)?;
+        std::fs::remove_file(&target).map_err(|_| PersonalNoteDeletionError::FileDeleteFailed)?;
         match target.try_exists() {
             Ok(false) => {}
             Ok(true) => return Err(PersonalNoteDeletionError::ConcurrentModification),
@@ -1862,8 +3099,8 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
-        let learning_status_since_utc = learning_status_since_utc
-            .ok_or(PersonalNoteDeletionError::ConcurrentModification)?;
+        let learning_status_since_utc =
+            learning_status_since_utc.ok_or(PersonalNoteDeletionError::ConcurrentModification)?;
         let binding_delete = sqlx::query(
             "DELETE FROM file_bindings \
              WHERE problem_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3",
@@ -2027,11 +3264,7 @@ impl PersonalNoteReadPort for DatabaseRuntime {
                 });
             }
             BindingResolution::VaultUnavailable => {
-                self.update_binding_state(
-                    problem_id,
-                    "external_source_unavailable",
-                    &last_binding,
-                )
+                self.update_binding_state(problem_id, "external_source_unavailable", &last_binding)
                     .await?;
                 return Ok(PersonalNoteReadState::VaultUnavailable {
                     binding: last_binding,
@@ -2076,8 +3309,8 @@ impl PersonalNoteReadPort for DatabaseRuntime {
             }
         }
 
-        let markdown = std::str::from_utf8(&resolved.bytes)
-            .map_err(|_| PersonalNoteReadError::InvalidUtf8)?;
+        let markdown =
+            std::str::from_utf8(&resolved.bytes).map_err(|_| PersonalNoteReadError::InvalidUtf8)?;
         let projection = crate::markdown::parse_problem_markdown(markdown, content_digest);
         self.markdown_projection_cache
             .lock()
@@ -2211,13 +3444,9 @@ fn map_safe_patch_error(error: crate::safe_patch::SafePatchError) -> PersonalNot
         SafePatchError::BindingUnavailable => PersonalNotePatchError::BindingUnavailable,
         SafePatchError::InvalidUtf8 => PersonalNotePatchError::InvalidUtf8,
         SafePatchError::TargetSectionMissing => PersonalNotePatchError::TargetSectionMissing,
-        SafePatchError::TargetSectionAmbiguous => {
-            PersonalNotePatchError::TargetSectionAmbiguous
-        }
+        SafePatchError::TargetSectionAmbiguous => PersonalNotePatchError::TargetSectionAmbiguous,
         SafePatchError::LinkAlreadyPresent => PersonalNotePatchError::LinkAlreadyPresent,
-        SafePatchError::ConcurrentModification => {
-            PersonalNotePatchError::ConcurrentModification
-        }
+        SafePatchError::ConcurrentModification => PersonalNotePatchError::ConcurrentModification,
         SafePatchError::RecoveryCopyFailed => PersonalNotePatchError::RecoveryCopyFailed,
         SafePatchError::WriteFailed => PersonalNotePatchError::WriteFailed,
         SafePatchError::VerificationFailed => PersonalNotePatchError::VerificationFailed,
@@ -2225,10 +3454,7 @@ fn map_safe_patch_error(error: crate::safe_patch::SafePatchError) -> PersonalNot
 }
 
 impl WorkspaceConfigurationPort for DatabaseRuntime {
-    async fn resolve_directory(
-        &self,
-        path: &str,
-    ) -> Result<String, WorkspacePathResolutionError> {
+    async fn resolve_directory(&self, path: &str) -> Result<String, WorkspacePathResolutionError> {
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || {
             let resolved = std::fs::canonicalize(path)
@@ -2256,14 +3482,16 @@ impl WorkspaceConfigurationPort for DatabaseRuntime {
         .await
         .map_err(|_| WorkspacePersistenceError::Unavailable)?;
 
-        row.map(|(active_vault_path, problem_root_path, knowledge_root_path)| {
-            WorkspaceConfiguration::from_resolved(
-                active_vault_path,
-                problem_root_path,
-                knowledge_root_path,
-            )
-            .map_err(|_| WorkspacePersistenceError::Unavailable)
-        })
+        row.map(
+            |(active_vault_path, problem_root_path, knowledge_root_path)| {
+                WorkspaceConfiguration::from_resolved(
+                    active_vault_path,
+                    problem_root_path,
+                    knowledge_root_path,
+                )
+                .map_err(|_| WorkspacePersistenceError::Unavailable)
+            },
+        )
         .transpose()
     }
 
@@ -2297,19 +3525,19 @@ impl PersonalNotePort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
         let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT p.identity_type, fb.vault_relative_path, \
+            "SELECT p.identity_type, fb.vault_relative_path, \
                         fb.content_digest, fb.windows_file_key \
                  FROM problems p \
                  LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
                  WHERE p.platform = 'codeforces' \
                    AND p.external_contest_key = ?1 \
                    AND p.external_problem_key = ?2",
-            )
-            .bind(problem.contest().contest_id() as i64)
-            .bind(problem.index())
-            .fetch_optional(self.personal_note_pool()?)
-            .await
-            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(self.personal_note_pool()?)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
         let (identity_type, relative_path, digest, file_key) =
             row.ok_or(PersonalNoteError::ProblemNotFound)?;
         let existing_binding = match (relative_path, digest) {
@@ -2452,10 +3680,10 @@ fn create_personal_note_file_on_disk(
     problem: &acm_os_domain::CodeforcesProblemIdentity,
     markdown: &[u8],
 ) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
-    let vault = std::fs::canonicalize(active_vault)
-        .map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
-    let root = std::fs::canonicalize(problem_root)
-        .map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
+    let vault =
+        std::fs::canonicalize(active_vault).map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
+    let root =
+        std::fs::canonicalize(problem_root).map_err(|_| PersonalNoteError::WorkspaceUnavailable)?;
     if !root.is_dir() || !root.starts_with(&vault) || root == vault {
         return Err(PersonalNoteError::WorkspaceUnavailable);
     }
@@ -2486,8 +3714,8 @@ fn create_personal_note_file_on_disk(
     if verified != markdown {
         return Err(PersonalNoteError::FileVerificationFailed);
     }
-    let resolved = std::fs::canonicalize(&target)
-        .map_err(|_| PersonalNoteError::FileVerificationFailed)?;
+    let resolved =
+        std::fs::canonicalize(&target).map_err(|_| PersonalNoteError::FileVerificationFailed)?;
     if !resolved.starts_with(&vault) {
         return Err(PersonalNoteError::FileVerificationFailed);
     }
@@ -2510,11 +3738,11 @@ fn discard_created_note_on_disk(
     active_vault: &str,
     file: &CreatedPersonalNoteFile,
 ) -> Result<(), PersonalNoteError> {
-    let vault = std::fs::canonicalize(active_vault)
-        .map_err(|_| PersonalNoteError::CompensationFailed)?;
+    let vault =
+        std::fs::canonicalize(active_vault).map_err(|_| PersonalNoteError::CompensationFailed)?;
     let target = vault.join(Path::new(&file.vault_relative_path));
-    let resolved = std::fs::canonicalize(&target)
-        .map_err(|_| PersonalNoteError::CompensationFailed)?;
+    let resolved =
+        std::fs::canonicalize(&target).map_err(|_| PersonalNoteError::CompensationFailed)?;
     if !resolved.starts_with(&vault) {
         return Err(PersonalNoteError::CompensationFailed);
     }
@@ -2531,7 +3759,10 @@ impl ContestImportPort for DatabaseRuntime {
         draft: &ContestImportDraft,
     ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
         let pool = self.contest_pool()?;
-        let mut transaction = pool.begin().await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ContestImportPersistenceError::Unavailable)?;
         let existing: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
@@ -2552,7 +3783,12 @@ impl ContestImportPort for DatabaseRuntime {
                 let incoming_slots: Vec<(i64, String)> = draft
                     .slots
                     .iter()
-                    .map(|slot| (slot.problem.contest().contest_id() as i64, slot.problem.index().to_owned()))
+                    .map(|slot| {
+                        (
+                            slot.problem.contest().contest_id() as i64,
+                            slot.problem.index().to_owned(),
+                        )
+                    })
                     .collect();
                 if persisted_slots != incoming_slots {
                     return Err(ContestImportPersistenceError::ManifestConflict);
@@ -2615,7 +3851,10 @@ impl ContestImportPort for DatabaseRuntime {
                 id
             }
         };
-        transaction.commit().await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContestImportPersistenceError::Unavailable)?;
         self.import_state(contest_id).await
     }
 
@@ -2681,29 +3920,37 @@ impl ContestReadPort for DatabaseRuntime {
              FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id \
              GROUP BY c.id ORDER BY c.created_at_utc DESC",
         )
-        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .fetch_all(
+            self.contest_pool()
+                .map_err(|_| ContestReadError::Unavailable)?,
+        )
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        rows.into_iter().map(|(id, title, status, count, missing)| {
-            Ok(ContestShelfItem {
-                contest: acm_os_domain::CodeforcesContestIdentity::new(id as u64).map_err(|_| ContestReadError::Unavailable)?,
-                title,
-                import_status: match status.as_str() {
-                    "incomplete" => ContestImportStatus::Incomplete,
-                    "complete" => ContestImportStatus::Complete,
-                    _ => return Err(ContestReadError::Unavailable),
-                },
-                problem_count: count as u32,
-                missing_snapshot_count: missing as u32,
+        rows.into_iter()
+            .map(|(id, title, status, count, missing)| {
+                Ok(ContestShelfItem {
+                    contest: acm_os_domain::CodeforcesContestIdentity::new(id as u64)
+                        .map_err(|_| ContestReadError::Unavailable)?,
+                    title,
+                    import_status: match status.as_str() {
+                        "incomplete" => ContestImportStatus::Incomplete,
+                        "complete" => ContestImportStatus::Complete,
+                        _ => return Err(ContestReadError::Unavailable),
+                    },
+                    problem_count: count as u32,
+                    missing_snapshot_count: missing as u32,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     async fn contest_detail(
         &self,
         contest: &acm_os_domain::CodeforcesContestIdentity,
     ) -> Result<ContestDetail, ContestReadError> {
-        let pool = self.contest_pool().map_err(|_| ContestReadError::Unavailable)?;
+        let pool = self
+            .contest_pool()
+            .map_err(|_| ContestReadError::Unavailable)?;
         let row: Option<(String, String, String)> = sqlx::query_as(
             "SELECT title, source_url, import_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
@@ -2719,16 +3966,19 @@ impl ContestReadPort for DatabaseRuntime {
         .fetch_all(pool)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        let problems = rows.into_iter().map(|(index, title, rating, snapshot, identity_type)| {
-            Ok(LightweightProblemItem {
-                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
-                    .map_err(|_| ContestReadError::Unavailable)?,
-                title,
-                rating: rating.map(|value| value as u32),
-                has_statement_snapshot: snapshot != 0,
-                identity_type: parse_problem_identity_type(&identity_type)?,
+        let problems = rows
+            .into_iter()
+            .map(|(index, title, rating, snapshot, identity_type)| {
+                Ok(LightweightProblemItem {
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), index)
+                        .map_err(|_| ContestReadError::Unavailable)?,
+                    title,
+                    rating: rating.map(|value| value as u32),
+                    has_statement_snapshot: snapshot != 0,
+                    identity_type: parse_problem_identity_type(&identity_type)?,
+                })
             })
-        }).collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ContestDetail {
             contest: contest.clone(),
             title,
@@ -2742,7 +3992,9 @@ impl ContestReadPort for DatabaseRuntime {
         })
     }
 
-    async fn list_lightweight_problems(&self) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
+    async fn list_lightweight_problems(
+        &self,
+    ) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
         let rows: Vec<(i64, String, String, Option<i64>, i64, String)> = sqlx::query_as(
             "SELECT p.external_contest_key, p.external_problem_key, p.title, p.rating, \
                     EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), \
@@ -2752,17 +4004,24 @@ impl ContestReadPort for DatabaseRuntime {
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        rows.into_iter().map(|(contest_id, index, title, rating, snapshot, identity_type)| {
-            Ok(LightweightProblemItem {
-                problem: acm_os_domain::CodeforcesProblemIdentity::new(
-                    acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64).map_err(|_| ContestReadError::Unavailable)?, index,
-                ).map_err(|_| ContestReadError::Unavailable)?,
-                title,
-                rating: rating.map(|value| value as u32),
-                has_statement_snapshot: snapshot != 0,
-                identity_type: parse_problem_identity_type(&identity_type)?,
-            })
-        }).collect()
+        rows.into_iter()
+            .map(
+                |(contest_id, index, title, rating, snapshot, identity_type)| {
+                    Ok(LightweightProblemItem {
+                        problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                            acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                                .map_err(|_| ContestReadError::Unavailable)?,
+                            index,
+                        )
+                        .map_err(|_| ContestReadError::Unavailable)?,
+                        title,
+                        rating: rating.map(|value| value as u32),
+                        has_statement_snapshot: snapshot != 0,
+                        identity_type: parse_problem_identity_type(&identity_type)?,
+                    })
+                },
+            )
+            .collect()
     }
 
     async fn lightweight_problem_detail(
@@ -2782,7 +4041,16 @@ impl ContestReadPort for DatabaseRuntime {
         .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        let (title, rating, source_url, sanitized_html, identity_type, relative_path, digest, file_key) = row.ok_or(ContestReadError::NotFound)?;
+        let (
+            title,
+            rating,
+            source_url,
+            sanitized_html,
+            identity_type,
+            relative_path,
+            digest,
+            file_key,
+        ) = row.ok_or(ContestReadError::NotFound)?;
         let personal_note = match (relative_path, digest) {
             (Some(vault_relative_path), Some(content_digest)) => Some(PersonalNoteBinding {
                 vault_relative_path,
@@ -2796,13 +4064,13 @@ impl ContestReadPort for DatabaseRuntime {
         if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
             return Err(ContestReadError::Unavailable);
         }
-        let lifecycle = self
-            .load_problem_lifecycle(problem)
-            .await
-            .map_err(|error| match error {
-                ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
-                _ => ContestReadError::Unavailable,
-            })?;
+        let lifecycle =
+            self.load_problem_lifecycle(problem)
+                .await
+                .map_err(|error| match error {
+                    ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
+                    _ => ContestReadError::Unavailable,
+                })?;
         if lifecycle.identity_type != identity_type {
             return Err(ContestReadError::Unavailable);
         }
@@ -2833,11 +4101,14 @@ impl ContestReadPort for DatabaseRuntime {
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        Ok(rows.into_iter().map(|(local_ref, media_type, bytes)| LocalStatementAsset {
-            local_ref,
-            media_type,
-            bytes,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(local_ref, media_type, bytes)| LocalStatementAsset {
+                local_ref,
+                media_type,
+                bytes,
+            })
+            .collect())
     }
 }
 
@@ -2849,10 +4120,15 @@ impl DatabaseRuntime {
     }
 
     fn contest_pool(&self) -> Result<&SqlitePool, ContestImportPersistenceError> {
-        self._pool.as_ref().ok_or(ContestImportPersistenceError::Unavailable)
+        self._pool
+            .as_ref()
+            .ok_or(ContestImportPersistenceError::Unavailable)
     }
 
-    async fn import_state(&self, contest_id: i64) -> Result<PersistedContestImport, ContestImportPersistenceError> {
+    async fn import_state(
+        &self,
+        contest_id: i64,
+    ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
         let pool = self.contest_pool()?;
         let missing: Vec<(i64, String)> = sqlx::query_as(
             "SELECT p.external_contest_key, p.external_problem_key FROM contest_problems cp \
@@ -2863,18 +4139,35 @@ impl DatabaseRuntime {
         .fetch_all(pool)
         .await
         .map_err(|_| ContestImportPersistenceError::Unavailable)?;
-        let missing_snapshot_problems = missing.into_iter().map(|(contest_id, index)| {
-            acm_os_domain::CodeforcesProblemIdentity::new(
-                acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
-                    .map_err(|_| ContestImportPersistenceError::Unavailable)?,
-                index,
-            ).map_err(|_| ContestImportPersistenceError::Unavailable)
-        }).collect::<Result<Vec<_>, _>>()?;
-        let status = if missing_snapshot_problems.is_empty() { ContestImportStatus::Complete } else { ContestImportStatus::Incomplete };
+        let missing_snapshot_problems = missing
+            .into_iter()
+            .map(|(contest_id, index)| {
+                acm_os_domain::CodeforcesProblemIdentity::new(
+                    acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                        .map_err(|_| ContestImportPersistenceError::Unavailable)?,
+                    index,
+                )
+                .map_err(|_| ContestImportPersistenceError::Unavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let status = if missing_snapshot_problems.is_empty() {
+            ContestImportStatus::Complete
+        } else {
+            ContestImportStatus::Incomplete
+        };
         sqlx::query("UPDATE contests SET import_status = ?1 WHERE id = ?2")
-            .bind(match status { ContestImportStatus::Incomplete => "incomplete", ContestImportStatus::Complete => "complete" })
-            .bind(contest_id).execute(pool).await.map_err(|_| ContestImportPersistenceError::Unavailable)?;
-        Ok(PersistedContestImport { status, missing_snapshot_problems })
+            .bind(match status {
+                ContestImportStatus::Incomplete => "incomplete",
+                ContestImportStatus::Complete => "complete",
+            })
+            .bind(contest_id)
+            .execute(pool)
+            .await
+            .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        Ok(PersistedContestImport {
+            status,
+            missing_snapshot_problems,
+        })
     }
 }
 
@@ -2906,17 +4199,20 @@ async fn try_start_database(
         .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
     let supported_schema_version = supported_schema_version();
 
-    let existing_schema_version = if database_exists {
+    let (existing_schema_version, legacy_m5_schema) = if database_exists {
         let inspection_pool = connect_read_only(&database_path).await?;
         verify_integrity(&inspection_pool).await?;
         let version = inspect_schema_version(&inspection_pool).await?;
+        let legacy_m5_schema = version == 10 && is_legacy_m5_schema(&inspection_pool).await?;
         if version <= supported_schema_version {
-            validate_schema_contract(&inspection_pool, version).await?;
+            if !legacy_m5_schema {
+                validate_schema_contract(&inspection_pool, version).await?;
+            }
         }
         inspection_pool.close().await;
-        version
+        (version, legacy_m5_schema)
     } else {
-        0
+        (0, false)
     };
 
     if existing_schema_version > supported_schema_version {
@@ -2937,6 +4233,10 @@ async fn try_start_database(
             supported_schema_version,
         )
         .await?;
+    }
+
+    if legacy_m5_schema {
+        upgrade_legacy_m5_schema(&pool).await?;
     }
 
     MIGRATOR
@@ -2962,6 +4262,192 @@ async fn try_start_database(
         markdown_projection_cache: Mutex::new(HashMap::new()),
         recovery_root: Some(app_private_data.join("markdown-recovery")),
     })
+}
+
+const LEGACY_M5_MIGRATION_10_CHECKSUM: &[u8] = &[
+    0xa0, 0xde, 0xa4, 0xff, 0x7e, 0xf1, 0x2a, 0x40, 0xaa, 0x5a, 0x64, 0x33, 0xa5, 0x80, 0xd1, 0xaa,
+    0x9f, 0x56, 0x14, 0x30, 0xb3, 0xc6, 0xc0, 0x27, 0x8e, 0x10, 0x28, 0x5a, 0x0e, 0x68, 0xe0, 0x5b,
+    0x64, 0x22, 0x4e, 0x59, 0x8b, 0x38, 0x7a, 0x16, 0x20, 0x27, 0xe3, 0x96, 0x70, 0xd6, 0x2e, 0xdd,
+];
+const LEGACY_M5_LEARNING_STATES_SQL: &str = "\
+    CREATE TABLE problem_learning_states (\
+        problem_id INTEGER PRIMARY KEY REFERENCES problems(id) ON DELETE RESTRICT,\
+        learning_status TEXT NOT NULL DEFAULT 'unstarted' CHECK (learning_status IN ('unstarted', 'upsolve_pending', 'learning', 'waiting_cold_start', 'relearning', 'long_term_review')),\
+        learning_status_since_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+    )";
+const LEGACY_M5_TODAY_PLANS_SQL: &str = "\
+    CREATE TABLE today_plans (\
+        id TEXT PRIMARY KEY CHECK (length(id) = 36),\
+        local_date TEXT NOT NULL UNIQUE,\
+        budget_minutes INTEGER NOT NULL CHECK (budget_minutes >= 0),\
+        planned_minutes INTEGER NOT NULL CHECK (planned_minutes >= 0),\
+        over_budget_minutes INTEGER NOT NULL CHECK (over_budget_minutes >= 0),\
+        review_only_streak INTEGER NOT NULL CHECK (review_only_streak BETWEEN 0 AND 2),\
+        created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+    )";
+const LEGACY_M5_TODAY_ENTRIES_SQL: &str = "\
+    CREATE TABLE today_plan_entries (\
+        id TEXT PRIMARY KEY CHECK (length(id) = 36),\
+        today_plan_id TEXT NOT NULL REFERENCES today_plans(id) ON DELETE RESTRICT,\
+        problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE RESTRICT,\
+        review_attempt_id TEXT REFERENCES review_attempts(id) ON DELETE RESTRICT,\
+        lane TEXT NOT NULL CHECK (lane IN ('carry_in', 'review', 'study')),\
+        reason TEXT NOT NULL CHECK (reason IN ('continue_review', 'continue_learning', 'due_first_cold_start', 'due_long_term_review', 'relearn', 'upsolve')),\
+        planning_cost_minutes INTEGER NOT NULL CHECK (planning_cost_minutes IN (30, 60)),\
+        position INTEGER NOT NULL CHECK (position >= 0),\
+        UNIQUE (today_plan_id, problem_id),\
+        UNIQUE (today_plan_id, position),\
+        CHECK ((reason = 'continue_review' AND lane = 'carry_in' AND review_attempt_id IS NOT NULL) OR (reason != 'continue_review' AND review_attempt_id IS NULL))\
+    )";
+
+async fn is_legacy_m5_schema(pool: &SqlitePool) -> Result<bool, StartupRecoveryReason> {
+    let checksum: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT checksum FROM _sqlx_migrations WHERE version = 10 AND success = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::MigrationLedgerInvalid)?;
+    if checksum.as_deref() != Some(LEGACY_M5_MIGRATION_10_CHECKSUM) {
+        return Ok(false);
+    }
+    let objects: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT type, name, tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if objects != expected_schema_objects(10) {
+        return Ok(false);
+    }
+    validate_app_metadata_contract(pool, 10).await?;
+
+    let learning_columns: Vec<SqliteColumnContract> =
+        sqlx::query_as("PRAGMA table_xinfo('problem_learning_states')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    let today_columns: Vec<SqliteColumnContract> =
+        sqlx::query_as("PRAGMA table_xinfo('today_plan_entries')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    let learning_names = learning_columns
+        .iter()
+        .map(|column| column.1.as_str())
+        .collect::<Vec<_>>();
+    let today_names = today_columns
+        .iter()
+        .map(|column| column.1.as_str())
+        .collect::<Vec<_>>();
+    if learning_names != ["problem_id", "learning_status", "learning_status_since_utc"]
+        || today_names
+            != [
+                "id",
+                "today_plan_id",
+                "problem_id",
+                "review_attempt_id",
+                "lane",
+                "reason",
+                "planning_cost_minutes",
+                "position",
+            ]
+    {
+        return Ok(false);
+    }
+    for (table, expected) in [
+        ("problem_learning_states", LEGACY_M5_LEARNING_STATES_SQL),
+        ("today_plans", LEGACY_M5_TODAY_PLANS_SQL),
+        ("today_plan_entries", LEGACY_M5_TODAY_ENTRIES_SQL),
+    ] {
+        let actual: Option<String> =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1")
+                .bind(table)
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        if actual
+            .as_deref()
+            .is_none_or(|sql| normalize_schema_sql(sql) != normalize_schema_sql(expected))
+        {
+            return Ok(false);
+        }
+    }
+
+    validate_workspace_settings_contract(pool).await?;
+    validate_contest_import_contract(pool, 10).await?;
+    validate_personal_note_contract(pool).await?;
+    validate_learning_lifecycle_contract(pool, 9).await?;
+    validate_review_attempt_contract(pool, 10).await?;
+    validate_review_help_usage_contract(pool).await?;
+    validate_review_completion_contract(pool).await?;
+    validate_problem_mastery_contract(pool).await?;
+
+    let inconsistent_today: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM today_plans tp WHERE \
+         tp.planned_minutes != COALESCE((SELECT SUM(planning_cost_minutes) \
+             FROM today_plan_entries e WHERE e.today_plan_id = tp.id), 0) \
+         OR tp.over_budget_minutes != MAX(tp.planned_minutes - tp.budget_minutes, 0) \
+         OR EXISTS (SELECT 1 FROM today_plan_entries e WHERE e.today_plan_id = tp.id \
+             AND e.position != (SELECT COUNT(*) FROM today_plan_entries earlier \
+                 WHERE earlier.today_plan_id = e.today_plan_id AND earlier.position < e.position))",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    Ok(inconsistent_today == 0)
+}
+
+async fn upgrade_legacy_m5_schema(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+    let current_checksum = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 10)
+        .ok_or(StartupRecoveryReason::MigrationFailed)?
+        .checksum
+        .clone();
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    for statement in [
+        "ALTER TABLE problem_learning_states ADD COLUMN pinned_priority INTEGER NOT NULL DEFAULT 0 CHECK (pinned_priority IN (0, 1))",
+        "ALTER TABLE today_plan_entries RENAME TO today_plan_entries_legacy_m5",
+        "CREATE TABLE today_plan_entries (\
+            id TEXT PRIMARY KEY CHECK (length(id) = 36),\
+            today_plan_id TEXT NOT NULL REFERENCES today_plans(id) ON DELETE RESTRICT,\
+            problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE RESTRICT,\
+            review_attempt_id TEXT REFERENCES review_attempts(id) ON DELETE RESTRICT,\
+            lane TEXT NOT NULL CHECK (lane IN ('carry_in', 'review', 'study')),\
+            reason TEXT NOT NULL CHECK (reason IN ('continue_review', 'continue_learning', 'due_first_cold_start', 'due_long_term_review', 'relearn', 'upsolve')),\
+            planning_cost_minutes INTEGER NOT NULL CHECK (planning_cost_minutes IN (30, 60)),\
+            position INTEGER NOT NULL CHECK (position >= 0),\
+            entry_origin TEXT NOT NULL DEFAULT 'auto' CHECK (entry_origin IN ('auto', 'manual')),\
+            entry_status TEXT NOT NULL DEFAULT 'not_started' CHECK (entry_status IN ('not_started', 'in_progress', 'completed', 'unavailable')),\
+            reconciliation_added INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_added IN (0, 1)),\
+            UNIQUE (today_plan_id, problem_id),\
+            UNIQUE (today_plan_id, position),\
+            CHECK (reason != 'continue_review' OR (lane = 'carry_in' AND review_attempt_id IS NOT NULL))\
+        )",
+        "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position, entry_origin, entry_status, reconciliation_added) \
+         SELECT e.id, e.today_plan_id, e.problem_id, e.review_attempt_id, e.lane, e.reason, e.planning_cost_minutes, e.position, 'auto', \
+                CASE WHEN ra.attempt_status = 'in_progress' THEN 'in_progress' WHEN ra.attempt_status = 'completed' THEN 'completed' ELSE 'not_started' END, 0 \
+         FROM today_plan_entries_legacy_m5 e LEFT JOIN review_attempts ra ON ra.id = e.review_attempt_id",
+        "DROP TABLE today_plan_entries_legacy_m5",
+        "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    }
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 10")
+        .bind(current_checksum.as_ref())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)
 }
 
 async fn acquire_startup_lock(
@@ -3092,13 +4578,55 @@ async fn validate_schema_contract(
         };
     }
 
-    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
+    if !matches!(schema_version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
             supported: supported_schema_version(),
         });
     }
 
+    let expected_objects = expected_schema_objects(schema_version);
+    if objects != expected_objects {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    validate_app_metadata_contract(pool, schema_version).await?;
+
+    if schema_version >= 2 {
+        validate_workspace_settings_contract(pool).await?;
+    }
+    if schema_version >= 3 {
+        validate_contest_import_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 4 {
+        validate_personal_note_contract(pool).await?;
+    }
+    if schema_version >= 5 {
+        validate_learning_lifecycle_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 6 {
+        validate_review_attempt_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 7 {
+        validate_review_help_usage_contract(pool).await?;
+    }
+    if schema_version >= 8 {
+        validate_review_completion_contract(pool).await?;
+    }
+    if schema_version >= 9 {
+        validate_problem_mastery_contract(pool).await?;
+    }
+    if schema_version >= 10 {
+        validate_today_plan_contract(pool).await?;
+    }
+    if schema_version >= 11 {
+        validate_weekly_acm_budget_contract(pool).await?;
+    }
+
+    Ok(())
+}
+
+fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)> {
     let mut expected_objects = vec![
         (
             "table".to_owned(),
@@ -3222,69 +4750,35 @@ async fn validate_schema_contract(
         ));
         expected_objects.sort();
     }
-    if objects != expected_objects {
-        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    if schema_version >= 10 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "today_plan_entries_by_plan".to_owned(),
+                "today_plan_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "today_plan_entries".to_owned(),
+                "today_plan_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "today_plans".to_owned(),
+                "today_plans".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
     }
-
-    validate_app_metadata_columns(pool).await?;
-
-    let table_sql: String = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
-    .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
-    const EXPECTED_APP_METADATA_SQL: &str = "\
-        CREATE TABLE app_metadata (\
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
-            schema_generation INTEGER NOT NULL CHECK (schema_generation > 0),\
-            created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
-        )";
-    if normalize_schema_sql(&table_sql) != normalize_schema_sql(EXPECTED_APP_METADATA_SQL) {
-        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    if schema_version >= 11 {
+        expected_objects.push((
+            "table".to_owned(),
+            "weekly_acm_budgets".to_owned(),
+            "weekly_acm_budgets".to_owned(),
+        ));
+        expected_objects.sort();
     }
-
-    let metadata: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT singleton, schema_generation, created_at_utc FROM app_metadata",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
-    if metadata.len() != 1
-        || metadata[0].0 != 1
-        || metadata[0].1 != schema_version
-        || metadata[0].2.is_empty()
-    {
-        return Err(StartupRecoveryReason::IntegrityCheckFailed);
-    }
-
-    if schema_version >= 2 {
-        validate_workspace_settings_contract(pool).await?;
-    }
-    if schema_version >= 3 {
-        validate_contest_import_contract(pool, schema_version).await?;
-    }
-    if schema_version >= 4 {
-        validate_personal_note_contract(pool).await?;
-    }
-    if schema_version >= 5 {
-        validate_learning_lifecycle_contract(pool).await?;
-    }
-    if schema_version >= 6 {
-        validate_review_attempt_contract(pool, schema_version).await?;
-    }
-    if schema_version >= 7 {
-        validate_review_help_usage_contract(pool).await?;
-    }
-    if schema_version >= 8 {
-        validate_review_completion_contract(pool).await?;
-    }
-    if schema_version >= 9 {
-        validate_problem_mastery_contract(pool).await?;
-    }
-
-    Ok(())
+    expected_objects
 }
 
 async fn validate_contest_import_contract(
@@ -3294,23 +4788,69 @@ async fn validate_contest_import_contract(
     validate_table_columns(
         pool,
         "contests",
-        &["id", "platform", "external_contest_key", "title", "source_url", "starts_at_utc", "import_status", "created_at_utc"],
+        &[
+            "id",
+            "platform",
+            "external_contest_key",
+            "title",
+            "source_url",
+            "starts_at_utc",
+            "import_status",
+            "created_at_utc",
+        ],
     )
     .await?;
     let problem_columns = if schema_version >= 4 {
-        vec!["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc", "identity_type"]
+        vec![
+            "id",
+            "platform",
+            "external_contest_key",
+            "external_problem_key",
+            "title",
+            "rating",
+            "source_url",
+            "created_at_utc",
+            "identity_type",
+        ]
     } else {
-        vec!["id", "platform", "external_contest_key", "external_problem_key", "title", "rating", "source_url", "created_at_utc"]
+        vec![
+            "id",
+            "platform",
+            "external_contest_key",
+            "external_problem_key",
+            "title",
+            "rating",
+            "source_url",
+            "created_at_utc",
+        ]
     };
     validate_table_columns(pool, "problems", &problem_columns).await?;
-    validate_table_columns(pool, "contest_problems", &["contest_id", "problem_id", "ordinal", "import_state"]).await?;
-    validate_table_columns(pool, "problem_statement_snapshots", &["problem_id", "source_html", "sanitized_html", "captured_at_utc"]).await?;
-    validate_table_columns(pool, "problem_statement_assets", &["problem_id", "local_ref", "media_type", "bytes"]).await
+    validate_table_columns(
+        pool,
+        "contest_problems",
+        &["contest_id", "problem_id", "ordinal", "import_state"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "problem_statement_snapshots",
+        &[
+            "problem_id",
+            "source_html",
+            "sanitized_html",
+            "captured_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "problem_statement_assets",
+        &["problem_id", "local_ref", "media_type", "bytes"],
+    )
+    .await
 }
 
-async fn validate_personal_note_contract(
-    pool: &SqlitePool,
-) -> Result<(), StartupRecoveryReason> {
+async fn validate_personal_note_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
     validate_table_columns(
         pool,
         "file_bindings",
@@ -3330,13 +4870,13 @@ async fn validate_personal_note_contract(
 
 async fn validate_learning_lifecycle_contract(
     pool: &SqlitePool,
+    schema_version: i64,
 ) -> Result<(), StartupRecoveryReason> {
-    validate_table_columns(
-        pool,
-        "problem_learning_states",
-        &["problem_id", "learning_status", "learning_status_since_utc"],
-    )
-    .await?;
+    let mut columns = vec!["problem_id", "learning_status", "learning_status_since_utc"];
+    if schema_version >= 10 {
+        columns.push("pinned_priority");
+    }
+    validate_table_columns(pool, "problem_learning_states", &columns).await?;
     validate_table_columns(
         pool,
         "review_cycles",
@@ -3398,12 +4938,7 @@ async fn validate_review_attempt_contract(
             "evidence_codes_json",
         ]);
     }
-    validate_table_columns(
-        pool,
-        "review_attempts",
-        &columns,
-    )
-    .await
+    validate_table_columns(pool, "review_attempts", &columns).await
 }
 
 async fn validate_review_help_usage_contract(
@@ -3474,9 +5009,7 @@ async fn validate_review_completion_contract(
     }
 }
 
-async fn validate_problem_mastery_contract(
-    pool: &SqlitePool,
-) -> Result<(), StartupRecoveryReason> {
+async fn validate_problem_mastery_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
     validate_table_columns(
         pool,
         "problem_mastery_evidence",
@@ -3508,6 +5041,85 @@ async fn validate_problem_mastery_contract(
     }
 }
 
+async fn validate_today_plan_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "today_plans",
+        &[
+            "id",
+            "local_date",
+            "budget_minutes",
+            "planned_minutes",
+            "over_budget_minutes",
+            "review_only_streak",
+            "created_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "today_plan_entries",
+        &[
+            "id",
+            "today_plan_id",
+            "problem_id",
+            "review_attempt_id",
+            "lane",
+            "reason",
+            "planning_cost_minutes",
+            "position",
+            "entry_origin",
+            "entry_status",
+            "reconciliation_added",
+        ],
+    )
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM today_plans tp WHERE \
+         tp.planned_minutes != COALESCE((SELECT SUM(planning_cost_minutes) \
+             FROM today_plan_entries e WHERE e.today_plan_id = tp.id), 0) \
+         OR tp.over_budget_minutes != MAX(tp.planned_minutes - tp.budget_minutes, 0) \
+         OR EXISTS (SELECT 1 FROM today_plan_entries e WHERE e.today_plan_id = tp.id \
+             AND e.position != (SELECT COUNT(*) FROM today_plan_entries earlier \
+                 WHERE earlier.today_plan_id = e.today_plan_id AND earlier.position < e.position)) \
+         OR EXISTS (SELECT 1 FROM today_plan_entries e \
+             JOIN review_attempts ra ON ra.id = e.review_attempt_id \
+             WHERE e.today_plan_id = tp.id AND \
+               ((e.entry_status = 'in_progress' AND ra.attempt_status != 'in_progress') \
+                OR (e.entry_status = 'completed' AND ra.attempt_status != 'completed')))",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
+async fn validate_weekly_acm_budget_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "weekly_acm_budgets",
+        &["weekday", "budget_minutes", "updated_at_utc"],
+    )
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM weekly_acm_budgets WHERE weekday NOT BETWEEN 1 AND 7 OR budget_minutes < 0",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -3527,6 +5139,9 @@ async fn validate_table_columns(
         "review_failure_reasons" => "PRAGMA table_xinfo('review_failure_reasons')",
         "review_void_events" => "PRAGMA table_xinfo('review_void_events')",
         "problem_mastery_evidence" => "PRAGMA table_xinfo('problem_mastery_evidence')",
+        "today_plans" => "PRAGMA table_xinfo('today_plans')",
+        "today_plan_entries" => "PRAGMA table_xinfo('today_plan_entries')",
+        "weekly_acm_budgets" => "PRAGMA table_xinfo('weekly_acm_budgets')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -3551,7 +5166,15 @@ async fn validate_migration_ledger_contract(
             .map_err(|_| StartupRecoveryReason::MigrationLedgerInvalid)?;
     let expected = vec![
         (0, "version".to_owned(), "BIGINT".to_owned(), 0, None, 1, 0),
-        (1, "description".to_owned(), "TEXT".to_owned(), 1, None, 0, 0),
+        (
+            1,
+            "description".to_owned(),
+            "TEXT".to_owned(),
+            1,
+            None,
+            0,
+            0,
+        ),
         (
             2,
             "installed_on".to_owned(),
@@ -3608,15 +5231,21 @@ fn normalize_schema_sql(sql: &str) -> String {
         .collect()
 }
 
-async fn validate_app_metadata_columns(
-    pool: &SqlitePool,
-) -> Result<(), StartupRecoveryReason> {
+async fn validate_app_metadata_columns(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
     let actual: Vec<SqliteColumnContract> = sqlx::query_as("PRAGMA table_xinfo('app_metadata')")
         .fetch_all(pool)
         .await
         .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
     let expected = vec![
-        (0, "singleton".to_owned(), "INTEGER".to_owned(), 0, None, 1, 0),
+        (
+            0,
+            "singleton".to_owned(),
+            "INTEGER".to_owned(),
+            0,
+            None,
+            1,
+            0,
+        ),
         (
             1,
             "schema_generation".to_owned(),
@@ -3644,6 +5273,43 @@ async fn validate_app_metadata_columns(
     }
 }
 
+async fn validate_app_metadata_contract(
+    pool: &SqlitePool,
+    schema_version: i64,
+) -> Result<(), StartupRecoveryReason> {
+    validate_app_metadata_columns(pool).await?;
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+    .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+    const EXPECTED_APP_METADATA_SQL: &str = "\
+        CREATE TABLE app_metadata (\
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+            schema_generation INTEGER NOT NULL CHECK (schema_generation > 0),\
+            created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+        )";
+    if normalize_schema_sql(&table_sql) != normalize_schema_sql(EXPECTED_APP_METADATA_SQL) {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let metadata: Vec<(i64, i64, String)> =
+        sqlx::query_as("SELECT singleton, schema_generation, created_at_utc FROM app_metadata")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if metadata.len() == 1
+        && metadata[0].0 == 1
+        && metadata[0].1 == schema_version
+        && !metadata[0].2.is_empty()
+    {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
 async fn validate_workspace_settings_contract(
     pool: &SqlitePool,
 ) -> Result<(), StartupRecoveryReason> {
@@ -3653,7 +5319,15 @@ async fn validate_workspace_settings_contract(
             .await
             .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
     let expected = vec![
-        (0, "singleton".to_owned(), "INTEGER".to_owned(), 0, None, 1, 0),
+        (
+            0,
+            "singleton".to_owned(),
+            "INTEGER".to_owned(),
+            0,
+            None,
+            1,
+            0,
+        ),
         (
             1,
             "active_vault_path".to_owned(),
@@ -3825,25 +5499,120 @@ mod tests {
     use std::fs;
 
     use acm_os_application::{
-        add_extra_problem_link, complete_review, configure_workspace, create_personal_note,
-        delete_personal_note,
-        import_codeforces_contest,
-        query_workspace_configuration, ContestImportDraft, ContestImportPort, ContestReadPort,
-        ContestImportStatus, ContestProblemSlotDraft, StartupGateStatus, StatementAssetDraft, StatementSnapshotDraft,
-        StartupRecoveryReason, WorkspaceConfigurationDraft, WorkspaceConfigurationError,
-        PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
-        WorkspaceConfigurationStatus, WorkspacePathField,
-        ProblemIdentityType, ProblemLifecyclePort, transition_problem_lifecycle,
-        reveal_review_help, review_focus, review_help_drawer, review_history,
-        update_problem_mastery_evidence,
-        start_or_resume_review, void_review, ReviewCompletionInput, ReviewFailureReason,
-        SubmissionFact,
-        INITIAL_PROBLEM_MARKDOWN,
+        accept_today_extra_suggestion, add_extra_problem_link, apply_today_replan, complete_review,
+        complete_today_entry, configure_workspace, create_personal_note, delete_personal_note,
+        import_codeforces_contest, load_or_generate_today_snapshot,
+        preview_today_extra_suggestions, preview_today_replan, query_workspace_configuration,
+        reorder_today_snapshot, reveal_review_help, review_focus, review_help_drawer,
+        review_history, start_or_resume_review, transition_problem_lifecycle,
+        update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
+        ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
+        ContestImportStatus, ContestProblemSlotDraft, ContestReadPort, PersonalNoteError,
+        PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType,
+        ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason, StartupGateStatus,
+        StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft, SubmissionFact,
+        TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
+        WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
+        WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::Executor;
     use tempfile::TempDir;
 
     use super::*;
+
+    struct CoreLoopContestSource {
+        manifest: ContestImportDraft,
+        snapshots: Vec<StatementSnapshotDraft>,
+    }
+
+    #[tokio::test]
+    async fn weekly_budget_repeats_while_today_override_stays_date_local() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let schedule = WeeklyAcmBudgetSchedule {
+            monday: None,
+            tuesday: None,
+            wednesday: Some(95),
+            thursday: None,
+            friday: None,
+            saturday: Some(101),
+            sunday: Some(0),
+        };
+        assert_eq!(
+            runtime
+                .save_weekly_acm_budget(&schedule)
+                .await
+                .expect("save weekly defaults"),
+            schedule
+        );
+        let first_wednesday =
+            acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("first Wednesday");
+        let next_wednesday =
+            acm_os_domain::LocalDate::parse_iso("2026-08-19").expect("next Wednesday");
+        assert_eq!(
+            weekly_acm_budget_for_date(&schedule, first_wednesday),
+            Some(95)
+        );
+        assert_eq!(
+            weekly_acm_budget_for_date(&schedule, next_wednesday),
+            Some(95)
+        );
+
+        let first = load_or_generate_today_snapshot(&runtime, first_wednesday, 95)
+            .await
+            .expect("first Wednesday plan accepts arbitrary minutes");
+        assert_eq!(first.budget_minutes, 95);
+        let preview = preview_today_replan(&runtime, first_wednesday, 47)
+            .await
+            .expect("one-day arbitrary-minute override preview");
+        let overridden = apply_today_replan(&runtime, &preview)
+            .await
+            .expect("apply one-day override");
+        assert_eq!(overridden.budget_minutes, 47);
+
+        let unchanged = runtime
+            .load_weekly_acm_budget()
+            .await
+            .expect("reload weekly defaults");
+        assert_eq!(unchanged, schedule);
+        let next = load_or_generate_today_snapshot(
+            &runtime,
+            next_wednesday,
+            weekly_acm_budget_for_date(&unchanged, next_wednesday).expect("Wednesday default"),
+        )
+        .await
+        .expect("next Wednesday plan");
+        assert_eq!(next.budget_minutes, 95);
+        assert_eq!(
+            runtime
+                .load_today_snapshot(first_wednesday)
+                .await
+                .expect("first Wednesday read")
+                .expect("first Wednesday snapshot")
+                .budget_minutes,
+            47
+        );
+    }
+
+    impl ContestImportSource for CoreLoopContestSource {
+        async fn fetch_manifest(
+            &self,
+            _contest: &acm_os_domain::CodeforcesContestIdentity,
+        ) -> Result<ContestImportDraft, ContestImportSourceError> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn fetch_snapshot(
+            &self,
+            problem: &acm_os_domain::CodeforcesProblemIdentity,
+        ) -> Result<StatementSnapshotDraft, ContestImportSourceError> {
+            self.snapshots
+                .iter()
+                .find(|snapshot| &snapshot.problem == problem)
+                .cloned()
+                .ok_or(ContestImportSourceError::InvalidRemoteData)
+        }
+    }
 
     fn contest_draft() -> ContestImportDraft {
         let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
@@ -3882,7 +5651,11 @@ mod tests {
     }
 
     fn snapshot_with_asset(index: &str) -> StatementSnapshotDraft {
-        let mut snapshot = snapshot(index, "<img src=\"acm-os-asset://fixture\">", "<img src=\"acm-os-asset://fixture\">");
+        let mut snapshot = snapshot(
+            index,
+            "<img src=\"acm-os-asset://fixture\">",
+            "<img src=\"acm-os-asset://fixture\">",
+        );
         snapshot.assets.push(StatementAssetDraft {
             local_ref: "acm-os-asset://fixture".to_owned(),
             media_type: "image/png".to_owned(),
@@ -4035,11 +5808,9 @@ mod tests {
         )
         .await
         .expect("create version one metadata");
-        pool.execute(
-            "INSERT INTO app_metadata (singleton, schema_generation) VALUES (1, 1)",
-        )
-        .await
-        .expect("insert version one metadata");
+        pool.execute("INSERT INTO app_metadata (singleton, schema_generation) VALUES (1, 1)")
+            .await
+            .expect("insert version one metadata");
 
         let migration = MIGRATOR
             .iter()
@@ -4058,6 +5829,36 @@ mod tests {
         .expect("record version one migration");
     }
 
+    async fn rewrite_as_legacy_m5_schema(pool: &SqlitePool) {
+        let mut transaction = pool.begin().await.expect("legacy schema transaction");
+        for statement in [
+            "DROP TABLE weekly_acm_budgets",
+            "ALTER TABLE problem_learning_states RENAME TO problem_learning_states_current",
+            LEGACY_M5_LEARNING_STATES_SQL,
+            "INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) SELECT problem_id, learning_status, learning_status_since_utc FROM problem_learning_states_current",
+            "DROP TABLE problem_learning_states_current",
+            "DROP INDEX today_plan_entries_by_plan",
+            "ALTER TABLE today_plan_entries RENAME TO today_plan_entries_current",
+            LEGACY_M5_TODAY_ENTRIES_SQL,
+            "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
+            "DROP TABLE today_plan_entries_current",
+            "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
+            "DELETE FROM _sqlx_migrations WHERE version = 11",
+            "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await
+                .expect("rewrite legacy schema");
+        }
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 10")
+            .bind(LEGACY_M5_MIGRATION_10_CHECKSUM)
+            .execute(&mut *transaction)
+            .await
+            .expect("restore legacy checksum");
+        transaction.commit().await.expect("commit legacy schema");
+    }
+
     #[tokio::test]
     async fn new_database_migrates_and_passes_integrity() {
         let directory = TempDir::new().expect("temporary app data");
@@ -4065,15 +5866,1100 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 9 }
+            &StartupGateStatus::Ready { schema_version: 11 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 9);
+        assert_eq!(ledger_count, 11);
         verify_integrity(pool).await.expect("database integrity");
+    }
+
+    #[tokio::test]
+    async fn known_legacy_m5_schema_upgrades_without_losing_today_or_learning_facts() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("study candidate");
+        let original = load_or_generate_today_snapshot(&runtime, day, 95)
+            .await
+            .expect("legacy Today plan");
+        assert_eq!(original.entries.len(), 1);
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        drop(runtime);
+        rewrite_as_legacy_m5_schema(&pool).await;
+        pool.close().await;
+
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(
+            upgraded.status(),
+            &StartupGateStatus::Ready { schema_version: 11 }
+        );
+        let restored = upgraded
+            .load_today_snapshot(day)
+            .await
+            .expect("load restored Today")
+            .expect("restored Today plan");
+        assert_eq!(restored.plan_id, original.plan_id);
+        assert_eq!(restored.budget_minutes, 95);
+        assert_eq!(restored.entries.len(), 1);
+        assert_eq!(
+            restored.entries[0].problem_id,
+            original.entries[0].problem_id
+        );
+        assert_eq!(restored.entries[0].origin, TodayEntryOrigin::Auto);
+        assert_eq!(restored.entries[0].status, TodayEntryStatus::NotStarted);
+        let pinned: i64 = sqlx::query_scalar(
+            "SELECT pinned_priority FROM problem_learning_states WHERE problem_id = ?1",
+        )
+        .bind(
+            restored.entries[0]
+                .problem_id
+                .parse::<i64>()
+                .expect("problem id"),
+        )
+        .fetch_one(upgraded._pool.as_ref().expect("upgraded pool"))
+        .await
+        .expect("pinned default");
+        assert_eq!(pinned, 0);
+        let backups = files_under(&directory.path().join("backups").join("pre-migration"));
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0]
+            .file_name()
+            .expect("backup filename")
+            .to_string_lossy()
+            .starts_with("schema-10-to-11-"));
+    }
+
+    #[tokio::test]
+    async fn unknown_schema_near_legacy_m5_fingerprint_still_requires_recovery() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        drop(runtime);
+        rewrite_as_legacy_m5_schema(&pool).await;
+        sqlx::query("ALTER TABLE today_plans ADD COLUMN unknown_state TEXT")
+            .execute(&pool)
+            .await
+            .expect("unknown schema change");
+        pool.close().await;
+
+        let blocked = start_database(directory.path()).await;
+        assert_eq!(
+            blocked.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_m5_fingerprint_with_wrong_metadata_never_runs_compatibility_writes() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        drop(runtime);
+        rewrite_as_legacy_m5_schema(&pool).await;
+        sqlx::query("UPDATE app_metadata SET schema_generation = 9 WHERE singleton = 1")
+            .execute(&pool)
+            .await
+            .expect("tamper metadata generation");
+        pool.close().await;
+
+        let blocked = start_database(directory.path()).await;
+        assert_eq!(
+            blocked.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+        let inspection = connect_read_only(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("inspect blocked database");
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_xinfo('problem_learning_states') ORDER BY cid",
+        )
+        .fetch_all(&inspection)
+        .await
+        .expect("learning columns remain legacy");
+        assert_eq!(
+            columns,
+            ["problem_id", "learning_status", "learning_status_since_utc"]
+        );
+        inspection.close().await;
+    }
+
+    #[tokio::test]
+    async fn today_snapshot_is_stable_for_date_restart_and_uses_fresh_next_day_facts() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let first_day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("first day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            first_day,
+        )
+        .await
+        .expect("pending study candidate");
+
+        let generated = load_or_generate_today_snapshot(&runtime, first_day, 60)
+            .await
+            .expect("generate first snapshot");
+        assert_eq!(generated.budget_minutes, 60);
+        assert_eq!(generated.planned_minutes, 60);
+        assert_eq!(generated.entries.len(), 1);
+        assert_eq!(
+            generated.entries[0].lane,
+            acm_os_domain::TodayCandidateLane::Study
+        );
+
+        let same_process = load_or_generate_today_snapshot(&runtime, first_day, 999)
+            .await
+            .expect("reuse first snapshot");
+        assert_eq!(same_process, generated);
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        let after_restart = load_or_generate_today_snapshot(&restarted, first_day, 15)
+            .await
+            .expect("reuse after restart");
+        assert_eq!(after_restart, generated);
+
+        sqlx::query(
+            "UPDATE problem_learning_states SET learning_status = 'unstarted', \
+             learning_status_since_utc = '2026-08-13T00:00:00.000Z'",
+        )
+        .execute(restarted._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("change next-day source fact");
+        let next_day = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("next day");
+        let fresh = load_or_generate_today_snapshot(&restarted, next_day, 60)
+            .await
+            .expect("generate next-day snapshot");
+        assert_ne!(fresh.plan_id, generated.plan_id);
+        assert!(fresh.entries.is_empty());
+        assert_eq!(fresh.planned_minutes, 0);
+        assert_eq!(fresh.review_only_streak, 0);
+    }
+
+    #[tokio::test]
+    async fn today_plan_and_entries_roll_back_as_one_snapshot() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        let draft = acm_os_domain::TodayPlanDraft {
+            entries: vec![acm_os_domain::TodayCandidate {
+                problem_id: "999999".to_owned(),
+                review_attempt_id: None,
+                lane: acm_os_domain::TodayCandidateLane::Study,
+                reason: acm_os_domain::TodayCandidateReason::Upsolve,
+                planning_cost_minutes: 60,
+                pinned: false,
+                learning_status_since: day,
+                scheduled_due_local_date: None,
+            }],
+            budget_minutes: 60,
+            planned_minutes: 60,
+            over_budget_minutes: 0,
+            unplanned_review_count: 0,
+            unplanned_study_count: 0,
+            next_review_only_streak: 0,
+        };
+        assert!(runtime
+            .create_or_load_today_snapshot(day, &draft)
+            .await
+            .is_err());
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM today_plans), \
+                    (SELECT COUNT(*) FROM today_plan_entries)",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("snapshot counts");
+        assert_eq!(counts, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn today_reconciliation_projects_review_start_and_completion_without_regeneration() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("marked date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due date");
+        let initial = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("initial due plan");
+        assert_eq!(initial.entries.len(), 1);
+        assert_eq!(initial.entries[0].status, TodayEntryStatus::NotStarted);
+        assert!(initial.entries[0].review_attempt_id.is_none());
+
+        let attempt = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("start outside Today");
+        let started = load_or_generate_today_snapshot(&runtime, due, 999)
+            .await
+            .expect("reconcile started review");
+        assert_eq!(started.plan_id, initial.plan_id);
+        assert_eq!(started.budget_minutes, initial.budget_minutes);
+        assert_eq!(started.entries.len(), 1);
+        assert_eq!(started.entries[0].status, TodayEntryStatus::InProgress);
+        assert_eq!(
+            started.entries[0].review_attempt_id.as_deref(),
+            Some(attempt.attempt_id.as_str())
+        );
+
+        complete_review(&runtime, &attempt.attempt_id, mastered_input(), due)
+            .await
+            .expect("complete review");
+        let completed = load_or_generate_today_snapshot(&runtime, due, 999)
+            .await
+            .expect("reconcile completed review");
+        assert_eq!(completed.plan_id, initial.plan_id);
+        assert_eq!(completed.entries.len(), 1);
+        assert_eq!(completed.entries[0].status, TodayEntryStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn today_reconciliation_appends_only_real_external_carry_in() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("today");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("lifecycle transition");
+        }
+        let initial = load_or_generate_today_snapshot(&runtime, today, 0)
+            .await
+            .expect("empty plan before future review");
+        assert!(initial.entries.is_empty());
+
+        let attempt = start_or_resume_review(&runtime, &problem, today)
+            .await
+            .expect("start early outside Today");
+        let reconciled = load_or_generate_today_snapshot(&runtime, today, 0)
+            .await
+            .expect("append real carry-in");
+        assert_eq!(reconciled.plan_id, initial.plan_id);
+        assert_eq!(reconciled.entries.len(), 1);
+        assert_eq!(reconciled.entries[0].status, TodayEntryStatus::InProgress);
+        assert_eq!(
+            reconciled.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::ContinueReview
+        );
+        assert_eq!(
+            reconciled.entries[0].review_attempt_id,
+            Some(attempt.attempt_id)
+        );
+        assert_eq!(reconciled.planned_minutes, 30);
+        assert_eq!(reconciled.over_budget_minutes, 30);
+
+        let stable = load_or_generate_today_snapshot(&runtime, today, 300)
+            .await
+            .expect("idempotent reconciliation");
+        assert_eq!(stable, reconciled);
+    }
+
+    #[tokio::test]
+    async fn today_reconciliation_does_not_treat_void_as_completed_work() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("marked date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
+        let initial = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("due entry");
+        let attempt = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("start review");
+        load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("project in progress");
+        void_review(&runtime, &attempt.attempt_id, "mistaken start")
+            .await
+            .expect("void attempt");
+        let reconciled = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("reconcile void");
+        assert_eq!(reconciled.plan_id, initial.plan_id);
+        assert_eq!(reconciled.entries.len(), 1);
+        assert_eq!(reconciled.entries[0].status, TodayEntryStatus::NotStarted);
+        assert!(reconciled.entries[0].review_attempt_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn today_void_restores_an_initial_due_review_carry_in_instead_of_deleting_it() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("marked date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("lifecycle transition");
+        }
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
+        let attempt = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("start before Today generation");
+        let initial = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("initial carry-in");
+        assert_eq!(
+            initial.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::ContinueReview
+        );
+        void_review(&runtime, &attempt.attempt_id, "mistaken start")
+            .await
+            .expect("void attempt");
+        let reconciled = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("restore due review");
+        assert_eq!(reconciled.entries.len(), 1);
+        assert_eq!(
+            reconciled.entries[0].lane,
+            acm_os_domain::TodayCandidateLane::Review
+        );
+        assert_eq!(
+            reconciled.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::DueFirstColdStart
+        );
+        assert_eq!(reconciled.entries[0].status, TodayEntryStatus::NotStarted);
+        assert!(reconciled.entries[0].review_attempt_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn today_reorder_persists_complete_same_plan_permutation() {
+        let (directory, runtime, _vault, _problems, problem_a) = personal_note_fixture().await;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("personal B");
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        for problem in [&problem_a, &problem_b] {
+            transition_problem_lifecycle(
+                &runtime,
+                problem,
+                acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+                day,
+            )
+            .await
+            .expect("pending study candidate");
+        }
+        let initial = load_or_generate_today_snapshot(&runtime, day, 120)
+            .await
+            .expect("two-entry plan");
+        assert_eq!(initial.entries.len(), 2);
+        let reversed = initial
+            .entries
+            .iter()
+            .rev()
+            .map(|entry| entry.entry_id.clone())
+            .collect::<Vec<_>>();
+        let reordered = reorder_today_snapshot(&runtime, &initial.plan_id, &reversed)
+            .await
+            .expect("reorder snapshot");
+        assert_eq!(
+            reordered
+                .entries
+                .iter()
+                .map(|entry| entry.entry_id.clone())
+                .collect::<Vec<_>>(),
+            reversed
+        );
+        assert_eq!(reordered.budget_minutes, initial.budget_minutes);
+        assert_eq!(reordered.planned_minutes, initial.planned_minutes);
+        for reordered_entry in &reordered.entries {
+            let original = initial
+                .entries
+                .iter()
+                .find(|entry| entry.entry_id == reordered_entry.entry_id)
+                .expect("same entry");
+            assert_eq!(reordered_entry.problem_id, original.problem_id);
+            assert_eq!(reordered_entry.status, original.status);
+            assert_eq!(reordered_entry.origin, original.origin);
+        }
+
+        let reopened = load_or_generate_today_snapshot(&runtime, day, 1)
+            .await
+            .expect("reopen without algorithmic shuffle");
+        assert_eq!(reopened, reordered);
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let after_restart = load_or_generate_today_snapshot(&restarted, day, 1)
+            .await
+            .expect("reopen after restart");
+        assert_eq!(after_restart, reordered);
+    }
+
+    #[tokio::test]
+    async fn today_reorder_rejects_partial_duplicate_unknown_and_cross_plan_ids_atomically() {
+        let (_directory, runtime, _vault, _problems, problem_a) = personal_note_fixture().await;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("personal B");
+        let first_day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("first day");
+        for problem in [&problem_a, &problem_b] {
+            transition_problem_lifecycle(
+                &runtime,
+                problem,
+                acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+                first_day,
+            )
+            .await
+            .expect("pending study candidate");
+        }
+        let first = load_or_generate_today_snapshot(&runtime, first_day, 120)
+            .await
+            .expect("first plan");
+        let second_day = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("second day");
+        let second = load_or_generate_today_snapshot(&runtime, second_day, 120)
+            .await
+            .expect("second plan");
+        let original_ids = first
+            .entries
+            .iter()
+            .map(|entry| entry.entry_id.clone())
+            .collect::<Vec<_>>();
+        let invalid_orders = vec![
+            vec![original_ids[0].clone()],
+            vec![original_ids[0].clone(), original_ids[0].clone()],
+            vec![original_ids[0].clone(), uuid::Uuid::now_v7().to_string()],
+            vec![original_ids[0].clone(), second.entries[1].entry_id.clone()],
+        ];
+        for invalid in invalid_orders {
+            assert_eq!(
+                reorder_today_snapshot(&runtime, &first.plan_id, &invalid).await,
+                Err(TodaySnapshotError::InvalidReorder)
+            );
+            let unchanged = runtime
+                .load_today_snapshot(first_day)
+                .await
+                .expect("load first plan")
+                .expect("first plan exists");
+            assert_eq!(
+                unchanged
+                    .entries
+                    .iter()
+                    .map(|entry| entry.entry_id.clone())
+                    .collect::<Vec<_>>(),
+                original_ids
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn today_replan_preview_is_read_only_and_apply_replaces_only_auto_not_started() {
+        let (_directory, runtime, _vault, _problems, problem_a) = personal_note_fixture().await;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("personal B");
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        for problem in [&problem_a, &problem_b] {
+            transition_problem_lifecycle(
+                &runtime,
+                problem,
+                acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+                day,
+            )
+            .await
+            .expect("pending candidate");
+        }
+        let initial = load_or_generate_today_snapshot(&runtime, day, 120)
+            .await
+            .expect("initial plan");
+        assert_eq!(initial.entries.len(), 2);
+
+        sqlx::query("UPDATE today_plan_entries SET entry_origin = 'manual' WHERE id = ?1")
+            .bind(&initial.entries[1].entry_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("mark protected manual entry");
+        let protected = runtime
+            .load_today_snapshot(day)
+            .await
+            .expect("load plan")
+            .expect("plan");
+        let before_rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+            "SELECT id, position, entry_origin, entry_status FROM today_plan_entries ORDER BY position",
+        )
+        .fetch_all(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("before rows");
+
+        let preview = preview_today_replan(&runtime, day, 60)
+            .await
+            .expect("read-only preview");
+        assert_eq!(preview.expected_snapshot, protected);
+        assert_eq!(preview.proposed_budget_minutes, 60);
+        assert_eq!(preview.entries.len(), 1);
+        assert_eq!(
+            preview.entries[0].existing_entry_id.as_deref(),
+            Some(protected.entries[1].entry_id.as_str())
+        );
+        assert_eq!(preview.entries[0].origin, TodayEntryOrigin::Manual);
+        let after_preview_rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+            "SELECT id, position, entry_origin, entry_status FROM today_plan_entries ORDER BY position",
+        )
+        .fetch_all(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("after preview rows");
+        assert_eq!(after_preview_rows, before_rows);
+
+        let applied = apply_today_replan(&runtime, &preview)
+            .await
+            .expect("explicit apply");
+        assert_eq!(applied.plan_id, initial.plan_id);
+        assert_eq!(applied.budget_minutes, 60);
+        assert_eq!(applied.entries.len(), 1);
+        assert_eq!(applied.entries[0].entry_id, protected.entries[1].entry_id);
+        assert_eq!(applied.entries[0].origin, TodayEntryOrigin::Manual);
+    }
+
+    #[tokio::test]
+    async fn today_replan_apply_rejects_stale_preview_without_writing() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("pending candidate");
+        let initial = load_or_generate_today_snapshot(&runtime, day, 60)
+            .await
+            .expect("initial plan");
+        let preview = preview_today_replan(&runtime, day, 0)
+            .await
+            .expect("preview");
+        sqlx::query("UPDATE today_plan_entries SET entry_status = 'completed' WHERE id = ?1")
+            .bind(&initial.entries[0].entry_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("Today completion changed the snapshot");
+        let changed = runtime
+            .load_today_snapshot(day)
+            .await
+            .expect("load changed")
+            .expect("plan");
+        assert_eq!(
+            apply_today_replan(&runtime, &preview).await,
+            Err(TodaySnapshotError::StaleReplanPreview)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("reload")
+                .expect("plan"),
+            changed
+        );
+    }
+
+    #[tokio::test]
+    async fn today_replan_apply_rejects_tampered_entries_without_writing() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("pending candidate");
+        let initial = load_or_generate_today_snapshot(&runtime, day, 60)
+            .await
+            .expect("initial plan");
+        let mut preview = preview_today_replan(&runtime, day, 60)
+            .await
+            .expect("preview");
+        preview.entries[0].reason = acm_os_domain::TodayCandidateReason::Relearn;
+
+        assert_eq!(
+            apply_today_replan(&runtime, &preview).await,
+            Err(TodaySnapshotError::StaleReplanPreview)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("reload")
+                .expect("plan"),
+            initial
+        );
+    }
+
+    #[tokio::test]
+    async fn today_done_persists_learning_entry_completion_without_changing_lifecycle() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let first_day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("first day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            first_day,
+        )
+        .await
+        .expect("upsolve pending");
+        let upsolve_plan = load_or_generate_today_snapshot(&runtime, first_day, 60)
+            .await
+            .expect("upsolve plan");
+        assert_eq!(
+            upsolve_plan.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::Upsolve
+        );
+        let lifecycle_before = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("lifecycle");
+        let upsolve_completed = complete_today_entry(
+            &runtime,
+            &upsolve_plan.plan_id,
+            &upsolve_plan.entries[0].entry_id,
+        )
+        .await
+        .expect("complete upsolve entry");
+        assert_eq!(
+            upsolve_completed.entries[0].status,
+            TodayEntryStatus::Completed
+        );
+        assert_eq!(
+            complete_today_entry(
+                &runtime,
+                &upsolve_plan.plan_id,
+                &upsolve_plan.entries[0].entry_id
+            )
+            .await
+            .expect("idempotent Today Done"),
+            upsolve_completed
+        );
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem)
+                .await
+                .expect("lifecycle"),
+            lifecycle_before
+        );
+
+        let second_day = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("second day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            second_day,
+        )
+        .await
+        .expect("start learning");
+        let learning_plan = load_or_generate_today_snapshot(&runtime, second_day, 60)
+            .await
+            .expect("learning plan");
+        assert_eq!(
+            learning_plan.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::ContinueLearning
+        );
+        let learning_before = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("learning lifecycle");
+        complete_today_entry(
+            &runtime,
+            &learning_plan.plan_id,
+            &learning_plan.entries[0].entry_id,
+        )
+        .await
+        .expect("complete learning entry");
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem)
+                .await
+                .expect("learning lifecycle"),
+            learning_before
+        );
+
+        let numeric_problem_id = learning_plan.entries[0]
+            .problem_id
+            .parse::<i64>()
+            .expect("numeric problem id");
+        sqlx::query("UPDATE problem_learning_states SET learning_status = 'relearning' WHERE problem_id = ?1")
+            .bind(numeric_problem_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("relearning authoritative fixture");
+        let third_day = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("third day");
+        let relearn_plan = load_or_generate_today_snapshot(&runtime, third_day, 60)
+            .await
+            .expect("relearn plan");
+        assert_eq!(
+            relearn_plan.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::Relearn
+        );
+        let relearn_before = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("relearn lifecycle");
+        let completed = complete_today_entry(
+            &runtime,
+            &relearn_plan.plan_id,
+            &relearn_plan.entries[0].entry_id,
+        )
+        .await
+        .expect("complete relearn entry");
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem)
+                .await
+                .expect("relearn lifecycle"),
+            relearn_before
+        );
+        let reopened = load_or_generate_today_snapshot(&runtime, third_day, 1)
+            .await
+            .expect("reopen completed plan");
+        assert_eq!(reopened, completed);
+
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let after_restart = load_or_generate_today_snapshot(&restarted, third_day, 1)
+            .await
+            .expect("completed plan after restart");
+        assert_eq!(after_restart, completed);
+    }
+
+    #[tokio::test]
+    async fn today_done_rejects_review_unavailable_unknown_and_cross_plan_without_writing() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("marked date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("review lifecycle");
+        }
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
+        let review_plan = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("review plan");
+        let review_entry = &review_plan.entries[0];
+        assert!(matches!(
+            review_entry.reason,
+            acm_os_domain::TodayCandidateReason::DueFirstColdStart
+                | acm_os_domain::TodayCandidateReason::DueLongTermReview
+                | acm_os_domain::TodayCandidateReason::ContinueReview
+        ));
+        let attempts_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts")
+            .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("attempt count");
+        assert_eq!(
+            complete_today_entry(&runtime, &review_plan.plan_id, &review_entry.entry_id).await,
+            Err(TodaySnapshotError::InvalidTodayDone)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(due)
+                .await
+                .expect("review plan load")
+                .expect("review plan"),
+            review_plan
+        );
+        let attempts_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts")
+            .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("attempt count after rejection");
+        assert_eq!(attempts_after, attempts_before);
+
+        let study_problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("study problem");
+        create_personal_note(&runtime, &study_problem)
+            .await
+            .expect("personal study problem");
+        let study_day = acm_os_domain::LocalDate::parse_iso("2026-08-15").expect("study day");
+        transition_problem_lifecycle(
+            &runtime,
+            &study_problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            study_day,
+        )
+        .await
+        .expect("study fixture");
+        let study_plan = load_or_generate_today_snapshot(&runtime, study_day, 60)
+            .await
+            .expect("study plan");
+        let study_entry = &study_plan.entries[0];
+        sqlx::query("UPDATE today_plan_entries SET entry_status = 'unavailable' WHERE id = ?1")
+            .bind(&study_entry.entry_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("unavailable projection fixture");
+        let unavailable = runtime
+            .load_today_snapshot(study_day)
+            .await
+            .expect("load unavailable")
+            .expect("study plan");
+        let unknown_entry = uuid::Uuid::now_v7().to_string();
+        let invalid_requests = [
+            (study_plan.plan_id.as_str(), study_entry.entry_id.as_str()),
+            (study_plan.plan_id.as_str(), unknown_entry.as_str()),
+            (review_plan.plan_id.as_str(), study_entry.entry_id.as_str()),
+        ];
+        for (plan_id, entry_id) in invalid_requests {
+            assert_eq!(
+                complete_today_entry(&runtime, plan_id, entry_id).await,
+                Err(TodaySnapshotError::InvalidTodayDone)
+            );
+            assert_eq!(
+                runtime
+                    .load_today_snapshot(study_day)
+                    .await
+                    .expect("study plan load")
+                    .expect("study plan"),
+                unavailable
+            );
+            assert_eq!(
+                runtime
+                    .load_today_snapshot(due)
+                    .await
+                    .expect("review plan load")
+                    .expect("review plan"),
+                review_plan
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn today_reconciliation_projects_learning_entries_unavailable_and_restores_them() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let first_day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("first day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            first_day,
+        )
+        .await
+        .expect("upsolve pending");
+        let upsolve = load_or_generate_today_snapshot(&runtime, first_day, 60)
+            .await
+            .expect("upsolve plan");
+        let lifecycle_before = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("lifecycle");
+
+        let offline = directory.path().join("vault-offline");
+        fs::rename(&vault, &offline).expect("make vault unavailable");
+        let unavailable = load_or_generate_today_snapshot(&runtime, first_day, 1)
+            .await
+            .expect("Today detects unavailable vault");
+        assert_eq!(unavailable.entries[0].status, TodayEntryStatus::Unavailable);
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem)
+                .await
+                .expect("lifecycle"),
+            lifecycle_before
+        );
+
+        fs::rename(&offline, &vault).expect("restore vault");
+        let restored = load_or_generate_today_snapshot(&runtime, first_day, 1)
+            .await
+            .expect("Today detects restored vault");
+        assert_eq!(restored.entries[0].status, TodayEntryStatus::NotStarted);
+        assert_eq!(restored.entries[0].entry_id, upsolve.entries[0].entry_id);
+
+        let second_day = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("second day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            second_day,
+        )
+        .await
+        .expect("start learning");
+        let learning = load_or_generate_today_snapshot(&runtime, second_day, 60)
+            .await
+            .expect("learning plan");
+        assert_eq!(learning.entries[0].status, TodayEntryStatus::InProgress);
+        fs::rename(&vault, &offline).expect("make vault unavailable again");
+        let learning_unavailable = load_or_generate_today_snapshot(&runtime, second_day, 1)
+            .await
+            .expect("Today detects unavailable learning note");
+        assert_eq!(
+            learning_unavailable.entries[0].status,
+            TodayEntryStatus::Unavailable
+        );
+        fs::rename(&offline, &vault).expect("restore vault again");
+        let learning_restored = load_or_generate_today_snapshot(&runtime, second_day, 1)
+            .await
+            .expect("Today detects restored learning note");
+        assert_eq!(
+            learning_restored.entries[0].status,
+            TodayEntryStatus::InProgress
+        );
+
+        complete_today_entry(&runtime, &learning.plan_id, &learning.entries[0].entry_id)
+            .await
+            .expect("complete learning entry");
+        fs::rename(&vault, &offline).expect("make vault unavailable after completion");
+        runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("project unavailable after completion");
+        let completed = load_or_generate_today_snapshot(&runtime, second_day, 1)
+            .await
+            .expect("completed stays completed");
+        assert_eq!(completed.entries[0].status, TodayEntryStatus::Completed);
+
+        fs::rename(&offline, &vault).expect("restore vault for relearn");
+        let numeric_problem_id = learning.entries[0]
+            .problem_id
+            .parse::<i64>()
+            .expect("numeric problem id");
+        sqlx::query("UPDATE problem_learning_states SET learning_status = 'relearning' WHERE problem_id = ?1")
+            .bind(numeric_problem_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("relearning authoritative fixture");
+        let third_day = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("third day");
+        let relearn = load_or_generate_today_snapshot(&runtime, third_day, 60)
+            .await
+            .expect("relearn plan");
+        assert_eq!(
+            relearn.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::Relearn
+        );
+        let relearn_lifecycle = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("relearn lifecycle");
+        fs::rename(&vault, &offline).expect("make relearn note unavailable");
+        let relearn_unavailable = load_or_generate_today_snapshot(&runtime, third_day, 1)
+            .await
+            .expect("Today detects unavailable relearn note");
+        assert_eq!(
+            relearn_unavailable.entries[0].status,
+            TodayEntryStatus::Unavailable
+        );
+        fs::rename(&offline, &vault).expect("restore relearn note");
+        let relearn_restored = load_or_generate_today_snapshot(&runtime, third_day, 1)
+            .await
+            .expect("Today restores relearn entry");
+        assert_eq!(
+            relearn_restored.entries[0].status,
+            TodayEntryStatus::NotStarted
+        );
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem)
+                .await
+                .expect("relearn lifecycle"),
+            relearn_lifecycle
+        );
+    }
+
+    #[tokio::test]
+    async fn today_vault_availability_does_not_override_review_authority() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
+            .await
+            .expect("statement snapshot");
+        let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("marked date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, marked_on)
+                .await
+                .expect("review lifecycle");
+        }
+        let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
+        let review_plan = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("review plan");
+        assert_eq!(review_plan.entries[0].status, TodayEntryStatus::NotStarted);
+        let offline = directory.path().join("vault-offline-review");
+        fs::rename(&vault, &offline).expect("make vault unavailable");
+        runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("project unavailable binding");
+        let reconciled = load_or_generate_today_snapshot(&runtime, due, 30)
+            .await
+            .expect("review reconciliation");
+        assert_eq!(reconciled, review_plan);
+        assert_ne!(reconciled.entries[0].status, TodayEntryStatus::Unavailable);
     }
 
     #[tokio::test]
@@ -4082,7 +6968,10 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         let draft = contest_draft();
 
-        let initial = runtime.persist_manifest(&draft).await.expect("persist manifest");
+        let initial = runtime
+            .persist_manifest(&draft)
+            .await
+            .expect("persist manifest");
         assert_eq!(initial.status, ContestImportStatus::Incomplete);
         assert_eq!(initial.missing_snapshot_problems.len(), 2);
 
@@ -4096,7 +6985,10 @@ mod tests {
 
         // A duplicate manifest is the existing manifest fast path: no objects
         // are copied and it retains the known missing slot.
-        let duplicate = runtime.persist_manifest(&draft).await.expect("duplicate manifest");
+        let duplicate = runtime
+            .persist_manifest(&draft)
+            .await
+            .expect("duplicate manifest");
         assert_eq!(duplicate, after_a);
 
         let complete = runtime
@@ -4130,8 +7022,12 @@ mod tests {
         let asset_problem = acm_os_domain::CodeforcesProblemIdentity::new(
             acm_os_domain::CodeforcesContestIdentity::new(1979).expect("asset contest"),
             "A",
-        ).expect("asset problem");
-        let assets = runtime.statement_assets(&asset_problem).await.expect("read localized assets");
+        )
+        .expect("asset problem");
+        let assets = runtime
+            .statement_assets(&asset_problem)
+            .await
+            .expect("read localized assets");
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].local_ref, "acm-os-asset://fixture");
         let stored: String = sqlx::query_scalar(
@@ -4166,7 +7062,10 @@ mod tests {
         assert_eq!(first.vault_relative_path, "Problems/CF-1979-A.md");
         assert_eq!(first.content_digest.len(), 64);
         if cfg!(windows) {
-            assert!(first.windows_file_key.as_deref().is_some_and(|key| key.starts_with("same-file-1:")));
+            assert!(first
+                .windows_file_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("same-file-1:")));
         }
         assert_eq!(
             fs::read_to_string(problems.join("CF-1979-A.md")).expect("read created note"),
@@ -4203,7 +7102,10 @@ mod tests {
             .load_problem_lifecycle(&problem)
             .await
             .expect("initial lifecycle");
-        assert_eq!(initial.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert_eq!(
+            initial.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
         assert!(initial.active_review_cycle.is_none());
 
         let pending = transition_problem_lifecycle(
@@ -4214,7 +7116,10 @@ mod tests {
         )
         .await
         .expect("join upsolve");
-        assert_eq!(pending.learning_status, acm_os_domain::LearningStatus::UpsolvePending);
+        assert_eq!(
+            pending.learning_status,
+            acm_os_domain::LearningStatus::UpsolvePending
+        );
 
         transition_problem_lifecycle(
             &runtime,
@@ -4248,7 +7153,10 @@ mod tests {
             .load_problem_lifecycle(&problem)
             .await
             .expect("restored lifecycle");
-        assert_eq!(restored.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+        assert_eq!(
+            restored.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
         assert_eq!(
             restored
                 .active_review_cycle
@@ -4323,7 +7231,9 @@ mod tests {
         assert_eq!(focus.attempt.attempt_id, first.attempt_id);
         assert_eq!(focus.title, "Problem A");
         assert!(focus.statement_sanitized_html.contains("A"));
-        assert!(!focus.statement_sanitized_html.contains("DO NOT SEND THIS TO REVIEW"));
+        assert!(!focus
+            .statement_sanitized_html
+            .contains("DO NOT SEND THIS TO REVIEW"));
         assert_eq!(
             transition_problem_lifecycle(
                 &runtime,
@@ -4350,8 +7260,11 @@ mod tests {
             "# P\n\n## 前置知识\n- [[Graphs#DFS|Traversal]]\n\n## Hints\n### Hint 1\nold hint\n\n## 思路\nold idea\n\n## 代码\n```cpp\nsolve();\n```\n\n## 题解\nfull answer\n",
         )
         .expect("write help fixture");
-        fs::write(vault.join("Knowledge/Graphs.md"), "# Graphs\n\nDFS knowledge\n")
-            .expect("write knowledge fixture");
+        fs::write(
+            vault.join("Knowledge/Graphs.md"),
+            "# Graphs\n\nDFS knowledge\n",
+        )
+        .expect("write knowledge fixture");
         runtime
             .persist_first_snapshot(&snapshot("A", "<p>A</p>", "<p>A</p>"))
             .await
@@ -4471,7 +7384,10 @@ mod tests {
             first.lifecycle.learning_status,
             acm_os_domain::LearningStatus::LongTermReview
         );
-        let next_cycle = first.lifecycle.active_review_cycle.expect("continued cycle");
+        let next_cycle = first
+            .lifecycle
+            .active_review_cycle
+            .expect("continued cycle");
         assert_eq!(next_cycle.stage, 1);
         assert_eq!(next_cycle.next_due_local_date.to_iso_string(), "2026-08-24");
 
@@ -4500,7 +7416,9 @@ mod tests {
         );
         assert!(second.lifecycle.active_review_cycle.is_none());
 
-        let history = review_history(&runtime, &problem).await.expect("review history");
+        let history = review_history(&runtime, &problem)
+            .await
+            .expect("review history");
         assert_eq!(history.attempts.len(), 2);
         assert_eq!(
             history.historical_best_review,
@@ -4577,7 +7495,10 @@ mod tests {
         .await
         .expect("no final AC completes as fail");
         assert_eq!(failed.judgement, acm_os_domain::ReviewJudgement::Fail);
-        assert_eq!(failed.lifecycle.learning_status, acm_os_domain::LearningStatus::Relearning);
+        assert_eq!(
+            failed.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::Relearning
+        );
     }
 
     #[tokio::test]
@@ -4650,9 +7571,14 @@ mod tests {
         .await
         .expect("replacement attempt");
         assert_ne!(replacement.attempt_id, mistaken.attempt_id);
-        let history = review_history(&runtime2, &problem2).await.expect("void history");
+        let history = review_history(&runtime2, &problem2)
+            .await
+            .expect("void history");
         assert_eq!(history.attempts.len(), 2);
-        assert!(history.attempts.iter().any(|item| item.status == ReviewAttemptStatus::Void));
+        assert!(history
+            .attempts
+            .iter()
+            .any(|item| item.status == ReviewAttemptStatus::Void));
     }
 
     #[tokio::test]
@@ -4687,15 +7613,22 @@ mod tests {
         )
         .await
         .expect("early mastered");
-        let cycle = completed.lifecycle.active_review_cycle.expect("unchanged cycle");
-        assert_eq!(completed.lifecycle.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+        let cycle = completed
+            .lifecycle
+            .active_review_cycle
+            .expect("unchanged cycle");
+        assert_eq!(
+            completed.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
         assert_eq!(cycle.stage, 0);
         assert_eq!(cycle.next_due_local_date.to_iso_string(), "2026-08-14");
     }
 
     #[tokio::test]
     async fn completed_review_and_historical_best_survive_personal_note_deletion() {
-        let (_directory, runtime, _vault, problems, problem, attempt) = review_ready_fixture().await;
+        let (_directory, runtime, _vault, problems, problem, attempt) =
+            review_ready_fixture().await;
         complete_review(
             &runtime,
             &attempt.attempt_id,
@@ -4748,7 +7681,10 @@ mod tests {
         )
         .await
         .expect("early review");
-        assert_eq!(early.attempt_type, acm_os_domain::ReviewAttemptType::EarlyCheck);
+        assert_eq!(
+            early.attempt_type,
+            acm_os_domain::ReviewAttemptType::EarlyCheck
+        );
         assert!(early.started_early);
         assert_eq!(early.scheduled_due_local_date.to_iso_string(), "2026-08-14");
         let lifecycle = runtime
@@ -4790,7 +7726,10 @@ mod tests {
         )
         .await
         .expect("withdraw understood");
-        assert_eq!(learning.learning_status, acm_os_domain::LearningStatus::Learning);
+        assert_eq!(
+            learning.learning_status,
+            acm_os_domain::LearningStatus::Learning
+        );
         assert!(learning.active_review_cycle.is_none());
 
         let stopped = transition_problem_lifecycle(
@@ -4801,7 +7740,10 @@ mod tests {
         )
         .await
         .expect("stop learning");
-        assert_eq!(stopped.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert_eq!(
+            stopped.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
         assert_eq!(stopped.identity_type, ProblemIdentityType::Personal);
         let counts: (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contest_problems), \
@@ -4841,7 +7783,8 @@ mod tests {
     async fn delete_personal_note_downgrades_problem_and_preserves_history_relations() {
         let (_directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
         let note_path = problems.join("CF-1979-A.md");
-        let user_markdown = b"# User-owned title\n\n## \xe9\xa2\x98\xe8\xa7\xa3\n\nMy durable explanation.\n";
+        let user_markdown =
+            b"# User-owned title\n\n## \xe9\xa2\x98\xe8\xa7\xa3\n\nMy durable explanation.\n";
         fs::write(&note_path, user_markdown).expect("external user edit");
         runtime
             .read_personal_note_projection(&problem)
@@ -4862,7 +7805,10 @@ mod tests {
             .await
             .expect("delete personal note");
         assert_eq!(deleted.identity_type, ProblemIdentityType::Lightweight);
-        assert_eq!(deleted.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert_eq!(
+            deleted.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
         assert!(deleted.active_review_cycle.is_none());
         assert!(!note_path.exists());
 
@@ -4884,7 +7830,10 @@ mod tests {
                 .join("deleted-personal-notes"),
         );
         assert_eq!(recovery_files.len(), 1);
-        assert_eq!(fs::read(&recovery_files[0]).expect("recovery copy"), user_markdown);
+        assert_eq!(
+            fs::read(&recovery_files[0]).expect("recovery copy"),
+            user_markdown
+        );
 
         let recreated = create_personal_note(&runtime, &problem)
             .await
@@ -4908,7 +7857,10 @@ mod tests {
             .await
             .expect("system facts remain available");
         assert_eq!(detail.identity_type, ProblemIdentityType::Personal);
-        assert_eq!(detail.lifecycle.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        assert_eq!(
+            detail.lifecycle.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
     }
 
     #[tokio::test]
@@ -4945,15 +7897,15 @@ mod tests {
             .await
             .expect("fresh projection");
         let PersonalNoteReadState::Ready {
-            projection: cached,
-            ..
-        } = cached else {
+            projection: cached, ..
+        } = cached
+        else {
             panic!("initial projection must be ready");
         };
         let PersonalNoteReadState::Ready {
-            projection: fresh,
-            ..
-        } = fresh else {
+            projection: fresh, ..
+        } = fresh
+        else {
             panic!("fresh projection must be ready");
         };
         assert_ne!(fresh.content_digest, cached.content_digest);
@@ -5052,7 +8004,8 @@ mod tests {
             binding,
             projection,
             relocated,
-        } = state else {
+        } = state
+        else {
             panic!("file-key relocation must resolve");
         };
         assert!(relocated);
@@ -5079,10 +8032,9 @@ mod tests {
             .await
             .expect("digest relocation");
         let PersonalNoteReadState::Ready {
-            binding,
-            relocated,
-            ..
-        } = state else {
+            binding, relocated, ..
+        } = state
+        else {
             panic!("unique digest must resolve");
         };
         assert!(relocated);
@@ -5106,7 +8058,10 @@ mod tests {
             .read_personal_note_projection(&problem)
             .await
             .expect("location anomaly state");
-        assert!(matches!(state, PersonalNoteReadState::LocationAnomaly { .. }));
+        assert!(matches!(
+            state,
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
         let detail = runtime
             .lightweight_problem_detail(&problem)
             .await
@@ -5129,7 +8084,10 @@ mod tests {
             .read_personal_note_projection(&problem)
             .await
             .expect("vault unavailable state");
-        assert!(matches!(state, PersonalNoteReadState::VaultUnavailable { .. }));
+        assert!(matches!(
+            state,
+            PersonalNoteReadState::VaultUnavailable { .. }
+        ));
         let detail = runtime
             .lightweight_problem_detail(&problem)
             .await
@@ -5150,19 +8108,17 @@ mod tests {
                 .expect("restored vault read"),
             PersonalNoteReadState::Ready { .. }
         ));
-        let restored_state: String =
-            sqlx::query_scalar("SELECT binding_state FROM file_bindings")
-                .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
-                .await
-                .expect("restored binding state");
+        let restored_state: String = sqlx::query_scalar("SELECT binding_state FROM file_bindings")
+            .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("restored binding state");
         assert_eq!(restored_state, "linked");
     }
 
     #[tokio::test]
     async fn invalid_binding_path_never_reads_outside_the_vault() {
         let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
-        fs::write(directory.path().join("outside.md"), "outside secret")
-            .expect("outside fixture");
+        fs::write(directory.path().join("outside.md"), "outside secret").expect("outside fixture");
         sqlx::query("UPDATE file_bindings SET vault_relative_path = '../outside.md'")
             .execute(runtime._pool.as_ref().expect("ready database pool"))
             .await
@@ -5247,31 +8203,55 @@ mod tests {
     async fn problem_detail_exposes_only_sanitized_snapshot_or_pending_state() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
-        runtime.persist_manifest(&contest_draft()).await.expect("persist manifest");
-        runtime.persist_first_snapshot(&snapshot(
-            "A",
-            "<script>unsafe()</script><p>source only</p>",
-            "<p>safe local statement</p>",
-        )).await.expect("persist snapshot");
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        runtime
+            .persist_first_snapshot(&snapshot(
+                "A",
+                "<script>unsafe()</script><p>source only</p>",
+                "<p>safe local statement</p>",
+            ))
+            .await
+            .expect("persist snapshot");
 
         let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
-        let contest_detail = runtime.contest_detail(&contest).await.expect("contest detail");
+        let contest_detail = runtime
+            .contest_detail(&contest)
+            .await
+            .expect("contest detail");
         assert_eq!(contest_detail.problems.len(), 2);
         assert_eq!(contest_detail.problems[0].problem.index(), "A");
-        let ready = runtime.lightweight_problem_detail(
-            &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem A"),
-        ).await.expect("ready problem detail");
+        let ready = runtime
+            .lightweight_problem_detail(
+                &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                    .expect("problem A"),
+            )
+            .await
+            .expect("ready problem detail");
         assert_eq!(ready.title, "Problem A");
-        assert_eq!(ready.statement, StatementReadState::Ready {
-            sanitized_html: "<p>safe local statement</p>".to_owned(),
-        });
-        assert!(runtime.statement_assets(
-            &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem A assets"),
-        ).await.expect("statement assets").is_empty());
+        assert_eq!(
+            ready.statement,
+            StatementReadState::Ready {
+                sanitized_html: "<p>safe local statement</p>".to_owned(),
+            }
+        );
+        assert!(runtime
+            .statement_assets(
+                &acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                    .expect("problem A assets"),
+            )
+            .await
+            .expect("statement assets")
+            .is_empty());
 
-        let pending = runtime.lightweight_problem_detail(
-            &acm_os_domain::CodeforcesProblemIdentity::new(contest, "B").expect("problem B"),
-        ).await.expect("pending problem detail");
+        let pending = runtime
+            .lightweight_problem_detail(
+                &acm_os_domain::CodeforcesProblemIdentity::new(contest, "B").expect("problem B"),
+            )
+            .await
+            .expect("pending problem detail");
         assert_eq!(pending.statement, StatementReadState::Pending);
     }
 
@@ -5301,14 +8281,24 @@ mod tests {
             second.persisted.missing_snapshot_problems.len()
                 <= first.persisted.missing_snapshot_problems.len()
         );
-        assert_eq!(runtime.list_contests().await.expect("shelf after retry").len(), 1);
+        assert_eq!(
+            runtime
+                .list_contests()
+                .await
+                .expect("shelf after retry")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn reimport_rejects_manifest_drift_without_changing_the_first_manifest() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
-        runtime.persist_manifest(&contest_draft()).await.expect("first manifest");
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("first manifest");
 
         let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
         let drifted = ContestImportDraft::validated(
@@ -5318,7 +8308,8 @@ mod tests {
             None,
             vec![ContestProblemSlotDraft {
                 ordinal: 1,
-                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, "A").expect("problem"),
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, "A")
+                    .expect("problem"),
                 title: "Problem A".to_owned(),
                 rating: Some(800),
                 source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
@@ -5332,7 +8323,9 @@ mod tests {
 
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let persisted_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems")
-            .fetch_one(pool).await.expect("persisted slots");
+            .fetch_one(pool)
+            .await
+            .expect("persisted slots");
         assert_eq!(persisted_count, 2);
     }
 
@@ -5340,7 +8333,9 @@ mod tests {
     async fn future_schema_is_blocked_without_running_migrations() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
-        let pool = connect_read_write(&database_path).await.expect("future database");
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("future database");
         let supported = supported_schema_version();
         let found = supported + 1;
         create_empty_migration_ledger(&pool).await;
@@ -5363,7 +8358,9 @@ mod tests {
             }
         );
 
-        let inspection = connect_read_only(&database_path).await.expect("inspect future database");
+        let inspection = connect_read_only(&database_path)
+            .await
+            .expect("inspect future database");
         let app_metadata_exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata')",
         )
@@ -5377,7 +8374,9 @@ mod tests {
     async fn malformed_migration_ledger_requires_recovery() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
-        let pool = connect_read_write(&database_path).await.expect("malformed database");
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("malformed database");
         pool.execute("CREATE TABLE _sqlx_migrations (unexpected INTEGER)")
             .await
             .expect("malformed ledger");
@@ -5416,8 +8415,11 @@ mod tests {
     #[tokio::test]
     async fn unreadable_database_requires_recovery() {
         let directory = TempDir::new().expect("temporary app data");
-        fs::write(directory.path().join(DATABASE_FILENAME), b"not a sqlite database")
-            .expect("corrupt database fixture");
+        fs::write(
+            directory.path().join(DATABASE_FILENAME),
+            b"not a sqlite database",
+        )
+        .expect("corrupt database fixture");
 
         let runtime = start_database(directory.path()).await;
         assert_eq!(
@@ -5437,8 +8439,12 @@ mod tests {
         let backup_path = create_pre_migration_backup(pool, directory.path(), 1, 2)
             .await
             .expect("consistent backup");
-        let backup_pool = connect_read_only(&backup_path).await.expect("backup database");
-        verify_integrity(&backup_pool).await.expect("backup integrity");
+        let backup_pool = connect_read_only(&backup_path)
+            .await
+            .expect("backup database");
+        verify_integrity(&backup_pool)
+            .await
+            .expect("backup integrity");
         let metadata_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_metadata")
             .fetch_one(&backup_pool)
             .await
@@ -5539,13 +8545,13 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 10), \
+                        CHECK (schema_generation < 12), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
             )
-                .await
-                .expect("recreate metadata with hidden constraint");
+            .await
+            .expect("recreate metadata with hidden constraint");
             pool.execute(
                 "INSERT INTO app_metadata SELECT singleton, schema_generation, created_at_utc \
                  FROM app_metadata_old",
@@ -5555,6 +8561,33 @@ mod tests {
             pool.execute("DROP TABLE app_metadata_old")
                 .await
                 .expect("remove old metadata table");
+            pool.close().await;
+        }
+
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn inconsistent_today_budget_summary_requires_recovery() {
+        let directory = TempDir::new().expect("temporary app data");
+        {
+            let runtime = start_database(directory.path()).await;
+            let pool = runtime._pool.as_ref().expect("ready database pool");
+            sqlx::query(
+                "INSERT INTO today_plans \
+                    (id, local_date, budget_minutes, planned_minutes, over_budget_minutes, review_only_streak) \
+                 VALUES (?1, '2026-08-12', 0, 0, 1, 0)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .execute(pool)
+            .await
+            .expect("insert inconsistent Today summary");
             pool.close().await;
         }
 
@@ -5616,7 +8649,9 @@ mod tests {
     async fn empty_ledger_with_unknown_table_requires_recovery() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
-        let pool = connect_read_write(&database_path).await.expect("unknown database");
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("unknown database");
         create_empty_migration_ledger(&pool).await;
         pool.execute("CREATE TABLE foreign_user_data (value TEXT)")
             .await
@@ -5636,14 +8671,16 @@ mod tests {
     async fn pre_existing_version_zero_database_is_backed_up_before_migration() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
-        let pool = connect_read_write(&database_path).await.expect("version zero database");
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("version zero database");
         create_empty_migration_ledger(&pool).await;
         pool.close().await;
 
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 9 }
+            &StartupGateStatus::Ready { schema_version: 11 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -5652,7 +8689,9 @@ mod tests {
             .map(|entry| entry.expect("backup entry").path())
             .collect();
         assert_eq!(backups.len(), 1);
-        let backup_pool = connect_read_only(&backups[0]).await.expect("version zero backup");
+        let backup_pool = connect_read_only(&backups[0])
+            .await
+            .expect("version zero backup");
         let application_tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'",
         )
@@ -5675,14 +8714,13 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 9 }
+            &StartupGateStatus::Ready { schema_version: 11 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
-        let workspace_rows: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
-                .fetch_one(runtime_pool)
-                .await
-                .expect("empty workspace settings");
+        let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
+            .fetch_one(runtime_pool)
+            .await
+            .expect("empty workspace settings");
         assert_eq!(workspace_rows, 0);
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -5714,7 +8752,9 @@ mod tests {
     async fn failed_pre_migration_backup_does_not_run_migration() {
         let directory = TempDir::new().expect("temporary app data");
         let database_path = directory.path().join(DATABASE_FILENAME);
-        let pool = connect_read_write(&database_path).await.expect("version zero database");
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("version zero database");
         create_empty_migration_ledger(&pool).await;
         pool.close().await;
         fs::write(directory.path().join("backups"), b"block backup directory")
@@ -5728,7 +8768,9 @@ mod tests {
             }
         );
 
-        let inspection = connect_read_only(&database_path).await.expect("inspect version zero");
+        let inspection = connect_read_only(&database_path)
+            .await
+            .expect("inspect version zero");
         let ledger_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(&inspection)
             .await
@@ -5989,7 +9031,10 @@ mod tests {
         .expect("confirm current regression");
         assert_eq!(regressed.current.achieved_count(), 5);
         assert!(regressed.historical_thoroughly_digested);
-        assert_eq!(regressed.first_thoroughly_digested_local_date, Some(reached));
+        assert_eq!(
+            regressed.first_thoroughly_digested_local_date,
+            Some(reached)
+        );
 
         delete_personal_note(&runtime, &problem)
             .await
@@ -5999,7 +9044,10 @@ mod tests {
             .expect("history remains readable after lightweight downgrade");
         assert_eq!(history.mastery.current.achieved_count(), 5);
         assert!(history.mastery.historical_thoroughly_digested);
-        assert_eq!(history.mastery.first_thoroughly_digested_local_date, Some(reached));
+        assert_eq!(
+            history.mastery.first_thoroughly_digested_local_date,
+            Some(reached)
+        );
     }
 
     #[tokio::test]
@@ -6046,7 +9094,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 9 }
+            &StartupGateStatus::Ready { schema_version: 11 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -6074,5 +9122,393 @@ mod tests {
             StartupRecoveryReason::DatabaseUnavailable
         );
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn today_extra_suggestion_is_read_only_and_manual_acceptance_persists() {
+        let (directory, runtime, _vault, _problems, problem_a) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem_a,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("first candidate");
+        let initial = load_or_generate_today_snapshot(&runtime, day, 120)
+            .await
+            .expect("initial plan");
+        assert_eq!(initial.entries.len(), 1);
+        let completed =
+            complete_today_entry(&runtime, &initial.plan_id, &initial.entries[0].entry_id)
+                .await
+                .expect("complete initial work");
+
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("personal B");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem_b,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("second candidate");
+        let lifecycle_before = runtime
+            .load_problem_lifecycle(&problem_b)
+            .await
+            .expect("lifecycle before");
+        let review_facts_before: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM review_cycles), \
+                    (SELECT COUNT(*) FROM review_attempts)",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("review facts before");
+        let rows_before: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT id, CAST(problem_id AS TEXT), position, entry_origin \
+             FROM today_plan_entries ORDER BY position",
+        )
+        .fetch_all(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("rows before preview");
+
+        let preview = preview_today_extra_suggestions(&runtime, day)
+            .await
+            .expect("extra suggestions");
+        assert_eq!(preview.expected_snapshot, completed);
+        assert_eq!(preview.remaining_budget_minutes, 60);
+        assert_eq!(preview.suggestions.len(), 1);
+        assert_eq!(
+            preview.suggestions[0].reason,
+            acm_os_domain::TodayCandidateReason::Upsolve
+        );
+        let rows_after_preview: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT id, CAST(problem_id AS TEXT), position, entry_origin \
+             FROM today_plan_entries ORDER BY position",
+        )
+        .fetch_all(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("rows after preview");
+        assert_eq!(rows_after_preview, rows_before);
+
+        let accepted =
+            accept_today_extra_suggestion(&runtime, &preview, &preview.suggestions[0].problem_id)
+                .await
+                .expect("accept explicit suggestion");
+        assert_eq!(accepted.entries.len(), 2);
+        assert_eq!(accepted.entries[0], completed.entries[0]);
+        assert_eq!(accepted.entries[1].origin, TodayEntryOrigin::Manual);
+        assert_eq!(accepted.entries[1].status, TodayEntryStatus::NotStarted);
+        assert_eq!(accepted.planned_minutes, 120);
+        assert_eq!(accepted.over_budget_minutes, 0);
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&problem_b)
+                .await
+                .expect("lifecycle after"),
+            lifecycle_before
+        );
+        let review_facts_after: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM review_cycles), \
+                    (SELECT COUNT(*) FROM review_attempts)",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("review facts after");
+        assert_eq!(review_facts_after, review_facts_before);
+        assert_eq!(
+            load_or_generate_today_snapshot(&runtime, day, 1)
+                .await
+                .expect("same-day reopen"),
+            accepted
+        );
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            load_or_generate_today_snapshot(&restarted, day, 1)
+                .await
+                .expect("restart reopen"),
+            accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn today_extra_suggestion_rejects_illegal_or_stale_acceptance_without_writing() {
+        let (_directory, runtime, _vault, _problems, problem_a) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem_a,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("first candidate");
+        let initial = load_or_generate_today_snapshot(&runtime, day, 120)
+            .await
+            .expect("initial plan");
+        assert!(preview_today_extra_suggestions(&runtime, day)
+            .await
+            .expect("unfinished preview")
+            .suggestions
+            .is_empty());
+        complete_today_entry(&runtime, &initial.plan_id, &initial.entries[0].entry_id)
+            .await
+            .expect("complete initial work");
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("personal B");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem_b,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("second candidate");
+        sqlx::query("UPDATE today_plans SET budget_minutes = 90 WHERE id = ?1")
+            .bind(&initial.plan_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("leave only thirty minutes");
+        assert!(preview_today_extra_suggestions(&runtime, day)
+            .await
+            .expect("insufficient-budget preview")
+            .suggestions
+            .is_empty());
+        sqlx::query("UPDATE today_plans SET budget_minutes = 120 WHERE id = ?1")
+            .bind(&initial.plan_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("restore suggestion budget");
+        let preview = preview_today_extra_suggestions(&runtime, day)
+            .await
+            .expect("valid preview");
+        let unchanged = runtime
+            .load_today_snapshot(day)
+            .await
+            .expect("load")
+            .expect("plan");
+
+        sqlx::query("UPDATE today_plans SET budget_minutes = 90 WHERE id = ?1")
+            .bind(&initial.plan_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("make preview unaffordable");
+        let budget_changed = runtime
+            .load_today_snapshot(day)
+            .await
+            .expect("load")
+            .expect("plan");
+        assert_eq!(
+            accept_today_extra_suggestion(&runtime, &preview, &preview.suggestions[0].problem_id)
+                .await,
+            Err(TodaySnapshotError::StaleExtraSuggestions)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("load")
+                .expect("plan"),
+            budget_changed
+        );
+        sqlx::query("UPDATE today_plans SET budget_minutes = 120 WHERE id = ?1")
+            .bind(&initial.plan_id)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("restore valid preview version");
+        assert_eq!(
+            accept_today_extra_suggestion(&runtime, &preview, "unknown").await,
+            Err(TodaySnapshotError::InvalidExtraSuggestion)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("load")
+                .expect("plan"),
+            unchanged
+        );
+
+        let numeric_b = preview.suggestions[0]
+            .problem_id
+            .parse::<i64>()
+            .expect("numeric B");
+        sqlx::query(
+            "UPDATE file_bindings SET binding_state = 'location_anomaly' WHERE problem_id = ?1",
+        )
+        .bind(numeric_b)
+        .execute(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("invalidate candidate");
+        assert_eq!(
+            accept_today_extra_suggestion(&runtime, &preview, &preview.suggestions[0].problem_id)
+                .await,
+            Err(TodaySnapshotError::InvalidExtraSuggestion)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("load")
+                .expect("plan"),
+            unchanged
+        );
+        sqlx::query("UPDATE file_bindings SET binding_state = 'linked' WHERE problem_id = ?1")
+            .bind(numeric_b)
+            .execute(runtime._pool.as_ref().expect("ready pool"))
+            .await
+            .expect("restore candidate");
+
+        let accepted =
+            accept_today_extra_suggestion(&runtime, &preview, &preview.suggestions[0].problem_id)
+                .await
+                .expect("accept once");
+        assert_eq!(
+            accept_today_extra_suggestion(&runtime, &preview, &preview.suggestions[0].problem_id)
+                .await,
+            Err(TodaySnapshotError::StaleExtraSuggestions)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("load")
+                .expect("plan"),
+            accepted
+        );
+
+        let next_day = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("next day");
+        let next_plan = load_or_generate_today_snapshot(&runtime, next_day, 0)
+            .await
+            .expect("cross-plan fixture");
+        let mut cross_plan = preview.clone();
+        cross_plan.expected_snapshot.plan_id = next_plan.plan_id;
+        assert_eq!(
+            accept_today_extra_suggestion(
+                &runtime,
+                &cross_plan,
+                &preview.suggestions[0].problem_id
+            )
+            .await,
+            Err(TodaySnapshotError::StaleExtraSuggestions)
+        );
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("load")
+                .expect("plan"),
+            accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn m5_core_loop_imports_markdown_learns_reviews_and_recalls_in_today() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        let manifest = contest_draft();
+        let problem = manifest.slots[0].problem.clone();
+        let source = CoreLoopContestSource {
+            manifest,
+            snapshots: vec![
+                snapshot(
+                    "A",
+                    "<div class=\"problem-statement\">A</div>",
+                    "<div class=\"problem-statement\">A</div>",
+                ),
+                snapshot(
+                    "B",
+                    "<div class=\"problem-statement\">B</div>",
+                    "<div class=\"problem-statement\">B</div>",
+                ),
+            ],
+        };
+        let imported = import_codeforces_contest(
+            &runtime,
+            &source,
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+        )
+        .await
+        .expect("fixture contest import through application boundary");
+        assert_eq!(imported.persisted.status, ContestImportStatus::Complete);
+        assert!(imported.failed_snapshot_problems.is_empty());
+
+        let binding = create_personal_note(&runtime, &problem)
+            .await
+            .expect("real personal Markdown creation");
+        assert!(directory
+            .path()
+            .join("vault")
+            .join(binding.vault_relative_path)
+            .is_file());
+        let learned_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("learned date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, learned_on)
+                .await
+                .expect("learning transition");
+        }
+        let due = acm_os_domain::ReviewSchedulingEngine::first_cold_start_due(learned_on)
+            .expect("first due");
+        let attempt = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("real controlled Review Attempt");
+        let completed = complete_review(&runtime, &attempt.attempt_id, mastered_input(), due)
+            .await
+            .expect("fact-derived Review completion");
+        assert_eq!(
+            completed.judgement,
+            acm_os_domain::ReviewJudgement::Mastered
+        );
+        let next_due = completed
+            .lifecycle
+            .active_review_cycle
+            .expect("long-term schedule")
+            .next_due_local_date;
+        assert!(next_due > due);
+
+        let today = load_or_generate_today_snapshot(&runtime, next_due, 30)
+            .await
+            .expect("later Today recall");
+        let numeric_problem_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = ?1 AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("problem id");
+        assert_eq!(today.entries.len(), 1);
+        assert_eq!(today.entries[0].problem_id, numeric_problem_id.to_string());
+        assert_eq!(
+            today.entries[0].lane,
+            acm_os_domain::TodayCandidateLane::Review
+        );
+        assert_eq!(
+            today.entries[0].reason,
+            acm_os_domain::TodayCandidateReason::DueLongTermReview
+        );
+        assert_eq!(today.entries[0].status, TodayEntryStatus::NotStarted);
     }
 }

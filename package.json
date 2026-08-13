@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test:shells": "node --test scripts/startup-shells.test.mjs",
     "test:dom-shells": "node --test scripts/dom-shells.test.mjs",
+    "test:desktop-e2e": "node scripts/desktop-e2e.mjs",
     "tauri": "tauri",
     "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs"
   },

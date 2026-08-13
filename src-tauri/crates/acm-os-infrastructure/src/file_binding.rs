@@ -104,7 +104,10 @@ fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
                 };
                 if resolved.starts_with(vault) && resolved.is_dir() {
                     pending.push(resolved);
-                } else if resolved.starts_with(vault) && resolved.is_file() && is_markdown(&resolved) {
+                } else if resolved.starts_with(vault)
+                    && resolved.is_file()
+                    && is_markdown(&resolved)
+                {
                     files.push(resolved);
                 }
             } else if file_type.is_file() && is_markdown(&entry.path()) {

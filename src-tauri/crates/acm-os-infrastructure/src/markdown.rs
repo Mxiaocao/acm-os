@@ -166,11 +166,12 @@ pub(crate) fn review_help_content(
                 markdown: sections.join("\n\n"),
             })
         }
-        acm_os_domain::ReviewHelpLevel::FullSolution => unique_h2_section(markdown, "题解")
-            .map(|section| ReviewHelpContent {
+        acm_os_domain::ReviewHelpLevel::FullSolution => {
+            unique_h2_section(markdown, "题解").map(|section| ReviewHelpContent {
                 title: "Full solution".to_owned(),
                 markdown: section.to_owned(),
-            }),
+            })
+        }
     }
 }
 
@@ -182,7 +183,7 @@ pub(crate) fn prerequisite_targets(markdown: &str) -> Option<Vec<String>> {
     while cursor + 1 < bytes.len() {
         if bytes[cursor] == b'[' && bytes[cursor + 1] == b'[' {
             let content_start = cursor + 2;
-            let Some(relative_end) = section[content_start..].find("]]" ) else {
+            let Some(relative_end) = section[content_start..].find("]]") else {
                 break;
             };
             let raw = &section[content_start..content_start + relative_end];
@@ -243,7 +244,10 @@ pub(crate) fn section_contains_wikilink_item(
                 }
             }
             Event::End(TagEnd::Item) => {
-                if item_text.take().is_some_and(|value| value.trim() == expected) {
+                if item_text
+                    .take()
+                    .is_some_and(|value| value.trim() == expected)
+                {
                     return true;
                 }
             }
@@ -330,29 +334,24 @@ mod tests {
     #[test]
     fn resolves_only_explicit_review_help_sections() {
         let markdown = "# P\n\n## 前置知识\n- [[Graphs#DFS|Graph traversal]]\n\n## Hints\n### Hint 1\nTry a stack.\n\n### Hint 2\nTrack colors.\n\n## 思路\nSecret idea.\n\n## 代码\n```cpp\nsolve();\n```\n\n## 题解\nComplete proof.\n";
-        assert_eq!(prerequisite_targets(markdown), Some(vec!["Graphs".to_owned()]));
-        let names = review_help_content(
-            markdown,
-            acm_os_domain::ReviewHelpLevel::PrerequisiteNames,
-        )
-        .expect("prerequisite names");
+        assert_eq!(
+            prerequisite_targets(markdown),
+            Some(vec!["Graphs".to_owned()])
+        );
+        let names =
+            review_help_content(markdown, acm_os_domain::ReviewHelpLevel::PrerequisiteNames)
+                .expect("prerequisite names");
         assert_eq!(names.markdown, "- Graphs");
-        let hints = review_help_content(markdown, acm_os_domain::ReviewHelpLevel::Hints)
-            .expect("hints");
+        let hints =
+            review_help_content(markdown, acm_os_domain::ReviewHelpLevel::Hints).expect("hints");
         assert!(hints.markdown.contains("### Hint 1"));
         assert!(hints.markdown.contains("### Hint 2"));
-        let old = review_help_content(
-            markdown,
-            acm_os_domain::ReviewHelpLevel::OldIdeaOrCode,
-        )
-        .expect("old idea/code");
+        let old = review_help_content(markdown, acm_os_domain::ReviewHelpLevel::OldIdeaOrCode)
+            .expect("old idea/code");
         assert!(old.markdown.contains("Secret idea."));
         assert!(old.markdown.contains("solve();"));
-        let solution = review_help_content(
-            markdown,
-            acm_os_domain::ReviewHelpLevel::FullSolution,
-        )
-        .expect("solution");
+        let solution = review_help_content(markdown, acm_os_domain::ReviewHelpLevel::FullSolution)
+            .expect("solution");
         assert!(solution.markdown.contains("Complete proof."));
     }
 
@@ -360,10 +359,8 @@ mod tests {
     fn duplicate_or_empty_sections_are_not_revealable() {
         let markdown = "## Hints\n\n## Hints\n### One\nDo this\n\n## 题解\n";
         assert!(review_help_content(markdown, acm_os_domain::ReviewHelpLevel::Hints).is_none());
-        assert!(review_help_content(
-            markdown,
-            acm_os_domain::ReviewHelpLevel::FullSolution
-        )
-        .is_none());
+        assert!(
+            review_help_content(markdown, acm_os_domain::ReviewHelpLevel::FullSolution).is_none()
+        );
     }
 }

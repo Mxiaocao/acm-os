@@ -31,11 +31,16 @@ pub struct CodeforcesProblemIdentity {
 }
 
 impl CodeforcesProblemIdentity {
-    pub fn new(contest: CodeforcesContestIdentity, index: impl Into<String>) -> Result<Self, IdentityError> {
+    pub fn new(
+        contest: CodeforcesContestIdentity,
+        index: impl Into<String>,
+    ) -> Result<Self, IdentityError> {
         let index = index.into();
         let valid = !index.is_empty()
             && index.len() <= 8
-            && index.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
+            && index
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
         if !valid {
             return Err(IdentityError::InvalidProblemIndex);
         }
@@ -144,11 +149,7 @@ impl ProblemLifecycleEngine {
             (UpsolvePending | Learning | Relearning, StopLearning) => (Unstarted, None),
             (WaitingColdStart, StopLearning) => (Unstarted, CancelActive),
             (
-                Unstarted
-                | UpsolvePending
-                | Learning
-                | WaitingColdStart
-                | Relearning
+                Unstarted | UpsolvePending | Learning | WaitingColdStart | Relearning
                 | LongTermReview,
                 DeletePersonalNote,
             ) => (Unstarted, CancelActive),
@@ -177,6 +178,11 @@ impl LocalDate {
         self.0.format("%Y-%m-%d").to_string()
     }
 
+    pub fn iso_weekday_number(self) -> u8 {
+        use chrono::Datelike;
+        self.0.weekday().number_from_monday() as u8
+    }
+
     fn checked_add_days(self, days: u64) -> Result<Self, InvalidLocalDate> {
         self.0
             .checked_add_days(chrono::Days::new(days))
@@ -194,7 +200,9 @@ impl ReviewSchedulingEngine {
     pub const SCHEDULE_RULE_VERSION: u32 = 1;
     pub const FIRST_COLD_START_DAYS: u64 = 3;
 
-    pub fn first_cold_start_due(marked_understood_on: LocalDate) -> Result<LocalDate, InvalidLocalDate> {
+    pub fn first_cold_start_due(
+        marked_understood_on: LocalDate,
+    ) -> Result<LocalDate, InvalidLocalDate> {
         marked_understood_on.checked_add_days(Self::FIRST_COLD_START_DAYS)
     }
 }
@@ -285,9 +293,7 @@ impl ReviewJudgementEngine {
         if facts.final_ac != (facts.final_result == SubmissionResult::Accepted) {
             return Err(ReviewFactsError::FinalResultContradiction);
         }
-        if facts.total_submissions == 1
-            && facts.first_submission_result != facts.final_result
-        {
+        if facts.total_submissions == 1 && facts.first_submission_result != facts.final_result {
             return Err(ReviewFactsError::SingleSubmissionContradiction);
         }
         let full_solution_used = highest_help_level == Some(ReviewHelpLevel::FullSolution)
@@ -297,15 +303,17 @@ impl ReviewJudgementEngine {
             || facts.debug_independence == DebugIndependence::UsedSolvingHelp;
         let judgement = if !facts.final_ac || full_solution_used {
             ReviewJudgement::Fail
-        } else if solving_help_used
-            || !facts.idea_independent
-            || !facts.implementation_independent
+        } else if solving_help_used || !facts.idea_independent || !facts.implementation_independent
         {
             ReviewJudgement::Partial
         } else {
             ReviewJudgement::Mastered
         };
-        let mut evidence_codes = vec![if facts.final_ac { "final_ac" } else { "no_final_ac" }];
+        let mut evidence_codes = vec![if facts.final_ac {
+            "final_ac"
+        } else {
+            "no_final_ac"
+        }];
         if let Some(level) = highest_help_level {
             evidence_codes.push(match level {
                 ReviewHelpLevel::PrerequisiteNames => "controlled_help_l1",
@@ -343,7 +351,10 @@ impl ReviewJudgementEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewCycleCompletion {
     Keep,
-    Advance { next_stage: u32, next_due: LocalDate },
+    Advance {
+        next_stage: u32,
+        next_due: LocalDate,
+    },
     Suspend,
 }
 
@@ -366,7 +377,10 @@ impl ReviewSchedulingEngine {
         current_stage: u32,
         completed_on: LocalDate,
     ) -> Result<ReviewCompletionDecision, InvalidReviewCompletion> {
-        if !matches!(status, LearningStatus::WaitingColdStart | LearningStatus::LongTermReview) {
+        if !matches!(
+            status,
+            LearningStatus::WaitingColdStart | LearningStatus::LongTermReview
+        ) {
             return Err(InvalidReviewCompletion);
         }
         if current_stage > 6
@@ -478,6 +492,580 @@ impl ReviewEligibilityEngine {
             },
             scheduled_due_local_date,
             started_early,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayInProgressReview<'a> {
+    pub attempt_id: &'a str,
+    pub scheduled_due_local_date: LocalDate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayCandidateInput<'a> {
+    pub problem_id: &'a str,
+    pub learning_status: LearningStatus,
+    pub learning_status_since: LocalDate,
+    pub pinned: bool,
+    pub active_review_due: Option<LocalDate>,
+    pub in_progress_review: Option<TodayInProgressReview<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayCandidateLane {
+    CarryIn,
+    Review,
+    Study,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayCandidateReason {
+    ContinueReview,
+    ContinueLearning,
+    DueFirstColdStart,
+    DueLongTermReview,
+    Relearn,
+    Upsolve,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodayCandidate {
+    pub problem_id: String,
+    pub review_attempt_id: Option<String>,
+    pub lane: TodayCandidateLane,
+    pub reason: TodayCandidateReason,
+    pub planning_cost_minutes: u32,
+    pub pinned: bool,
+    pub learning_status_since: LocalDate,
+    pub scheduled_due_local_date: Option<LocalDate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodayCandidateError {
+    EmptyProblemId,
+    EmptyReviewAttemptId {
+        problem_id: String,
+    },
+    DuplicateProblem {
+        problem_id: String,
+    },
+    MissingActiveReviewDue {
+        problem_id: String,
+        status: LearningStatus,
+    },
+    InProgressReviewLifecycleMismatch {
+        problem_id: String,
+        status: LearningStatus,
+    },
+}
+
+pub struct TodayCandidateBuilder;
+
+impl TodayCandidateBuilder {
+    pub const REVIEW_PLANNING_COST_MINUTES: u32 = 30;
+    pub const STUDY_PLANNING_COST_MINUTES: u32 = 60;
+
+    pub fn build(
+        today: LocalDate,
+        inputs: &[TodayCandidateInput<'_>],
+    ) -> Result<Vec<TodayCandidate>, TodayCandidateError> {
+        let mut seen_problem_ids = std::collections::HashSet::with_capacity(inputs.len());
+        let mut candidates = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            if input.problem_id.is_empty() {
+                return Err(TodayCandidateError::EmptyProblemId);
+            }
+            if !seen_problem_ids.insert(input.problem_id) {
+                return Err(TodayCandidateError::DuplicateProblem {
+                    problem_id: input.problem_id.to_owned(),
+                });
+            }
+            if let Some(candidate) = Self::build_one(today, *input)? {
+                candidates.push(candidate);
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn build_one(
+        today: LocalDate,
+        input: TodayCandidateInput<'_>,
+    ) -> Result<Option<TodayCandidate>, TodayCandidateError> {
+        if let Some(review) = input.in_progress_review {
+            if review.attempt_id.is_empty() {
+                return Err(TodayCandidateError::EmptyReviewAttemptId {
+                    problem_id: input.problem_id.to_owned(),
+                });
+            }
+            if !matches!(
+                input.learning_status,
+                LearningStatus::WaitingColdStart | LearningStatus::LongTermReview
+            ) {
+                return Err(TodayCandidateError::InProgressReviewLifecycleMismatch {
+                    problem_id: input.problem_id.to_owned(),
+                    status: input.learning_status,
+                });
+            }
+            return Ok(Some(TodayCandidate {
+                problem_id: input.problem_id.to_owned(),
+                review_attempt_id: Some(review.attempt_id.to_owned()),
+                lane: TodayCandidateLane::CarryIn,
+                reason: TodayCandidateReason::ContinueReview,
+                planning_cost_minutes: Self::REVIEW_PLANNING_COST_MINUTES,
+                pinned: input.pinned,
+                learning_status_since: input.learning_status_since,
+                scheduled_due_local_date: Some(review.scheduled_due_local_date),
+            }));
+        }
+
+        let candidate = match input.learning_status {
+            LearningStatus::Unstarted => None,
+            LearningStatus::Learning => Some((
+                TodayCandidateLane::CarryIn,
+                TodayCandidateReason::ContinueLearning,
+                Self::STUDY_PLANNING_COST_MINUTES,
+                None,
+            )),
+            LearningStatus::Relearning => Some((
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                Self::STUDY_PLANNING_COST_MINUTES,
+                None,
+            )),
+            LearningStatus::UpsolvePending => Some((
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Upsolve,
+                Self::STUDY_PLANNING_COST_MINUTES,
+                None,
+            )),
+            status @ (LearningStatus::WaitingColdStart | LearningStatus::LongTermReview) => {
+                let due = input.active_review_due.ok_or_else(|| {
+                    TodayCandidateError::MissingActiveReviewDue {
+                        problem_id: input.problem_id.to_owned(),
+                        status,
+                    }
+                })?;
+                if due > today {
+                    None
+                } else {
+                    Some((
+                        TodayCandidateLane::Review,
+                        if status == LearningStatus::WaitingColdStart {
+                            TodayCandidateReason::DueFirstColdStart
+                        } else {
+                            TodayCandidateReason::DueLongTermReview
+                        },
+                        Self::REVIEW_PLANNING_COST_MINUTES,
+                        Some(due),
+                    ))
+                }
+            }
+        };
+
+        Ok(candidate.map(
+            |(lane, reason, planning_cost_minutes, due)| TodayCandidate {
+                problem_id: input.problem_id.to_owned(),
+                review_attempt_id: None,
+                lane,
+                reason,
+                planning_cost_minutes,
+                pinned: input.pinned,
+                learning_status_since: input.learning_status_since,
+                scheduled_due_local_date: due,
+            },
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodayOrderedCandidates {
+    pub carry_in: Vec<TodayCandidate>,
+    pub review: Vec<TodayCandidate>,
+    pub study: Vec<TodayCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodayCandidateOrderingError {
+    LaneReasonMismatch { problem_id: String },
+    MissingReviewDue { problem_id: String },
+}
+
+pub struct TodayCandidateOrderingEngine;
+
+impl TodayCandidateOrderingEngine {
+    pub fn order(
+        candidates: &[TodayCandidate],
+    ) -> Result<TodayOrderedCandidates, TodayCandidateOrderingError> {
+        let mut ordered = TodayOrderedCandidates {
+            carry_in: Vec::new(),
+            review: Vec::new(),
+            study: Vec::new(),
+        };
+
+        for candidate in candidates {
+            let reason_matches_lane = matches!(
+                (candidate.lane, candidate.reason),
+                (
+                    TodayCandidateLane::CarryIn,
+                    TodayCandidateReason::ContinueReview | TodayCandidateReason::ContinueLearning
+                ) | (
+                    TodayCandidateLane::Review,
+                    TodayCandidateReason::DueFirstColdStart
+                        | TodayCandidateReason::DueLongTermReview
+                ) | (
+                    TodayCandidateLane::Study,
+                    TodayCandidateReason::Relearn | TodayCandidateReason::Upsolve
+                )
+            );
+            if !reason_matches_lane {
+                return Err(TodayCandidateOrderingError::LaneReasonMismatch {
+                    problem_id: candidate.problem_id.clone(),
+                });
+            }
+            if candidate.lane == TodayCandidateLane::Review
+                && candidate.scheduled_due_local_date.is_none()
+            {
+                return Err(TodayCandidateOrderingError::MissingReviewDue {
+                    problem_id: candidate.problem_id.clone(),
+                });
+            }
+            match candidate.lane {
+                TodayCandidateLane::CarryIn => ordered.carry_in.push(candidate.clone()),
+                TodayCandidateLane::Review => ordered.review.push(candidate.clone()),
+                TodayCandidateLane::Study => ordered.study.push(candidate.clone()),
+            }
+        }
+
+        ordered
+            .carry_in
+            .sort_by(|left, right| left.problem_id.cmp(&right.problem_id));
+        ordered.review.sort_by(|left, right| {
+            left.scheduled_due_local_date
+                .cmp(&right.scheduled_due_local_date)
+                .then_with(|| right.pinned.cmp(&left.pinned))
+                .then_with(|| {
+                    review_reason_rank(left.reason).cmp(&review_reason_rank(right.reason))
+                })
+                .then_with(|| left.problem_id.cmp(&right.problem_id))
+        });
+        ordered.study.sort_by(|left, right| {
+            study_reason_rank(left.reason)
+                .cmp(&study_reason_rank(right.reason))
+                .then_with(|| right.pinned.cmp(&left.pinned))
+                .then_with(|| left.learning_status_since.cmp(&right.learning_status_since))
+                .then_with(|| left.problem_id.cmp(&right.problem_id))
+        });
+
+        Ok(ordered)
+    }
+}
+
+fn review_reason_rank(reason: TodayCandidateReason) -> u8 {
+    match reason {
+        TodayCandidateReason::DueFirstColdStart => 0,
+        TodayCandidateReason::DueLongTermReview => 1,
+        _ => 2,
+    }
+}
+
+fn study_reason_rank(reason: TodayCandidateReason) -> u8 {
+    match reason {
+        TodayCandidateReason::Relearn => 0,
+        TodayCandidateReason::Upsolve => 1,
+        _ => 2,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayPlanningCapacity {
+    pub can_fit_review: bool,
+    pub can_fit_study: bool,
+    pub can_fit_both: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayLaneRequirement {
+    None,
+    Review,
+    Study,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayAntiStarvationDecision {
+    pub required_lanes: TodayLaneRequirement,
+    pub next_review_only_streak: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodayAntiStarvationError {
+    InvalidCapacity,
+    InvalidReviewOnlyStreak,
+    StudyRequiredButCannotFit,
+}
+
+pub struct TodayAntiStarvationEngine;
+
+impl TodayAntiStarvationEngine {
+    pub const MAX_CONSECUTIVE_REVIEW_ONLY_DAYS_WITH_STUDY_BACKLOG: u8 = 2;
+
+    pub fn decide(
+        has_review_backlog: bool,
+        has_study_backlog: bool,
+        capacity: TodayPlanningCapacity,
+        consecutive_review_only_days_with_study_backlog: u8,
+    ) -> Result<TodayAntiStarvationDecision, TodayAntiStarvationError> {
+        if capacity.can_fit_both && !(capacity.can_fit_review && capacity.can_fit_study) {
+            return Err(TodayAntiStarvationError::InvalidCapacity);
+        }
+        if consecutive_review_only_days_with_study_backlog
+            > Self::MAX_CONSECUTIVE_REVIEW_ONLY_DAYS_WITH_STUDY_BACKLOG
+        {
+            return Err(TodayAntiStarvationError::InvalidReviewOnlyStreak);
+        }
+        if has_review_backlog
+            && has_study_backlog
+            && consecutive_review_only_days_with_study_backlog
+                == Self::MAX_CONSECUTIVE_REVIEW_ONLY_DAYS_WITH_STUDY_BACKLOG
+            && !capacity.can_fit_study
+        {
+            return Err(TodayAntiStarvationError::StudyRequiredButCannotFit);
+        }
+
+        let required_lanes = match (has_review_backlog, has_study_backlog) {
+            (false, false) => TodayLaneRequirement::None,
+            (true, false) if capacity.can_fit_review => TodayLaneRequirement::Review,
+            (false, true) if capacity.can_fit_study => TodayLaneRequirement::Study,
+            (true, true) if capacity.can_fit_both => TodayLaneRequirement::Both,
+            (true, true)
+                if capacity.can_fit_study
+                    && consecutive_review_only_days_with_study_backlog
+                        >= Self::MAX_CONSECUTIVE_REVIEW_ONLY_DAYS_WITH_STUDY_BACKLOG =>
+            {
+                TodayLaneRequirement::Study
+            }
+            (true, true) if capacity.can_fit_review => TodayLaneRequirement::Review,
+            (true, true) if capacity.can_fit_study => TodayLaneRequirement::Study,
+            _ => TodayLaneRequirement::None,
+        };
+
+        let next_review_only_streak = match required_lanes {
+            TodayLaneRequirement::Review if has_study_backlog => {
+                consecutive_review_only_days_with_study_backlog + 1
+            }
+            TodayLaneRequirement::Both | TodayLaneRequirement::Study => 0,
+            TodayLaneRequirement::None | TodayLaneRequirement::Review => 0,
+        };
+
+        Ok(TodayAntiStarvationDecision {
+            required_lanes,
+            next_review_only_streak,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodayPlanDraft {
+    pub entries: Vec<TodayCandidate>,
+    pub budget_minutes: u32,
+    pub planned_minutes: u32,
+    pub over_budget_minutes: u32,
+    pub unplanned_review_count: usize,
+    pub unplanned_study_count: usize,
+    pub next_review_only_streak: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TodayPlannerError {
+    InvalidPlanningCost { problem_id: String },
+    LaneMismatch { problem_id: String },
+    DuplicateProblem { problem_id: String },
+    RequiredReviewUnavailable,
+    RequiredStudyUnavailable,
+    RequiredLanesDoNotFit,
+}
+
+pub struct TodayPlanner;
+
+impl TodayPlanner {
+    pub fn plan_generated(
+        ordered: &TodayOrderedCandidates,
+        budget_minutes: u32,
+        consecutive_review_only_days_with_study_backlog: u8,
+    ) -> Result<TodayPlanDraft, TodayPlannerError> {
+        Self::validate(ordered)?;
+        let carry_in_minutes = Self::total_minutes(&ordered.carry_in)?;
+        let remaining_minutes = budget_minutes.saturating_sub(carry_in_minutes);
+        let first_review_cost = ordered
+            .review
+            .first()
+            .map(|candidate| candidate.planning_cost_minutes);
+        let first_study_cost = ordered
+            .study
+            .first()
+            .map(|candidate| candidate.planning_cost_minutes);
+        let capacity = TodayPlanningCapacity {
+            can_fit_review: first_review_cost.is_some_and(|cost| cost <= remaining_minutes),
+            can_fit_study: first_study_cost.is_some_and(|cost| cost <= remaining_minutes),
+            can_fit_both: first_review_cost
+                .zip(first_study_cost)
+                .and_then(|(review, study)| review.checked_add(study))
+                .is_some_and(|cost| cost <= remaining_minutes),
+        };
+        let anti_starvation = TodayAntiStarvationEngine::decide(
+            !ordered.review.is_empty(),
+            !ordered.study.is_empty(),
+            capacity,
+            consecutive_review_only_days_with_study_backlog,
+        )
+        .map_err(|_| TodayPlannerError::RequiredLanesDoNotFit)?;
+        let mut draft = Self::plan(ordered, budget_minutes, anti_starvation.required_lanes)?;
+        draft.next_review_only_streak = anti_starvation.next_review_only_streak;
+        Ok(draft)
+    }
+
+    pub fn plan(
+        ordered: &TodayOrderedCandidates,
+        budget_minutes: u32,
+        required_lanes: TodayLaneRequirement,
+    ) -> Result<TodayPlanDraft, TodayPlannerError> {
+        Self::validate(ordered)?;
+
+        let mut entries = ordered.carry_in.clone();
+        let carry_in_minutes = Self::total_minutes(&entries)?;
+        let mut remaining_minutes = budget_minutes.saturating_sub(carry_in_minutes);
+        let mut review_index = 0;
+        let mut study_index = 0;
+
+        match required_lanes {
+            TodayLaneRequirement::None => {}
+            TodayLaneRequirement::Review => {
+                let review = ordered
+                    .review
+                    .first()
+                    .ok_or(TodayPlannerError::RequiredReviewUnavailable)?;
+                if review.planning_cost_minutes > remaining_minutes {
+                    return Err(TodayPlannerError::RequiredLanesDoNotFit);
+                }
+                entries.push(review.clone());
+                remaining_minutes -= review.planning_cost_minutes;
+                review_index = 1;
+            }
+            TodayLaneRequirement::Study => {
+                let study = ordered
+                    .study
+                    .first()
+                    .ok_or(TodayPlannerError::RequiredStudyUnavailable)?;
+                if study.planning_cost_minutes > remaining_minutes {
+                    return Err(TodayPlannerError::RequiredLanesDoNotFit);
+                }
+                entries.push(study.clone());
+                remaining_minutes -= study.planning_cost_minutes;
+                study_index = 1;
+            }
+            TodayLaneRequirement::Both => {
+                let review = ordered
+                    .review
+                    .first()
+                    .ok_or(TodayPlannerError::RequiredReviewUnavailable)?;
+                let study = ordered
+                    .study
+                    .first()
+                    .ok_or(TodayPlannerError::RequiredStudyUnavailable)?;
+                let required_minutes = review
+                    .planning_cost_minutes
+                    .checked_add(study.planning_cost_minutes)
+                    .ok_or(TodayPlannerError::RequiredLanesDoNotFit)?;
+                if required_minutes > remaining_minutes {
+                    return Err(TodayPlannerError::RequiredLanesDoNotFit);
+                }
+                entries.push(review.clone());
+                entries.push(study.clone());
+                remaining_minutes -= required_minutes;
+                review_index = 1;
+                study_index = 1;
+            }
+        }
+
+        while let Some(review) = ordered.review.get(review_index) {
+            if review.planning_cost_minutes > remaining_minutes {
+                break;
+            }
+            entries.push(review.clone());
+            remaining_minutes -= review.planning_cost_minutes;
+            review_index += 1;
+        }
+        while let Some(study) = ordered.study.get(study_index) {
+            if study.planning_cost_minutes > remaining_minutes {
+                break;
+            }
+            entries.push(study.clone());
+            remaining_minutes -= study.planning_cost_minutes;
+            study_index += 1;
+        }
+
+        let planned_minutes = Self::total_minutes(&entries)?;
+        Ok(TodayPlanDraft {
+            entries,
+            budget_minutes,
+            planned_minutes,
+            over_budget_minutes: planned_minutes.saturating_sub(budget_minutes),
+            unplanned_review_count: ordered.review.len() - review_index,
+            unplanned_study_count: ordered.study.len() - study_index,
+            next_review_only_streak: 0,
+        })
+    }
+
+    fn validate(ordered: &TodayOrderedCandidates) -> Result<(), TodayPlannerError> {
+        let mut seen_problem_ids = std::collections::HashSet::new();
+        for (expected_lane, candidates) in [
+            (TodayCandidateLane::CarryIn, &ordered.carry_in),
+            (TodayCandidateLane::Review, &ordered.review),
+            (TodayCandidateLane::Study, &ordered.study),
+        ] {
+            for candidate in candidates {
+                if candidate.lane != expected_lane {
+                    return Err(TodayPlannerError::LaneMismatch {
+                        problem_id: candidate.problem_id.clone(),
+                    });
+                }
+                let expected_cost = match candidate.reason {
+                    TodayCandidateReason::ContinueReview
+                    | TodayCandidateReason::DueFirstColdStart
+                    | TodayCandidateReason::DueLongTermReview => {
+                        TodayCandidateBuilder::REVIEW_PLANNING_COST_MINUTES
+                    }
+                    TodayCandidateReason::ContinueLearning
+                    | TodayCandidateReason::Relearn
+                    | TodayCandidateReason::Upsolve => {
+                        TodayCandidateBuilder::STUDY_PLANNING_COST_MINUTES
+                    }
+                };
+                if candidate.planning_cost_minutes != expected_cost {
+                    return Err(TodayPlannerError::InvalidPlanningCost {
+                        problem_id: candidate.problem_id.clone(),
+                    });
+                }
+                if !seen_problem_ids.insert(candidate.problem_id.as_str()) {
+                    return Err(TodayPlannerError::DuplicateProblem {
+                        problem_id: candidate.problem_id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn total_minutes(candidates: &[TodayCandidate]) -> Result<u32, TodayPlannerError> {
+        candidates.iter().try_fold(0_u32, |total, candidate| {
+            total.checked_add(candidate.planning_cost_minutes).ok_or(
+                TodayPlannerError::InvalidPlanningCost {
+                    problem_id: candidate.problem_id.clone(),
+                },
+            )
         })
     }
 }
@@ -596,11 +1184,9 @@ mod tests {
             LearningStatus::WaitingColdStart,
             LearningStatus::Relearning,
         ] {
-            let stopped = ProblemLifecycleEngine::decide(
-                status,
-                ProblemLifecycleAction::StopLearning,
-            )
-            .expect("eligible status can stop learning");
+            let stopped =
+                ProblemLifecycleEngine::decide(status, ProblemLifecycleAction::StopLearning)
+                    .expect("eligible status can stop learning");
             assert_eq!(stopped.next_status, LearningStatus::Unstarted);
         }
     }
@@ -615,11 +1201,9 @@ mod tests {
             LearningStatus::Relearning,
             LearningStatus::LongTermReview,
         ] {
-            let deleted = ProblemLifecycleEngine::decide(
-                status,
-                ProblemLifecycleAction::DeletePersonalNote,
-            )
-            .expect("personal note deletion exits lifecycle");
+            let deleted =
+                ProblemLifecycleEngine::decide(status, ProblemLifecycleAction::DeletePersonalNote)
+                    .expect("personal note deletion exits lifecycle");
             assert_eq!(deleted.next_status, LearningStatus::Unstarted);
             assert_eq!(deleted.review_cycle, ReviewCycleDirective::CancelActive);
         }
@@ -628,9 +1212,18 @@ mod tests {
     #[test]
     fn illegal_problem_lifecycle_transitions_are_explicit_errors() {
         for (status, action) in [
-            (LearningStatus::Unstarted, ProblemLifecycleAction::StartLearning),
-            (LearningStatus::UpsolvePending, ProblemLifecycleAction::MarkUnderstood),
-            (LearningStatus::Learning, ProblemLifecycleAction::JoinUpsolve),
+            (
+                LearningStatus::Unstarted,
+                ProblemLifecycleAction::StartLearning,
+            ),
+            (
+                LearningStatus::UpsolvePending,
+                ProblemLifecycleAction::MarkUnderstood,
+            ),
+            (
+                LearningStatus::Learning,
+                ProblemLifecycleAction::JoinUpsolve,
+            ),
             (
                 LearningStatus::WaitingColdStart,
                 ProblemLifecycleAction::StartLearning,
@@ -657,7 +1250,9 @@ mod tests {
                 ProblemLifecycleAction::StopLearning,
             ]
         );
-        assert!(ProblemLifecycleEngine::available_actions(LearningStatus::LongTermReview).is_empty());
+        assert!(
+            ProblemLifecycleEngine::available_actions(LearningStatus::LongTermReview).is_empty()
+        );
     }
 
     #[test]
@@ -687,31 +1282,21 @@ mod tests {
         let on_due = LocalDate::parse_iso("2026-08-14").expect("on due");
         let overdue = LocalDate::parse_iso("2026-08-20").expect("overdue");
 
-        let early = ReviewEligibilityEngine::decide(
-            LearningStatus::WaitingColdStart,
-            due,
-            before_due,
-        )
-        .expect("early check");
+        let early =
+            ReviewEligibilityEngine::decide(LearningStatus::WaitingColdStart, due, before_due)
+                .expect("early check");
         assert_eq!(early.attempt_type, ReviewAttemptType::EarlyCheck);
         assert!(early.started_early);
         assert_eq!(early.scheduled_due_local_date, due);
 
-        let first = ReviewEligibilityEngine::decide(
-            LearningStatus::WaitingColdStart,
-            due,
-            on_due,
-        )
-        .expect("first cold start");
+        let first = ReviewEligibilityEngine::decide(LearningStatus::WaitingColdStart, due, on_due)
+            .expect("first cold start");
         assert_eq!(first.attempt_type, ReviewAttemptType::FirstColdStart);
         assert!(!first.started_early);
 
-        let long_term = ReviewEligibilityEngine::decide(
-            LearningStatus::LongTermReview,
-            due,
-            overdue,
-        )
-        .expect("long-term review");
+        let long_term =
+            ReviewEligibilityEngine::decide(LearningStatus::LongTermReview, due, overdue)
+                .expect("long-term review");
         assert_eq!(long_term.attempt_type, ReviewAttemptType::LongTermReview);
         assert!(!long_term.started_early);
     }
@@ -896,5 +1481,882 @@ mod tests {
             ..five
         }
         .is_thoroughly_digested());
+    }
+
+    fn today_input<'a>(
+        problem_id: &'a str,
+        learning_status: LearningStatus,
+        learning_status_since: LocalDate,
+    ) -> TodayCandidateInput<'a> {
+        TodayCandidateInput {
+            problem_id,
+            learning_status,
+            learning_status_since,
+            pinned: false,
+            active_review_due: None,
+            in_progress_review: None,
+        }
+    }
+
+    #[test]
+    fn today_candidates_cover_only_the_frozen_legal_lanes() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        let earlier = LocalDate::parse_iso("2026-08-01").expect("earlier");
+        let due = LocalDate::parse_iso("2026-08-10").expect("due");
+        let future = LocalDate::parse_iso("2026-08-13").expect("future");
+
+        let mut waiting = today_input("waiting", LearningStatus::WaitingColdStart, earlier);
+        waiting.active_review_due = Some(due);
+        let mut long_term = today_input("long-term", LearningStatus::LongTermReview, earlier);
+        long_term.active_review_due = Some(today);
+        let mut future_review = today_input("future", LearningStatus::LongTermReview, earlier);
+        future_review.active_review_due = Some(future);
+
+        let candidates = TodayCandidateBuilder::build(
+            today,
+            &[
+                today_input("unstarted", LearningStatus::Unstarted, earlier),
+                today_input("learning", LearningStatus::Learning, earlier),
+                today_input("relearning", LearningStatus::Relearning, earlier),
+                today_input("pending", LearningStatus::UpsolvePending, earlier),
+                waiting,
+                long_term,
+                future_review,
+            ],
+        )
+        .expect("legal candidates");
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.problem_id.as_str(),
+                    candidate.lane,
+                    candidate.reason,
+                    candidate.planning_cost_minutes,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "learning",
+                    TodayCandidateLane::CarryIn,
+                    TodayCandidateReason::ContinueLearning,
+                    60,
+                ),
+                (
+                    "relearning",
+                    TodayCandidateLane::Study,
+                    TodayCandidateReason::Relearn,
+                    60,
+                ),
+                (
+                    "pending",
+                    TodayCandidateLane::Study,
+                    TodayCandidateReason::Upsolve,
+                    60,
+                ),
+                (
+                    "waiting",
+                    TodayCandidateLane::Review,
+                    TodayCandidateReason::DueFirstColdStart,
+                    30,
+                ),
+                (
+                    "long-term",
+                    TodayCandidateLane::Review,
+                    TodayCandidateReason::DueLongTermReview,
+                    30,
+                ),
+            ]
+        );
+        assert_eq!(candidates[3].scheduled_due_local_date, Some(due));
+        assert_eq!(candidates[4].scheduled_due_local_date, Some(today));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.review_attempt_id.is_none()));
+    }
+
+    #[test]
+    fn today_candidate_in_progress_review_is_one_authoritative_carry_in() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        let due = LocalDate::parse_iso("2026-08-10").expect("due");
+        let mut input = today_input("problem-1", LearningStatus::WaitingColdStart, due);
+        input.pinned = true;
+        input.active_review_due = Some(due);
+        input.in_progress_review = Some(TodayInProgressReview {
+            attempt_id: "attempt-1",
+            scheduled_due_local_date: due,
+        });
+
+        assert_eq!(
+            TodayCandidateBuilder::build(today, &[input]).expect("carry-in"),
+            vec![TodayCandidate {
+                problem_id: "problem-1".to_owned(),
+                review_attempt_id: Some("attempt-1".to_owned()),
+                lane: TodayCandidateLane::CarryIn,
+                reason: TodayCandidateReason::ContinueReview,
+                planning_cost_minutes: 30,
+                pinned: true,
+                learning_status_since: due,
+                scheduled_due_local_date: Some(due),
+            }]
+        );
+    }
+
+    #[test]
+    fn today_candidate_builder_rejects_missing_or_mismatched_review_facts() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        let missing_due = today_input("missing", LearningStatus::WaitingColdStart, today);
+        assert_eq!(
+            TodayCandidateBuilder::build(today, &[missing_due]),
+            Err(TodayCandidateError::MissingActiveReviewDue {
+                problem_id: "missing".to_owned(),
+                status: LearningStatus::WaitingColdStart,
+            })
+        );
+
+        let mut mismatch = today_input("mismatch", LearningStatus::Learning, today);
+        mismatch.in_progress_review = Some(TodayInProgressReview {
+            attempt_id: "attempt-1",
+            scheduled_due_local_date: today,
+        });
+        assert_eq!(
+            TodayCandidateBuilder::build(today, &[mismatch]),
+            Err(TodayCandidateError::InProgressReviewLifecycleMismatch {
+                problem_id: "mismatch".to_owned(),
+                status: LearningStatus::Learning,
+            })
+        );
+    }
+
+    #[test]
+    fn today_candidate_builder_rejects_duplicate_problem_inputs() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        assert_eq!(
+            TodayCandidateBuilder::build(
+                today,
+                &[
+                    today_input("problem-1", LearningStatus::Learning, today),
+                    today_input("problem-1", LearningStatus::UpsolvePending, today),
+                ],
+            ),
+            Err(TodayCandidateError::DuplicateProblem {
+                problem_id: "problem-1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn today_candidate_builder_rejects_empty_authoritative_ids() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        assert_eq!(
+            TodayCandidateBuilder::build(
+                today,
+                &[today_input("", LearningStatus::Learning, today)],
+            ),
+            Err(TodayCandidateError::EmptyProblemId)
+        );
+
+        let mut input = today_input("problem-1", LearningStatus::LongTermReview, today);
+        input.in_progress_review = Some(TodayInProgressReview {
+            attempt_id: "",
+            scheduled_due_local_date: today,
+        });
+        assert_eq!(
+            TodayCandidateBuilder::build(today, &[input]),
+            Err(TodayCandidateError::EmptyReviewAttemptId {
+                problem_id: "problem-1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn today_candidate_semantics_do_not_depend_on_input_order() {
+        let today = LocalDate::parse_iso("2026-08-12").expect("today");
+        let earlier = LocalDate::parse_iso("2026-08-01").expect("earlier");
+        let first = today_input("a", LearningStatus::Learning, earlier);
+        let second = today_input("b", LearningStatus::Relearning, earlier);
+
+        let mut forward = TodayCandidateBuilder::build(today, &[first, second]).expect("forward");
+        let mut reverse = TodayCandidateBuilder::build(today, &[second, first]).expect("reverse");
+        forward.sort_by(|left, right| left.problem_id.cmp(&right.problem_id));
+        reverse.sort_by(|left, right| left.problem_id.cmp(&right.problem_id));
+        assert_eq!(forward, reverse);
+    }
+
+    fn candidate(
+        problem_id: &str,
+        lane: TodayCandidateLane,
+        reason: TodayCandidateReason,
+        pinned: bool,
+        since: &str,
+        due: Option<&str>,
+    ) -> TodayCandidate {
+        TodayCandidate {
+            problem_id: problem_id.to_owned(),
+            review_attempt_id: None,
+            lane,
+            reason,
+            planning_cost_minutes: match reason {
+                TodayCandidateReason::ContinueReview
+                | TodayCandidateReason::DueFirstColdStart
+                | TodayCandidateReason::DueLongTermReview => 30,
+                TodayCandidateReason::ContinueLearning
+                | TodayCandidateReason::Relearn
+                | TodayCandidateReason::Upsolve => 60,
+            },
+            pinned,
+            learning_status_since: LocalDate::parse_iso(since).expect("since"),
+            scheduled_due_local_date: due.map(|value| LocalDate::parse_iso(value).expect("due")),
+        }
+    }
+
+    #[test]
+    fn today_ordering_follows_the_frozen_lane_rules_and_stable_tie_breaks() {
+        let candidates = vec![
+            candidate(
+                "review-later",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                true,
+                "2026-08-01",
+                Some("2026-08-10"),
+            ),
+            candidate(
+                "review-overdue",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueLongTermReview,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            ),
+            candidate(
+                "review-first",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-05"),
+            ),
+            candidate(
+                "review-pinned-long",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueLongTermReview,
+                true,
+                "2026-08-01",
+                Some("2026-08-05"),
+            ),
+            candidate(
+                "review-pinned-first",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                true,
+                "2026-08-01",
+                Some("2026-08-05"),
+            ),
+            candidate(
+                "study-pending-old",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Upsolve,
+                true,
+                "2026-07-01",
+                None,
+            ),
+            candidate(
+                "study-relearn-unpinned",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                false,
+                "2026-07-01",
+                None,
+            ),
+            candidate(
+                "study-relearn-new",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                true,
+                "2026-08-01",
+                None,
+            ),
+            candidate(
+                "study-relearn-old-b",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                true,
+                "2026-07-01",
+                None,
+            ),
+            candidate(
+                "study-relearn-old-a",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                true,
+                "2026-07-01",
+                None,
+            ),
+            candidate(
+                "carry-z",
+                TodayCandidateLane::CarryIn,
+                TodayCandidateReason::ContinueLearning,
+                false,
+                "2026-08-01",
+                None,
+            ),
+            candidate(
+                "carry-a",
+                TodayCandidateLane::CarryIn,
+                TodayCandidateReason::ContinueReview,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            ),
+        ];
+
+        let ordered = TodayCandidateOrderingEngine::order(&candidates).expect("valid candidates");
+        assert_eq!(
+            ordered
+                .carry_in
+                .iter()
+                .map(|item| item.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["carry-a", "carry-z"]
+        );
+        assert_eq!(
+            ordered
+                .review
+                .iter()
+                .map(|item| item.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "review-overdue",
+                "review-pinned-first",
+                "review-pinned-long",
+                "review-first",
+                "review-later",
+            ]
+        );
+        assert_eq!(
+            ordered
+                .study
+                .iter()
+                .map(|item| item.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "study-relearn-old-a",
+                "study-relearn-old-b",
+                "study-relearn-new",
+                "study-relearn-unpinned",
+                "study-pending-old",
+            ]
+        );
+    }
+
+    #[test]
+    fn today_ordering_is_deterministic_for_every_input_permutation() {
+        let a = candidate(
+            "a",
+            TodayCandidateLane::Review,
+            TodayCandidateReason::DueFirstColdStart,
+            false,
+            "2026-08-01",
+            Some("2026-08-01"),
+        );
+        let b = candidate(
+            "b",
+            TodayCandidateLane::Study,
+            TodayCandidateReason::Relearn,
+            false,
+            "2026-08-01",
+            None,
+        );
+        let c = candidate(
+            "c",
+            TodayCandidateLane::CarryIn,
+            TodayCandidateReason::ContinueLearning,
+            false,
+            "2026-08-01",
+            None,
+        );
+        let expected = TodayCandidateOrderingEngine::order(&[a.clone(), b.clone(), c.clone()])
+            .expect("expected order");
+        for permutation in [
+            vec![a.clone(), c.clone(), b.clone()],
+            vec![b.clone(), a.clone(), c.clone()],
+            vec![b.clone(), c.clone(), a.clone()],
+            vec![c.clone(), a.clone(), b.clone()],
+            vec![c, b, a],
+        ] {
+            assert_eq!(
+                TodayCandidateOrderingEngine::order(&permutation).expect("permutation order"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn today_ordering_rejects_malformed_candidate_contracts() {
+        let mismatched = candidate(
+            "mismatched",
+            TodayCandidateLane::Study,
+            TodayCandidateReason::DueFirstColdStart,
+            false,
+            "2026-08-01",
+            Some("2026-08-01"),
+        );
+        assert_eq!(
+            TodayCandidateOrderingEngine::order(&[mismatched]),
+            Err(TodayCandidateOrderingError::LaneReasonMismatch {
+                problem_id: "mismatched".to_owned(),
+            })
+        );
+
+        let missing_due = candidate(
+            "missing-due",
+            TodayCandidateLane::Review,
+            TodayCandidateReason::DueLongTermReview,
+            false,
+            "2026-08-01",
+            None,
+        );
+        assert_eq!(
+            TodayCandidateOrderingEngine::order(&[missing_due]),
+            Err(TodayCandidateOrderingError::MissingReviewDue {
+                problem_id: "missing-due".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn today_anti_starvation_requires_both_lanes_when_both_fit() {
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(
+                true,
+                true,
+                TodayPlanningCapacity {
+                    can_fit_review: true,
+                    can_fit_study: true,
+                    can_fit_both: true,
+                },
+                1,
+            ),
+            Ok(TodayAntiStarvationDecision {
+                required_lanes: TodayLaneRequirement::Both,
+                next_review_only_streak: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn today_anti_starvation_allows_two_review_only_days_then_requires_study() {
+        let review_only_capacity = TodayPlanningCapacity {
+            can_fit_review: true,
+            can_fit_study: true,
+            can_fit_both: false,
+        };
+        for (streak, expected_next) in [(0, 1), (1, 2)] {
+            assert_eq!(
+                TodayAntiStarvationEngine::decide(true, true, review_only_capacity, streak,),
+                Ok(TodayAntiStarvationDecision {
+                    required_lanes: TodayLaneRequirement::Review,
+                    next_review_only_streak: expected_next,
+                })
+            );
+        }
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(true, true, review_only_capacity, 2),
+            Ok(TodayAntiStarvationDecision {
+                required_lanes: TodayLaneRequirement::Study,
+                next_review_only_streak: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn today_anti_starvation_does_not_accrue_debt_without_study_backlog() {
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(
+                true,
+                false,
+                TodayPlanningCapacity {
+                    can_fit_review: true,
+                    can_fit_study: false,
+                    can_fit_both: false,
+                },
+                2,
+            ),
+            Ok(TodayAntiStarvationDecision {
+                required_lanes: TodayLaneRequirement::Review,
+                next_review_only_streak: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn today_anti_starvation_rejects_impossible_or_corrupt_inputs() {
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(
+                true,
+                true,
+                TodayPlanningCapacity {
+                    can_fit_review: true,
+                    can_fit_study: false,
+                    can_fit_both: true,
+                },
+                0,
+            ),
+            Err(TodayAntiStarvationError::InvalidCapacity)
+        );
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(
+                true,
+                true,
+                TodayPlanningCapacity {
+                    can_fit_review: true,
+                    can_fit_study: true,
+                    can_fit_both: false,
+                },
+                3,
+            ),
+            Err(TodayAntiStarvationError::InvalidReviewOnlyStreak)
+        );
+        assert_eq!(
+            TodayAntiStarvationEngine::decide(
+                true,
+                true,
+                TodayPlanningCapacity {
+                    can_fit_review: true,
+                    can_fit_study: false,
+                    can_fit_both: false,
+                },
+                2,
+            ),
+            Err(TodayAntiStarvationError::StudyRequiredButCannotFit)
+        );
+    }
+
+    fn ordered_candidates(
+        carry_in: Vec<TodayCandidate>,
+        review: Vec<TodayCandidate>,
+        study: Vec<TodayCandidate>,
+    ) -> TodayOrderedCandidates {
+        TodayOrderedCandidates {
+            carry_in,
+            review,
+            study,
+        }
+    }
+
+    #[test]
+    fn today_planner_keeps_all_carry_in_before_new_recommendations() {
+        let carry_review = candidate(
+            "carry-review",
+            TodayCandidateLane::CarryIn,
+            TodayCandidateReason::ContinueReview,
+            false,
+            "2026-08-01",
+            Some("2026-08-01"),
+        );
+        let carry_learning = candidate(
+            "carry-learning",
+            TodayCandidateLane::CarryIn,
+            TodayCandidateReason::ContinueLearning,
+            false,
+            "2026-08-01",
+            None,
+        );
+        let review = candidate(
+            "new-review",
+            TodayCandidateLane::Review,
+            TodayCandidateReason::DueFirstColdStart,
+            false,
+            "2026-08-01",
+            Some("2026-08-01"),
+        );
+        let ordered = ordered_candidates(vec![carry_review, carry_learning], vec![review], vec![]);
+
+        let draft = TodayPlanner::plan(&ordered, 60, TodayLaneRequirement::None)
+            .expect("carry-in remains visible");
+        assert_eq!(
+            draft
+                .entries
+                .iter()
+                .map(|entry| entry.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["carry-review", "carry-learning"]
+        );
+        assert_eq!(draft.planned_minutes, 90);
+        assert_eq!(draft.over_budget_minutes, 30);
+        assert_eq!(draft.unplanned_review_count, 1);
+    }
+
+    #[test]
+    fn today_planner_satisfies_required_lanes_before_review_first_fill() {
+        let reviews = ["review-a", "review-b"]
+            .map(|problem_id| {
+                candidate(
+                    problem_id,
+                    TodayCandidateLane::Review,
+                    TodayCandidateReason::DueLongTermReview,
+                    false,
+                    "2026-08-01",
+                    Some("2026-08-01"),
+                )
+            })
+            .to_vec();
+        let studies = ["study-a", "study-b"]
+            .map(|problem_id| {
+                candidate(
+                    problem_id,
+                    TodayCandidateLane::Study,
+                    TodayCandidateReason::Relearn,
+                    false,
+                    "2026-08-01",
+                    None,
+                )
+            })
+            .to_vec();
+        let ordered = ordered_candidates(vec![], reviews, studies);
+
+        let draft = TodayPlanner::plan(&ordered, 120, TodayLaneRequirement::Both)
+            .expect("both required lanes fit");
+        assert_eq!(
+            draft
+                .entries
+                .iter()
+                .map(|entry| entry.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review-a", "study-a", "review-b"]
+        );
+        assert_eq!(draft.planned_minutes, 120);
+        assert_eq!(draft.over_budget_minutes, 0);
+        assert_eq!(draft.unplanned_review_count, 0);
+        assert_eq!(draft.unplanned_study_count, 1);
+
+        let study_first = TodayPlanner::plan(&ordered, 90, TodayLaneRequirement::Study)
+            .expect("study requirement fits");
+        assert_eq!(
+            study_first
+                .entries
+                .iter()
+                .map(|entry| entry.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["study-a", "review-a"]
+        );
+    }
+
+    #[test]
+    fn today_generated_planner_consumes_budget_and_anti_starvation_together() {
+        let ordered = ordered_candidates(
+            vec![],
+            vec![candidate(
+                "review",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            )],
+            vec![candidate(
+                "study",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                false,
+                "2026-08-01",
+                None,
+            )],
+        );
+
+        let both = TodayPlanner::plan_generated(&ordered, 90, 1).expect("both fit");
+        assert_eq!(
+            both.entries
+                .iter()
+                .map(|entry| entry.problem_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review", "study"]
+        );
+        assert_eq!(both.next_review_only_streak, 0);
+
+        let first_review_only = TodayPlanner::plan_generated(&ordered, 60, 0)
+            .expect("first review-only day is allowed");
+        assert_eq!(first_review_only.entries[0].problem_id, "review");
+        assert_eq!(first_review_only.next_review_only_streak, 1);
+
+        let forced_study = TodayPlanner::plan_generated(&ordered, 60, 2)
+            .expect("third constrained day gives Study the slot");
+        assert_eq!(forced_study.entries[0].problem_id, "study");
+        assert_eq!(forced_study.next_review_only_streak, 0);
+    }
+
+    #[test]
+    fn today_generated_planner_stops_new_work_when_carry_in_consumes_budget() {
+        let ordered = ordered_candidates(
+            vec![candidate(
+                "carry",
+                TodayCandidateLane::CarryIn,
+                TodayCandidateReason::ContinueLearning,
+                false,
+                "2026-08-01",
+                None,
+            )],
+            vec![candidate(
+                "review",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            )],
+            vec![candidate(
+                "study",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Relearn,
+                false,
+                "2026-08-01",
+                None,
+            )],
+        );
+        let draft = TodayPlanner::plan_generated(&ordered, 30, 0)
+            .expect("real carry-in remains even over budget");
+        assert_eq!(draft.entries.len(), 1);
+        assert_eq!(draft.entries[0].problem_id, "carry");
+        assert_eq!(draft.over_budget_minutes, 30);
+        assert_eq!(draft.unplanned_review_count, 1);
+        assert_eq!(draft.unplanned_study_count, 1);
+        assert_eq!(draft.next_review_only_streak, 0);
+    }
+
+    #[test]
+    fn today_planner_only_packs_complete_tasks() {
+        let ordered = ordered_candidates(
+            vec![],
+            vec![candidate(
+                "review",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            )],
+            vec![candidate(
+                "study",
+                TodayCandidateLane::Study,
+                TodayCandidateReason::Upsolve,
+                false,
+                "2026-08-01",
+                None,
+            )],
+        );
+
+        let draft = TodayPlanner::plan(&ordered, 89, TodayLaneRequirement::None)
+            .expect("review fits but study does not");
+        assert_eq!(draft.entries.len(), 1);
+        assert_eq!(draft.entries[0].problem_id, "review");
+        assert_eq!(draft.planned_minutes, 30);
+        assert_eq!(draft.unplanned_study_count, 1);
+
+        let no_room = TodayPlanner::plan(&ordered, 29, TodayLaneRequirement::None)
+            .expect("no complete task fits");
+        assert!(no_room.entries.is_empty());
+        assert_eq!(no_room.planned_minutes, 0);
+        assert_eq!(no_room.unplanned_review_count, 1);
+        assert_eq!(no_room.unplanned_study_count, 1);
+    }
+
+    #[test]
+    fn today_planner_rejects_unsatisfied_lane_requirements() {
+        let review_only = ordered_candidates(
+            vec![],
+            vec![candidate(
+                "review",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            )],
+            vec![],
+        );
+        assert_eq!(
+            TodayPlanner::plan(&review_only, 90, TodayLaneRequirement::Study),
+            Err(TodayPlannerError::RequiredStudyUnavailable)
+        );
+        assert_eq!(
+            TodayPlanner::plan(&review_only, 29, TodayLaneRequirement::Review),
+            Err(TodayPlannerError::RequiredLanesDoNotFit)
+        );
+        assert_eq!(
+            TodayPlanner::plan(&review_only, 90, TodayLaneRequirement::Both),
+            Err(TodayPlannerError::RequiredStudyUnavailable)
+        );
+    }
+
+    #[test]
+    fn today_planner_rejects_corrupt_ordered_candidates() {
+        let valid = candidate(
+            "duplicate",
+            TodayCandidateLane::Review,
+            TodayCandidateReason::DueFirstColdStart,
+            false,
+            "2026-08-01",
+            Some("2026-08-01"),
+        );
+        let duplicate = TodayCandidate {
+            lane: TodayCandidateLane::Study,
+            reason: TodayCandidateReason::Upsolve,
+            planning_cost_minutes: 60,
+            scheduled_due_local_date: None,
+            ..valid.clone()
+        };
+        assert_eq!(
+            TodayPlanner::plan(
+                &ordered_candidates(vec![], vec![valid], vec![duplicate]),
+                90,
+                TodayLaneRequirement::None,
+            ),
+            Err(TodayPlannerError::DuplicateProblem {
+                problem_id: "duplicate".to_owned(),
+            })
+        );
+
+        let invalid_cost = TodayCandidate {
+            planning_cost_minutes: 29,
+            ..candidate(
+                "invalid-cost",
+                TodayCandidateLane::Review,
+                TodayCandidateReason::DueFirstColdStart,
+                false,
+                "2026-08-01",
+                Some("2026-08-01"),
+            )
+        };
+        assert_eq!(
+            TodayPlanner::plan(
+                &ordered_candidates(vec![], vec![invalid_cost], vec![]),
+                90,
+                TodayLaneRequirement::None,
+            ),
+            Err(TodayPlannerError::InvalidPlanningCost {
+                problem_id: "invalid-cost".to_owned(),
+            })
+        );
+
+        let wrong_lane = candidate(
+            "wrong-lane",
+            TodayCandidateLane::Study,
+            TodayCandidateReason::Upsolve,
+            false,
+            "2026-08-01",
+            None,
+        );
+        assert_eq!(
+            TodayPlanner::plan(
+                &ordered_candidates(vec![], vec![wrong_lane], vec![]),
+                90,
+                TodayLaneRequirement::None,
+            ),
+            Err(TodayPlannerError::LaneMismatch {
+                problem_id: "wrong-lane".to_owned(),
+            })
+        );
     }
 }

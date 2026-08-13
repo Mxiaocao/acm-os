@@ -85,6 +85,212 @@ pub struct ProblemLifecycleStateDto {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TodayLoadInput {
+    budget_minutes: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayReorderInput {
+    plan_id: String,
+    ordered_entry_ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayDoneInput {
+    plan_id: String,
+    entry_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayReplanInput {
+    budget_minutes: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyAcmBudgetDto {
+    monday: Option<u32>,
+    tuesday: Option<u32>,
+    wednesday: Option<u32>,
+    thursday: Option<u32>,
+    friday: Option<u32>,
+    saturday: Option<u32>,
+    sunday: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayAcceptSuggestionInput {
+    preview: TodayExtraSuggestionsPreviewDto,
+    problem_id: String,
+}
+
+#[cfg(feature = "desktop-e2e")]
+fn command_local_date() -> Result<acm_os_domain::LocalDate, ()> {
+    let path = std::env::var_os("ACM_OS_E2E_DATE_FILE").ok_or(())?;
+    let value = std::fs::read_to_string(path).map_err(|_| ())?;
+    acm_os_domain::LocalDate::parse_iso(value.trim()).map_err(|_| ())
+}
+
+#[cfg(not(feature = "desktop-e2e"))]
+fn command_local_date() -> Result<acm_os_domain::LocalDate, ()> {
+    acm_os_infrastructure::current_local_date()
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayEntryDto {
+    entry_id: String,
+    problem_id: String,
+    contest_id: u64,
+    problem_index: String,
+    problem_title: String,
+    review_attempt_id: Option<String>,
+    lane: String,
+    reason: String,
+    planning_cost_minutes: u32,
+    position: u32,
+    origin: String,
+    status: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodaySnapshotDto {
+    plan_id: String,
+    local_date: String,
+    budget_minutes: u32,
+    planned_minutes: u32,
+    over_budget_minutes: u32,
+    review_only_streak: u8,
+    entries: Vec<TodayEntryDto>,
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopE2eContextDto {
+    vault: String,
+    problems: String,
+    knowledge: String,
+    phase: String,
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopE2eDateInput {
+    local_date: String,
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopE2eResultInput {
+    result: String,
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopE2eStageInput {
+    stage: String,
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[tauri::command]
+pub fn desktop_e2e_context() -> Result<DesktopE2eContextDto, &'static str> {
+    let root = std::env::var_os("ACM_OS_E2E_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or("desktop_e2e_unavailable")?;
+    let vault = root.parent().unwrap_or(&root).join("vault");
+    Ok(DesktopE2eContextDto {
+        vault: vault.to_string_lossy().into_owned(),
+        problems: vault.join("Problems").to_string_lossy().into_owned(),
+        knowledge: vault.join("Knowledge").to_string_lossy().into_owned(),
+        phase: std::env::var("ACM_OS_E2E_PHASE").unwrap_or_else(|_| "initial".to_owned()),
+    })
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[tauri::command]
+pub fn desktop_e2e_set_date(input: DesktopE2eDateInput) -> Result<(), &'static str> {
+    acm_os_domain::LocalDate::parse_iso(&input.local_date)
+        .map_err(|_| "invalid_desktop_e2e_date")?;
+    let path = std::env::var_os("ACM_OS_E2E_DATE_FILE").ok_or("desktop_e2e_unavailable")?;
+    std::fs::write(path, format!("{}\n", input.local_date)).map_err(|_| "desktop_e2e_write_failed")
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[tauri::command]
+pub fn desktop_e2e_finish(input: DesktopE2eResultInput) -> Result<(), &'static str> {
+    let root = std::env::var_os("ACM_OS_E2E_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or("desktop_e2e_unavailable")?;
+    std::fs::write(root.join("desktop-e2e-result.txt"), input.result)
+        .map_err(|_| "desktop_e2e_write_failed")
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[tauri::command]
+pub fn desktop_e2e_log(input: DesktopE2eStageInput) -> Result<(), &'static str> {
+    let root = std::env::var_os("ACM_OS_E2E_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or("desktop_e2e_unavailable")?;
+    std::fs::write(root.join("desktop-e2e-stage.txt"), input.stage)
+        .map_err(|_| "desktop_e2e_write_failed")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayReplanEntryDto {
+    existing_entry_id: Option<String>,
+    problem_id: String,
+    review_attempt_id: Option<String>,
+    lane: String,
+    reason: String,
+    planning_cost_minutes: u32,
+    origin: String,
+    status: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayReplanPreviewDto {
+    expected_snapshot: TodaySnapshotDto,
+    proposed_budget_minutes: u32,
+    proposed_planned_minutes: u32,
+    proposed_over_budget_minutes: u32,
+    proposed_review_only_streak: u8,
+    entries: Vec<TodayReplanEntryDto>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayExtraSuggestionDto {
+    problem_id: String,
+    contest_id: u64,
+    problem_index: String,
+    problem_title: String,
+    review_attempt_id: Option<String>,
+    lane: String,
+    reason: String,
+    planning_cost_minutes: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayExtraSuggestionsPreviewDto {
+    expected_snapshot: TodaySnapshotDto,
+    remaining_budget_minutes: u32,
+    suggestions: Vec<TodayExtraSuggestionDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProblemLifecycleCommandInput {
     contest_id: u64,
     index: String,
@@ -335,7 +541,10 @@ pub struct MarkdownParseWarningDto {
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum StatementReadStateDto {
     Pending,
-    Ready { #[serde(rename = "sanitizedHtml")] sanitized_html: String },
+    Ready {
+        #[serde(rename = "sanitizedHtml")]
+        sanitized_html: String,
+    },
 }
 
 #[derive(serde::Serialize)]
@@ -369,26 +578,112 @@ pub async fn import_codeforces_contest(
 
     let contest = acm_os_application::codeforces::locate_public_contest(&input.contest_url)
         .map_err(|_| "unsupported_contest_url")?;
-    let source = acm_os_infrastructure::codeforces::CodeforcesHttpAdapter::new()
-        .map_err(|_| "adapter_unavailable")?;
-    let result = import_codeforces_contest(database.inner(), &source, contest)
+    #[cfg(feature = "desktop-e2e")]
+    let result = import_codeforces_contest(database.inner(), &DesktopE2eContestSource, contest)
         .await
-        .map_err(|error| match error {
-            acm_os_application::ContestImportSourceError::Unavailable => "import_unavailable",
-            acm_os_application::ContestImportSourceError::InvalidRemoteData => "invalid_remote_data",
-        })?;
+        .map_err(contest_import_error_code)?;
+    #[cfg(not(feature = "desktop-e2e"))]
+    let result = {
+        let source = acm_os_infrastructure::codeforces::CodeforcesHttpAdapter::new()
+            .map_err(|_| "adapter_unavailable")?;
+        import_codeforces_contest(database.inner(), &source, contest)
+            .await
+            .map_err(contest_import_error_code)?
+    };
     Ok(ContestImportRunDto {
         import_status: match result.persisted.status {
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
             acm_os_application::ContestImportStatus::Complete => "complete",
         },
-        missing_snapshot_problems: result.persisted.missing_snapshot_problems.into_iter()
+        missing_snapshot_problems: result
+            .persisted
+            .missing_snapshot_problems
+            .into_iter()
             .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
             .collect(),
-        failed_snapshot_problems: result.failed_snapshot_problems.into_iter()
+        failed_snapshot_problems: result
+            .failed_snapshot_problems
+            .into_iter()
             .map(|problem| format!("{}{}", problem.contest().contest_id(), problem.index()))
             .collect(),
     })
+}
+
+fn contest_import_error_code(error: acm_os_application::ContestImportSourceError) -> &'static str {
+    match error {
+        acm_os_application::ContestImportSourceError::Unavailable => "import_unavailable",
+        acm_os_application::ContestImportSourceError::InvalidRemoteData => "invalid_remote_data",
+    }
+}
+
+#[cfg(feature = "desktop-e2e")]
+struct DesktopE2eContestSource;
+
+#[cfg(feature = "desktop-e2e")]
+impl acm_os_application::ContestImportSource for DesktopE2eContestSource {
+    async fn fetch_manifest(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<acm_os_application::ContestImportDraft, acm_os_application::ContestImportSourceError>
+    {
+        if contest.contest_id() != 1979 {
+            return Err(acm_os_application::ContestImportSourceError::InvalidRemoteData);
+        }
+        let problem_a = acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+            .map_err(|_| acm_os_application::ContestImportSourceError::InvalidRemoteData)?;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B")
+            .map_err(|_| acm_os_application::ContestImportSourceError::InvalidRemoteData)?;
+        let problem_c = acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "C")
+            .map_err(|_| acm_os_application::ContestImportSourceError::InvalidRemoteData)?;
+        Ok(acm_os_application::ContestImportDraft {
+            contest: contest.clone(),
+            title: "Desktop E2E Contest".to_owned(),
+            source_url: "https://codeforces.com/contest/1979".to_owned(),
+            starts_at_utc: Some("2026-08-01T00:00:00Z".to_owned()),
+            slots: vec![
+                acm_os_application::ContestProblemSlotDraft {
+                    ordinal: 1,
+                    problem: problem_a,
+                    title: "Desktop E2E Problem".to_owned(),
+                    rating: Some(800),
+                    source_url: "https://codeforces.com/contest/1979/problem/A".to_owned(),
+                },
+                acm_os_application::ContestProblemSlotDraft {
+                    ordinal: 2,
+                    problem: problem_b,
+                    title: "Desktop E2E Study Problem".to_owned(),
+                    rating: Some(900),
+                    source_url: "https://codeforces.com/contest/1979/problem/B".to_owned(),
+                },
+                acm_os_application::ContestProblemSlotDraft {
+                    ordinal: 3,
+                    problem: problem_c,
+                    title: "Desktop E2E Extra Study Problem".to_owned(),
+                    rating: Some(1000),
+                    source_url: "https://codeforces.com/contest/1979/problem/C".to_owned(),
+                },
+            ],
+        })
+    }
+
+    async fn fetch_snapshot(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<
+        acm_os_application::StatementSnapshotDraft,
+        acm_os_application::ContestImportSourceError,
+    > {
+        if problem.contest().contest_id() != 1979 || !matches!(problem.index(), "A" | "B" | "C") {
+            return Err(acm_os_application::ContestImportSourceError::InvalidRemoteData);
+        }
+        let html = "<div class=\"problem-statement\"><p>Desktop E2E statement.</p></div>";
+        Ok(acm_os_application::StatementSnapshotDraft {
+            problem: problem.clone(),
+            source_html: html.to_owned(),
+            sanitized_html: html.to_owned(),
+            assets: Vec::new(),
+        })
+    }
 }
 
 #[tauri::command]
@@ -411,7 +706,9 @@ pub async fn contest_detail(
     use acm_os_application::ContestReadPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
-    database.contest_detail(&contest).await
+    database
+        .contest_detail(&contest)
+        .await
         .map(contest_detail_dto)
         .map_err(contest_read_error_code)
 }
@@ -424,7 +721,12 @@ pub async fn lightweight_problems(
     database
         .list_lightweight_problems()
         .await
-        .map(|items| items.into_iter().map(lightweight_problem_item_dto).collect())
+        .map(|items| {
+            items
+                .into_iter()
+                .map(lightweight_problem_item_dto)
+                .collect()
+        })
         .map_err(|_| ())
 }
 
@@ -438,8 +740,10 @@ pub async fn lightweight_problem_detail(
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
-    let today = acm_os_infrastructure::current_local_date().ok();
-    let detail = database.lightweight_problem_detail(&problem).await
+    let today = command_local_date().ok();
+    let detail = database
+        .lightweight_problem_detail(&problem)
+        .await
         .map_err(|error| match error {
             acm_os_application::ContestReadError::NotFound => "problem_not_found",
             acm_os_application::ContestReadError::Unavailable => "problem_unavailable",
@@ -450,7 +754,11 @@ pub async fn lightweight_problem_detail(
         .await
         .map_err(acm_os_application::ReviewAttemptError::code)?
         .is_some();
-    Ok(lightweight_problem_detail_dto(detail, today, review_in_progress))
+    Ok(lightweight_problem_detail_dto(
+        detail,
+        today,
+        review_in_progress,
+    ))
 }
 
 #[tauri::command]
@@ -478,12 +786,141 @@ pub async fn transition_problem_lifecycle(
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
     let action = parse_problem_lifecycle_action(&input.action)?;
-    let today = acm_os_infrastructure::current_local_date()
-        .map_err(|_| "local_calendar_unavailable")?;
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::transition_problem_lifecycle(database.inner(), &problem, action, today)
         .await
         .map(problem_lifecycle_state_dto)
         .map_err(acm_os_application::ProblemLifecycleError::code)
+}
+
+#[tauri::command]
+pub async fn today_snapshot(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: TodayLoadInput,
+) -> Result<Option<TodaySnapshotDto>, &'static str> {
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    use acm_os_application::TodaySnapshotPort;
+    let existing = database
+        .inner()
+        .load_today_snapshot(today)
+        .await
+        .map_err(today_error_code)?;
+    let budget_minutes = if existing.is_some() {
+        input.budget_minutes.unwrap_or(0)
+    } else if let Some(minutes) = input.budget_minutes {
+        minutes
+    } else {
+        use acm_os_application::WeeklyAcmBudgetPort;
+        let schedule = database
+            .inner()
+            .load_weekly_acm_budget()
+            .await
+            .map_err(today_error_code)?;
+        let Some(minutes) = acm_os_application::weekly_acm_budget_for_date(&schedule, today) else {
+            return Ok(None);
+        };
+        minutes
+    };
+    acm_os_application::load_or_generate_today_snapshot(database.inner(), today, budget_minutes)
+        .await
+        .map(today_snapshot_dto)
+        .map(Some)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn weekly_acm_budget(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<WeeklyAcmBudgetDto, &'static str> {
+    acm_os_application::load_weekly_acm_budget(database.inner())
+        .await
+        .map(weekly_acm_budget_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn save_weekly_acm_budget(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    schedule: WeeklyAcmBudgetDto,
+) -> Result<WeeklyAcmBudgetDto, &'static str> {
+    let schedule = parse_weekly_acm_budget(schedule);
+    acm_os_application::save_weekly_acm_budget(database.inner(), &schedule)
+        .await
+        .map(weekly_acm_budget_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn reorder_today(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: TodayReorderInput,
+) -> Result<TodaySnapshotDto, &'static str> {
+    acm_os_application::reorder_today_snapshot(
+        database.inner(),
+        &input.plan_id,
+        &input.ordered_entry_ids,
+    )
+    .await
+    .map(today_snapshot_dto)
+    .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn complete_today_entry(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: TodayDoneInput,
+) -> Result<TodaySnapshotDto, &'static str> {
+    acm_os_application::complete_today_entry(database.inner(), &input.plan_id, &input.entry_id)
+        .await
+        .map(today_snapshot_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn preview_today_replan(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: TodayReplanInput,
+) -> Result<TodayReplanPreviewDto, &'static str> {
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::preview_today_replan(database.inner(), today, input.budget_minutes)
+        .await
+        .map(today_replan_preview_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn apply_today_replan(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    preview: TodayReplanPreviewDto,
+) -> Result<TodaySnapshotDto, &'static str> {
+    let preview = parse_today_replan_preview(preview)?;
+    acm_os_application::apply_today_replan(database.inner(), &preview)
+        .await
+        .map(today_snapshot_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn today_extra_suggestions(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<TodayExtraSuggestionsPreviewDto, &'static str> {
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::preview_today_extra_suggestions(database.inner(), today)
+        .await
+        .map(today_extra_suggestions_preview_dto)
+        .map_err(today_error_code)
+}
+
+#[tauri::command]
+pub async fn accept_today_extra_suggestion(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: TodayAcceptSuggestionInput,
+) -> Result<TodaySnapshotDto, &'static str> {
+    let preview = parse_today_extra_suggestions_preview(input.preview)?;
+    acm_os_application::accept_today_extra_suggestion(database.inner(), &preview, &input.problem_id)
+        .await
+        .map(today_snapshot_dto)
+        .map_err(today_error_code)
 }
 
 #[tauri::command]
@@ -495,8 +932,7 @@ pub async fn start_or_resume_review(
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
-    let today = acm_os_infrastructure::current_local_date()
-        .map_err(|_| "local_calendar_unavailable")?;
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::start_or_resume_review(database.inner(), &problem, today)
         .await
         .map(review_attempt_dto)
@@ -561,17 +997,11 @@ pub async fn complete_review(
         return Err("invalid_review_attempt_identity");
     }
     let completion = parse_review_completion_input(input)?;
-    let completed_on = acm_os_infrastructure::current_local_date()
-        .map_err(|_| "local_calendar_unavailable")?;
-    acm_os_application::complete_review(
-        database.inner(),
-        &completion.0,
-        completion.1,
-        completed_on,
-    )
-    .await
-    .map(completed_review_attempt_dto)
-    .map_err(acm_os_application::ReviewAttemptError::code)
+    let completed_on = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::complete_review(database.inner(), &completion.0, completion.1, completed_on)
+        .await
+        .map(completed_review_attempt_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -626,8 +1056,7 @@ pub async fn update_problem_mastery_evidence(
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
-    let today = acm_os_infrastructure::current_local_date()
-        .map_err(|_| "local_calendar_unavailable")?;
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     let evidence = acm_os_domain::ProblemMasteryEvidence {
         recalls_problem: input.evidence.recalls_problem,
         multiple_solutions_clear: input.evidence.multiple_solutions_clear,
@@ -636,15 +1065,10 @@ pub async fn update_problem_mastery_evidence(
         can_adapt_or_create: input.evidence.can_adapt_or_create,
         transfer_solved_independently: input.evidence.transfer_solved_independently,
     };
-    acm_os_application::update_problem_mastery_evidence(
-        database.inner(),
-        &problem,
-        evidence,
-        today,
-    )
-    .await
-    .map(problem_mastery_projection_dto)
-    .map_err(acm_os_application::ReviewAttemptError::code)
+    acm_os_application::update_problem_mastery_evidence(database.inner(), &problem, evidence, today)
+        .await
+        .map(problem_mastery_projection_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -708,10 +1132,7 @@ pub async fn open_personal_note_in_obsidian(
         .await
         .map_err(|_| "workspace_unavailable")?
         .ok_or("workspace_unavailable")?;
-    let uri = obsidian_open_uri(
-        workspace.active_vault_path(),
-        &binding.vault_relative_path,
-    )?;
+    let uri = obsidian_open_uri(workspace.active_vault_path(), &binding.vault_relative_path)?;
     app.opener()
         .open_url(uri, None::<&str>)
         .map_err(|_| "obsidian_open_failed")
@@ -719,8 +1140,8 @@ pub async fn open_personal_note_in_obsidian(
 
 fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, &'static str> {
     let vault = std::fs::canonicalize(active_vault).map_err(|_| "vault_unavailable")?;
-    let target = std::fs::canonicalize(vault.join(relative_path))
-        .map_err(|_| "note_open_failed")?;
+    let target =
+        std::fs::canonicalize(vault.join(relative_path)).map_err(|_| "note_open_failed")?;
     if !target.starts_with(&vault) || !target.is_file() {
         return Err("note_open_failed");
     }
@@ -778,12 +1199,19 @@ pub async fn statement_assets(
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
         .map_err(|_| "invalid_problem_identity")?;
-    database.statement_assets(&problem).await
-        .map(|assets| assets.into_iter().map(|asset| LocalStatementAssetDto {
-            local_ref: asset.local_ref,
-            media_type: asset.media_type,
-            bytes: asset.bytes,
-        }).collect())
+    database
+        .statement_assets(&problem)
+        .await
+        .map(|assets| {
+            assets
+                .into_iter()
+                .map(|asset| LocalStatementAssetDto {
+                    local_ref: asset.local_ref,
+                    media_type: asset.media_type,
+                    bytes: asset.bytes,
+                })
+                .collect()
+        })
         .map_err(contest_read_error_code)
 }
 
@@ -809,11 +1237,17 @@ fn contest_detail_dto(item: acm_os_application::ContestDetail) -> ContestDetailD
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
             acm_os_application::ContestImportStatus::Complete => "complete",
         },
-        problems: item.problems.into_iter().map(lightweight_problem_item_dto).collect(),
+        problems: item
+            .problems
+            .into_iter()
+            .map(lightweight_problem_item_dto)
+            .collect(),
     }
 }
 
-fn lightweight_problem_item_dto(item: acm_os_application::LightweightProblemItem) -> LightweightProblemItemDto {
+fn lightweight_problem_item_dto(
+    item: acm_os_application::LightweightProblemItem,
+) -> LightweightProblemItemDto {
     LightweightProblemItemDto {
         contest_id: item.problem.contest().contest_id(),
         index: item.problem.index().to_owned(),
@@ -842,11 +1276,16 @@ fn lightweight_problem_detail_dto(
         source_url: item.source_url,
         statement: match item.statement {
             acm_os_application::StatementReadState::Pending => StatementReadStateDto::Pending,
-            acm_os_application::StatementReadState::Ready { sanitized_html } => StatementReadStateDto::Ready { sanitized_html },
+            acm_os_application::StatementReadState::Ready { sanitized_html } => {
+                StatementReadStateDto::Ready { sanitized_html }
+            }
         },
         identity_type: problem_identity_type_dto(item.identity_type),
         personal_note: item.personal_note.map(personal_note_binding_dto),
-        lifecycle: problem_lifecycle_state_dto_with_review_state(item.lifecycle, review_in_progress),
+        lifecycle: problem_lifecycle_state_dto_with_review_state(
+            item.lifecycle,
+            review_in_progress,
+        ),
         review_action,
     }
 }
@@ -888,7 +1327,8 @@ fn problem_lifecycle_state_dto_with_review_state(
         next_review_due_local_date: state
             .active_review_cycle
             .map(|cycle| cycle.next_due_local_date.to_iso_string()),
-        available_actions: if state.identity_type == acm_os_application::ProblemIdentityType::Personal
+        available_actions: if state.identity_type
+            == acm_os_application::ProblemIdentityType::Personal
             && !review_in_progress
         {
             acm_os_domain::ProblemLifecycleEngine::available_actions(state.learning_status)
@@ -976,9 +1416,7 @@ fn review_focus_dto(view: acm_os_application::ReviewFocusView) -> ReviewFocusDto
     }
 }
 
-fn review_help_drawer_dto(
-    view: acm_os_application::ReviewHelpDrawerView,
-) -> ReviewHelpDrawerDto {
+fn review_help_drawer_dto(view: acm_os_application::ReviewHelpDrawerView) -> ReviewHelpDrawerDto {
     ReviewHelpDrawerDto {
         attempt_id: view.attempt_id,
         items: view
@@ -1013,10 +1451,8 @@ fn parse_review_completion_input(
     input: CompleteReviewInput,
 ) -> Result<(String, acm_os_application::ReviewCompletionInput), &'static str> {
     let attempt_id = input.attempt_id;
-    let first_submission = parse_submission_fact(
-        &input.first_submission_result,
-        input.first_submission_other,
-    )?;
+    let first_submission =
+        parse_submission_fact(&input.first_submission_result, input.first_submission_other)?;
     let final_submission = parse_submission_fact(&input.final_result, input.final_result_other)?;
     let debug_independence = match input.debug_independence.as_str() {
         "notNeeded" => acm_os_domain::DebugIndependence::NotNeeded,
@@ -1079,18 +1515,12 @@ fn parse_failure_reason_input(
         ("derivationBlocked", None) => {
             Ok(acm_os_application::ReviewFailureReason::DerivationBlocked)
         }
-        ("cannotImplement", None) => {
-            Ok(acm_os_application::ReviewFailureReason::CannotImplement)
-        }
+        ("cannotImplement", None) => Ok(acm_os_application::ReviewFailureReason::CannotImplement),
         ("implementationError", None) => {
             Ok(acm_os_application::ReviewFailureReason::ImplementationError)
         }
-        ("boundaryError", None) => {
-            Ok(acm_os_application::ReviewFailureReason::BoundaryError)
-        }
-        ("complexityError", None) => {
-            Ok(acm_os_application::ReviewFailureReason::ComplexityError)
-        }
+        ("boundaryError", None) => Ok(acm_os_application::ReviewFailureReason::BoundaryError),
+        ("complexityError", None) => Ok(acm_os_application::ReviewFailureReason::ComplexityError),
         ("other", Some(text)) => Ok(acm_os_application::ReviewFailureReason::Other(text)),
         _ => Err("invalid_review_failure_reason"),
     }
@@ -1156,31 +1586,38 @@ fn review_history_item_dto(item: acm_os_application::ReviewHistoryItem) -> Revie
             acm_os_application::ReviewAttemptStatus::Void => "void",
         },
         judgement: item.judgement.map(review_judgement_dto),
-        completion_facts: item.completion_input.as_ref().map(|input| ReviewCompletionFactsDto {
-            final_ac: input.final_ac,
-            first_submission_result: submission_fact_dto(&input.first_submission),
-            final_result: submission_fact_dto(&input.final_submission),
-            total_submissions: input.total_submissions,
-            idea_independent: input.idea_independent,
-            implementation_independent: input.implementation_independent,
-            debug_independence: match input.debug_independence {
-                acm_os_domain::DebugIndependence::NotNeeded => "notNeeded",
-                acm_os_domain::DebugIndependence::Independent => "independent",
-                acm_os_domain::DebugIndependence::UsedSolvingHelp => "usedSolvingHelp",
-            },
-            external_help: match input.external_help {
-                acm_os_domain::ExternalHelpLevel::None => "none",
-                acm_os_domain::ExternalHelpLevel::SolvingHint => "solvingHint",
-                acm_os_domain::ExternalHelpLevel::FullSolution => "fullSolution",
-            },
-        }),
+        completion_facts: item
+            .completion_input
+            .as_ref()
+            .map(|input| ReviewCompletionFactsDto {
+                final_ac: input.final_ac,
+                first_submission_result: submission_fact_dto(&input.first_submission),
+                final_result: submission_fact_dto(&input.final_submission),
+                total_submissions: input.total_submissions,
+                idea_independent: input.idea_independent,
+                implementation_independent: input.implementation_independent,
+                debug_independence: match input.debug_independence {
+                    acm_os_domain::DebugIndependence::NotNeeded => "notNeeded",
+                    acm_os_domain::DebugIndependence::Independent => "independent",
+                    acm_os_domain::DebugIndependence::UsedSolvingHelp => "usedSolvingHelp",
+                },
+                external_help: match input.external_help {
+                    acm_os_domain::ExternalHelpLevel::None => "none",
+                    acm_os_domain::ExternalHelpLevel::SolvingHint => "solvingHint",
+                    acm_os_domain::ExternalHelpLevel::FullSolution => "fullSolution",
+                },
+            }),
         evidence_codes: item.evidence_codes,
         failure_reasons: item
             .failure_reasons
             .into_iter()
             .map(review_failure_reason_dto)
             .collect(),
-        help_levels: item.help_levels.into_iter().map(|level| level.number()).collect(),
+        help_levels: item
+            .help_levels
+            .into_iter()
+            .map(|level| level.number())
+            .collect(),
         completed_at_utc: item.completed_at_utc,
         completed_local_date: item.completed_local_date.map(|date| date.to_iso_string()),
         void_reason: item.void_reason,
@@ -1206,14 +1643,38 @@ fn review_failure_reason_dto(
     reason: acm_os_application::ReviewFailureReason,
 ) -> ReviewFailureReasonDto {
     match reason {
-        acm_os_application::ReviewFailureReason::NoIdea => ReviewFailureReasonDto { code: "noIdea", other_text: None },
-        acm_os_application::ReviewFailureReason::KeyPropertyBlocked => ReviewFailureReasonDto { code: "keyPropertyBlocked", other_text: None },
-        acm_os_application::ReviewFailureReason::DerivationBlocked => ReviewFailureReasonDto { code: "derivationBlocked", other_text: None },
-        acm_os_application::ReviewFailureReason::CannotImplement => ReviewFailureReasonDto { code: "cannotImplement", other_text: None },
-        acm_os_application::ReviewFailureReason::ImplementationError => ReviewFailureReasonDto { code: "implementationError", other_text: None },
-        acm_os_application::ReviewFailureReason::BoundaryError => ReviewFailureReasonDto { code: "boundaryError", other_text: None },
-        acm_os_application::ReviewFailureReason::ComplexityError => ReviewFailureReasonDto { code: "complexityError", other_text: None },
-        acm_os_application::ReviewFailureReason::Other(text) => ReviewFailureReasonDto { code: "other", other_text: Some(text) },
+        acm_os_application::ReviewFailureReason::NoIdea => ReviewFailureReasonDto {
+            code: "noIdea",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::KeyPropertyBlocked => ReviewFailureReasonDto {
+            code: "keyPropertyBlocked",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::DerivationBlocked => ReviewFailureReasonDto {
+            code: "derivationBlocked",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::CannotImplement => ReviewFailureReasonDto {
+            code: "cannotImplement",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::ImplementationError => ReviewFailureReasonDto {
+            code: "implementationError",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::BoundaryError => ReviewFailureReasonDto {
+            code: "boundaryError",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::ComplexityError => ReviewFailureReasonDto {
+            code: "complexityError",
+            other_text: None,
+        },
+        acm_os_application::ReviewFailureReason::Other(text) => ReviewFailureReasonDto {
+            code: "other",
+            other_text: Some(text),
+        },
     }
 }
 
@@ -1225,14 +1686,18 @@ fn review_judgement_dto(judgement: acm_os_domain::ReviewJudgement) -> &'static s
     }
 }
 
-fn problem_identity_type_dto(identity_type: acm_os_application::ProblemIdentityType) -> &'static str {
+fn problem_identity_type_dto(
+    identity_type: acm_os_application::ProblemIdentityType,
+) -> &'static str {
     match identity_type {
         acm_os_application::ProblemIdentityType::Lightweight => "lightweight",
         acm_os_application::ProblemIdentityType::Personal => "personal",
     }
 }
 
-fn personal_note_binding_dto(binding: acm_os_application::PersonalNoteBinding) -> PersonalNoteBindingDto {
+fn personal_note_binding_dto(
+    binding: acm_os_application::PersonalNoteBinding,
+) -> PersonalNoteBindingDto {
     PersonalNoteBindingDto {
         vault_relative_path: binding.vault_relative_path,
     }
@@ -1243,23 +1708,37 @@ fn problem_markdown_projection_dto(
 ) -> ProblemMarkdownProjectionDto {
     ProblemMarkdownProjectionDto {
         content_digest: projection.content_digest,
-        known_sections: projection.known_sections.into_iter().map(|section| KnownMarkdownSectionDto {
-            name: section.name,
-            start_offset: section.start_offset,
-            end_offset: section.end_offset,
-        }).collect(),
-        solution_routes: projection.solution_routes.into_iter().map(|route| SolutionRouteDto {
-            name: route.name,
-            start_offset: route.start_offset,
-            end_offset: route.end_offset,
-        }).collect(),
-        warnings: projection.warnings.into_iter().map(|warning| match warning {
-            acm_os_application::MarkdownParseWarning::DuplicateKnownSection { name, count } => MarkdownParseWarningDto {
-                code: "duplicate_known_section",
-                name,
-                count,
-            },
-        }).collect(),
+        known_sections: projection
+            .known_sections
+            .into_iter()
+            .map(|section| KnownMarkdownSectionDto {
+                name: section.name,
+                start_offset: section.start_offset,
+                end_offset: section.end_offset,
+            })
+            .collect(),
+        solution_routes: projection
+            .solution_routes
+            .into_iter()
+            .map(|route| SolutionRouteDto {
+                name: route.name,
+                start_offset: route.start_offset,
+                end_offset: route.end_offset,
+            })
+            .collect(),
+        warnings: projection
+            .warnings
+            .into_iter()
+            .map(|warning| match warning {
+                acm_os_application::MarkdownParseWarning::DuplicateKnownSection { name, count } => {
+                    MarkdownParseWarningDto {
+                        code: "duplicate_known_section",
+                        name,
+                        count,
+                    }
+                }
+            })
+            .collect(),
     }
 }
 
@@ -1267,6 +1746,289 @@ fn contest_read_error_code(error: acm_os_application::ContestReadError) -> &'sta
     match error {
         acm_os_application::ContestReadError::NotFound => "not_found",
         acm_os_application::ContestReadError::Unavailable => "unavailable",
+    }
+}
+
+fn today_snapshot_dto(snapshot: acm_os_application::TodaySnapshot) -> TodaySnapshotDto {
+    TodaySnapshotDto {
+        plan_id: snapshot.plan_id,
+        local_date: snapshot.local_date.to_iso_string(),
+        budget_minutes: snapshot.budget_minutes,
+        planned_minutes: snapshot.planned_minutes,
+        over_budget_minutes: snapshot.over_budget_minutes,
+        review_only_streak: snapshot.review_only_streak,
+        entries: snapshot.entries.into_iter().map(today_entry_dto).collect(),
+    }
+}
+
+fn weekly_acm_budget_dto(
+    schedule: acm_os_application::WeeklyAcmBudgetSchedule,
+) -> WeeklyAcmBudgetDto {
+    WeeklyAcmBudgetDto {
+        monday: schedule.monday,
+        tuesday: schedule.tuesday,
+        wednesday: schedule.wednesday,
+        thursday: schedule.thursday,
+        friday: schedule.friday,
+        saturday: schedule.saturday,
+        sunday: schedule.sunday,
+    }
+}
+
+fn parse_weekly_acm_budget(
+    schedule: WeeklyAcmBudgetDto,
+) -> acm_os_application::WeeklyAcmBudgetSchedule {
+    acm_os_application::WeeklyAcmBudgetSchedule {
+        monday: schedule.monday,
+        tuesday: schedule.tuesday,
+        wednesday: schedule.wednesday,
+        thursday: schedule.thursday,
+        friday: schedule.friday,
+        saturday: schedule.saturday,
+        sunday: schedule.sunday,
+    }
+}
+
+fn today_entry_dto(entry: acm_os_application::TodaySnapshotEntry) -> TodayEntryDto {
+    TodayEntryDto {
+        entry_id: entry.entry_id,
+        problem_id: entry.problem_id,
+        contest_id: entry.contest_id,
+        problem_index: entry.problem_index,
+        problem_title: entry.problem_title,
+        review_attempt_id: entry.review_attempt_id,
+        lane: today_lane_code(entry.lane).to_owned(),
+        reason: today_reason_code(entry.reason).to_owned(),
+        planning_cost_minutes: entry.planning_cost_minutes,
+        position: entry.position,
+        origin: today_origin_code(entry.origin).to_owned(),
+        status: today_status_code(entry.status).to_owned(),
+    }
+}
+
+fn today_replan_preview_dto(
+    preview: acm_os_application::TodayReplanPreview,
+) -> TodayReplanPreviewDto {
+    TodayReplanPreviewDto {
+        expected_snapshot: today_snapshot_dto(preview.expected_snapshot),
+        proposed_budget_minutes: preview.proposed_budget_minutes,
+        proposed_planned_minutes: preview.proposed_planned_minutes,
+        proposed_over_budget_minutes: preview.proposed_over_budget_minutes,
+        proposed_review_only_streak: preview.proposed_review_only_streak,
+        entries: preview
+            .entries
+            .into_iter()
+            .map(|entry| TodayReplanEntryDto {
+                existing_entry_id: entry.existing_entry_id,
+                problem_id: entry.problem_id,
+                review_attempt_id: entry.review_attempt_id,
+                lane: today_lane_code(entry.lane).to_owned(),
+                reason: today_reason_code(entry.reason).to_owned(),
+                planning_cost_minutes: entry.planning_cost_minutes,
+                origin: today_origin_code(entry.origin).to_owned(),
+                status: today_status_code(entry.status).to_owned(),
+            })
+            .collect(),
+    }
+}
+
+fn today_extra_suggestions_preview_dto(
+    preview: acm_os_application::TodayExtraSuggestionsPreview,
+) -> TodayExtraSuggestionsPreviewDto {
+    TodayExtraSuggestionsPreviewDto {
+        expected_snapshot: today_snapshot_dto(preview.expected_snapshot),
+        remaining_budget_minutes: preview.remaining_budget_minutes,
+        suggestions: preview
+            .suggestions
+            .into_iter()
+            .map(|suggestion| TodayExtraSuggestionDto {
+                problem_id: suggestion.problem_id,
+                contest_id: suggestion.contest_id,
+                problem_index: suggestion.problem_index,
+                problem_title: suggestion.problem_title,
+                review_attempt_id: suggestion.review_attempt_id,
+                lane: today_lane_code(suggestion.lane).to_owned(),
+                reason: today_reason_code(suggestion.reason).to_owned(),
+                planning_cost_minutes: suggestion.planning_cost_minutes,
+            })
+            .collect(),
+    }
+}
+
+fn parse_today_replan_preview(
+    preview: TodayReplanPreviewDto,
+) -> Result<acm_os_application::TodayReplanPreview, &'static str> {
+    Ok(acm_os_application::TodayReplanPreview {
+        expected_snapshot: parse_today_snapshot(preview.expected_snapshot)?,
+        proposed_budget_minutes: preview.proposed_budget_minutes,
+        proposed_planned_minutes: preview.proposed_planned_minutes,
+        proposed_over_budget_minutes: preview.proposed_over_budget_minutes,
+        proposed_review_only_streak: preview.proposed_review_only_streak,
+        entries: preview
+            .entries
+            .into_iter()
+            .map(|entry| {
+                Ok(acm_os_application::TodayReplanEntry {
+                    existing_entry_id: entry.existing_entry_id,
+                    problem_id: entry.problem_id,
+                    review_attempt_id: entry.review_attempt_id,
+                    lane: parse_today_lane_code(&entry.lane)?,
+                    reason: parse_today_reason_code(&entry.reason)?,
+                    planning_cost_minutes: entry.planning_cost_minutes,
+                    origin: parse_today_origin_code(&entry.origin)?,
+                    status: parse_today_status_code(&entry.status)?,
+                })
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?,
+    })
+}
+
+fn parse_today_extra_suggestions_preview(
+    preview: TodayExtraSuggestionsPreviewDto,
+) -> Result<acm_os_application::TodayExtraSuggestionsPreview, &'static str> {
+    Ok(acm_os_application::TodayExtraSuggestionsPreview {
+        expected_snapshot: parse_today_snapshot(preview.expected_snapshot)?,
+        remaining_budget_minutes: preview.remaining_budget_minutes,
+        suggestions: preview
+            .suggestions
+            .into_iter()
+            .map(|suggestion| {
+                Ok(acm_os_application::TodayExtraSuggestion {
+                    problem_id: suggestion.problem_id,
+                    contest_id: suggestion.contest_id,
+                    problem_index: suggestion.problem_index,
+                    problem_title: suggestion.problem_title,
+                    review_attempt_id: suggestion.review_attempt_id,
+                    lane: parse_today_lane_code(&suggestion.lane)?,
+                    reason: parse_today_reason_code(&suggestion.reason)?,
+                    planning_cost_minutes: suggestion.planning_cost_minutes,
+                })
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?,
+    })
+}
+
+fn parse_today_snapshot(
+    snapshot: TodaySnapshotDto,
+) -> Result<acm_os_application::TodaySnapshot, &'static str> {
+    Ok(acm_os_application::TodaySnapshot {
+        plan_id: snapshot.plan_id,
+        local_date: acm_os_domain::LocalDate::parse_iso(&snapshot.local_date)
+            .map_err(|_| "invalid_today_snapshot")?,
+        budget_minutes: snapshot.budget_minutes,
+        planned_minutes: snapshot.planned_minutes,
+        over_budget_minutes: snapshot.over_budget_minutes,
+        review_only_streak: snapshot.review_only_streak,
+        entries: snapshot
+            .entries
+            .into_iter()
+            .map(|entry| {
+                Ok(acm_os_application::TodaySnapshotEntry {
+                    entry_id: entry.entry_id,
+                    problem_id: entry.problem_id,
+                    contest_id: entry.contest_id,
+                    problem_index: entry.problem_index,
+                    problem_title: entry.problem_title,
+                    review_attempt_id: entry.review_attempt_id,
+                    lane: parse_today_lane_code(&entry.lane)?,
+                    reason: parse_today_reason_code(&entry.reason)?,
+                    planning_cost_minutes: entry.planning_cost_minutes,
+                    position: entry.position,
+                    origin: parse_today_origin_code(&entry.origin)?,
+                    status: parse_today_status_code(&entry.status)?,
+                })
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?,
+    })
+}
+
+fn today_lane_code(value: acm_os_domain::TodayCandidateLane) -> &'static str {
+    match value {
+        acm_os_domain::TodayCandidateLane::CarryIn => "carryIn",
+        acm_os_domain::TodayCandidateLane::Review => "review",
+        acm_os_domain::TodayCandidateLane::Study => "study",
+    }
+}
+fn parse_today_lane_code(value: &str) -> Result<acm_os_domain::TodayCandidateLane, &'static str> {
+    match value {
+        "carryIn" => Ok(acm_os_domain::TodayCandidateLane::CarryIn),
+        "review" => Ok(acm_os_domain::TodayCandidateLane::Review),
+        "study" => Ok(acm_os_domain::TodayCandidateLane::Study),
+        _ => Err("invalid_today_snapshot"),
+    }
+}
+fn today_reason_code(value: acm_os_domain::TodayCandidateReason) -> &'static str {
+    match value {
+        acm_os_domain::TodayCandidateReason::ContinueReview => "continueReview",
+        acm_os_domain::TodayCandidateReason::ContinueLearning => "continueLearning",
+        acm_os_domain::TodayCandidateReason::DueFirstColdStart => "dueFirstColdStart",
+        acm_os_domain::TodayCandidateReason::DueLongTermReview => "dueLongTermReview",
+        acm_os_domain::TodayCandidateReason::Relearn => "relearn",
+        acm_os_domain::TodayCandidateReason::Upsolve => "upsolve",
+    }
+}
+fn parse_today_reason_code(
+    value: &str,
+) -> Result<acm_os_domain::TodayCandidateReason, &'static str> {
+    match value {
+        "continueReview" => Ok(acm_os_domain::TodayCandidateReason::ContinueReview),
+        "continueLearning" => Ok(acm_os_domain::TodayCandidateReason::ContinueLearning),
+        "dueFirstColdStart" => Ok(acm_os_domain::TodayCandidateReason::DueFirstColdStart),
+        "dueLongTermReview" => Ok(acm_os_domain::TodayCandidateReason::DueLongTermReview),
+        "relearn" => Ok(acm_os_domain::TodayCandidateReason::Relearn),
+        "upsolve" => Ok(acm_os_domain::TodayCandidateReason::Upsolve),
+        _ => Err("invalid_today_snapshot"),
+    }
+}
+fn today_origin_code(value: acm_os_application::TodayEntryOrigin) -> &'static str {
+    match value {
+        acm_os_application::TodayEntryOrigin::Auto => "auto",
+        acm_os_application::TodayEntryOrigin::Manual => "manual",
+    }
+}
+fn parse_today_origin_code(
+    value: &str,
+) -> Result<acm_os_application::TodayEntryOrigin, &'static str> {
+    match value {
+        "auto" => Ok(acm_os_application::TodayEntryOrigin::Auto),
+        "manual" => Ok(acm_os_application::TodayEntryOrigin::Manual),
+        _ => Err("invalid_today_snapshot"),
+    }
+}
+fn today_status_code(value: acm_os_application::TodayEntryStatus) -> &'static str {
+    match value {
+        acm_os_application::TodayEntryStatus::NotStarted => "notStarted",
+        acm_os_application::TodayEntryStatus::InProgress => "inProgress",
+        acm_os_application::TodayEntryStatus::Completed => "completed",
+        acm_os_application::TodayEntryStatus::Unavailable => "unavailable",
+    }
+}
+fn parse_today_status_code(
+    value: &str,
+) -> Result<acm_os_application::TodayEntryStatus, &'static str> {
+    match value {
+        "notStarted" => Ok(acm_os_application::TodayEntryStatus::NotStarted),
+        "inProgress" => Ok(acm_os_application::TodayEntryStatus::InProgress),
+        "completed" => Ok(acm_os_application::TodayEntryStatus::Completed),
+        "unavailable" => Ok(acm_os_application::TodayEntryStatus::Unavailable),
+        _ => Err("invalid_today_snapshot"),
+    }
+}
+
+fn today_error_code(error: acm_os_application::TodaySnapshotError) -> &'static str {
+    match error {
+        acm_os_application::TodaySnapshotError::PersistenceUnavailable => "today_unavailable",
+        acm_os_application::TodaySnapshotError::IntegrityViolation => "today_integrity_violation",
+        acm_os_application::TodaySnapshotError::InvalidReorder => "invalid_today_reorder",
+        acm_os_application::TodaySnapshotError::InvalidTodayDone => "invalid_today_done",
+        acm_os_application::TodaySnapshotError::InvalidExtraSuggestion => {
+            "invalid_today_suggestion"
+        }
+        acm_os_application::TodaySnapshotError::StaleExtraSuggestions => "stale_today_suggestions",
+        acm_os_application::TodaySnapshotError::StaleReplanPreview => "stale_today_replan",
+        acm_os_application::TodaySnapshotError::Candidate(_)
+        | acm_os_application::TodaySnapshotError::Ordering(_)
+        | acm_os_application::TodaySnapshotError::Planning(_) => "today_planning_failed",
     }
 }
 
@@ -1475,24 +2237,22 @@ fn workspace_error_dto(
 #[cfg(test)]
 mod tests {
     use acm_os_application::{
-        ActiveReviewCycle,
-        KnownMarkdownSection, MarkdownParseWarning, PersonalNoteBinding, PersonalNoteReadState,
-        LocalStatementAsset, ProblemIdentityType, ProblemLifecycleState, ProblemMarkdownProjection,
-        RevealedReviewHelp, ReviewAttempt, ReviewFocusView, ReviewHelpDrawerView, ReviewHelpItem,
-        SolutionRoute,
-        StartupDestination, StartupGateStatus, StartupRecoveryReason, WorkspaceConfiguration,
-        WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
+        ActiveReviewCycle, KnownMarkdownSection, LocalStatementAsset, MarkdownParseWarning,
+        PersonalNoteBinding, PersonalNoteReadState, ProblemIdentityType, ProblemLifecycleState,
+        ProblemMarkdownProjection, RevealedReviewHelp, ReviewAttempt, ReviewFocusView,
+        ReviewHelpDrawerView, ReviewHelpItem, SolutionRoute, StartupDestination, StartupGateStatus,
+        StartupRecoveryReason, WorkspaceConfiguration, WorkspaceConfigurationError,
+        WorkspaceConfigurationStatus, WorkspacePathField,
     };
     use serde_json::json;
 
     use super::{
         app_shell_status_dto, normalize_windows_verbatim_path, obsidian_open_uri,
-        personal_note_read_state_dto, problem_lifecycle_state_dto, review_action_dto,
-        parse_review_completion_input, revealed_review_help_dto, review_focus_dto, review_help_drawer_dto,
-        startup_status_dto, workspace_error_dto, workspace_status_dto,
-        LightweightProblemDetailDto,
-        CompleteReviewInput, ProblemLifecycleStateDto, ReviewFailureReasonInput,
-        StatementReadStateDto,
+        parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
+        revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
+        startup_status_dto, workspace_error_dto, workspace_status_dto, CompleteReviewInput,
+        LightweightProblemDetailDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
+        StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
     };
 
     #[test]
@@ -1507,6 +2267,52 @@ mod tests {
                 "supportedSchemaVersion": 1,
                 "foundSchemaVersion": null
             })
+        );
+    }
+
+    #[test]
+    fn today_preview_contracts_round_trip_through_camel_case_json() {
+        let snapshot = json!({
+            "planId": "plan-1", "localDate": "2026-08-12", "budgetMinutes": 120,
+            "plannedMinutes": 60, "overBudgetMinutes": 0, "reviewOnlyStreak": 0,
+            "entries": [{
+                "entryId": "entry-1", "problemId": "7", "contestId": 1979,
+                "problemIndex": "A", "problemTitle": "Alpha", "reviewAttemptId": null,
+                "lane": "study", "reason": "upsolve", "planningCostMinutes": 60,
+                "position": 0, "origin": "auto", "status": "completed"
+            }]
+        });
+        let replan_json = json!({
+            "expectedSnapshot": snapshot.clone(), "proposedBudgetMinutes": 90,
+            "proposedPlannedMinutes": 60, "proposedOverBudgetMinutes": 0,
+            "proposedReviewOnlyStreak": 0,
+            "entries": [{
+                "existingEntryId": "entry-1", "problemId": "7", "reviewAttemptId": null,
+                "lane": "study", "reason": "upsolve", "planningCostMinutes": 60,
+                "origin": "auto", "status": "completed"
+            }]
+        });
+        let replan: TodayReplanPreviewDto =
+            serde_json::from_value(replan_json.clone()).expect("deserialize replan preview");
+        assert_eq!(
+            serde_json::to_value(replan).expect("serialize replan preview"),
+            replan_json
+        );
+
+        let suggestions_json = json!({
+            "expectedSnapshot": snapshot, "remainingBudgetMinutes": 60,
+            "suggestions": [{
+                "problemId": "8", "contestId": 1979, "problemIndex": "B",
+                "problemTitle": "Beta", "reviewAttemptId": null, "lane": "study",
+                "reason": "relearn", "planningCostMinutes": 60
+            }]
+        });
+        let suggestions: TodayExtraSuggestionsPreviewDto =
+            serde_json::from_value(suggestions_json.clone())
+                .expect("deserialize suggestions preview");
+        assert_eq!(
+            serde_json::to_value(suggestions).expect("serialize suggestions preview"),
+            suggestions_json
         );
     }
 
@@ -1677,7 +2483,10 @@ mod tests {
                 next_due_local_date: due,
             }),
         };
-        assert_eq!(review_action_dto(&lifecycle, Some(due)), Some("startReview"));
+        assert_eq!(
+            review_action_dto(&lifecycle, Some(due)),
+            Some("startReview")
+        );
         assert_eq!(
             review_action_dto(
                 &lifecycle,
@@ -1988,8 +2797,7 @@ mod tests {
         let parent = tempfile::tempdir().expect("temporary parent");
         let vault = parent.path().join("Vault");
         std::fs::create_dir(&vault).expect("vault");
-        std::fs::write(parent.path().join("outside.md"), "# Outside\n")
-            .expect("outside note");
+        std::fs::write(parent.path().join("outside.md"), "# Outside\n").expect("outside note");
 
         assert_eq!(
             obsidian_open_uri(vault.to_str().expect("utf-8 vault"), "../outside.md"),

@@ -20,21 +20,22 @@ impl VaultWatcher {
 
     pub fn watch(&self, active_vault: &str, app: tauri::AppHandle) -> Result<(), ()> {
         let mut last_emit: Option<Instant> = None;
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            let Ok(event) = event else { return };
-            if !event.paths.iter().any(|path| is_markdown(path)) {
-                return;
-            }
-            let now = Instant::now();
-            if last_emit.is_some_and(|previous| {
-                now.duration_since(previous) < Duration::from_millis(150)
-            }) {
-                return;
-            }
-            last_emit = Some(now);
-            let _ = app.emit(PERSONAL_NOTE_INVALIDATED_EVENT, ());
-        })
-        .map_err(|_| ())?;
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let Ok(event) = event else { return };
+                if !event.paths.iter().any(|path| is_markdown(path)) {
+                    return;
+                }
+                let now = Instant::now();
+                if last_emit.is_some_and(|previous| {
+                    now.duration_since(previous) < Duration::from_millis(150)
+                }) {
+                    return;
+                }
+                last_emit = Some(now);
+                let _ = app.emit(PERSONAL_NOTE_INVALIDATED_EVENT, ());
+            })
+            .map_err(|_| ())?;
         watcher
             .watch(Path::new(active_vault), RecursiveMode::Recursive)
             .map_err(|_| ())?;

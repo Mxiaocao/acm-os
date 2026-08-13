@@ -55,8 +55,8 @@ where
     {
         return Err(SafePatchError::BindingUnavailable);
     }
-    let path = fs::canonicalize(vault.join(relative))
-        .map_err(|_| SafePatchError::BindingUnavailable)?;
+    let path =
+        fs::canonicalize(vault.join(relative)).map_err(|_| SafePatchError::BindingUnavailable)?;
     if !path.starts_with(&vault) || !path.is_file() {
         return Err(SafePatchError::BindingUnavailable);
     }
@@ -217,8 +217,7 @@ fn prune_recovery_copies(bucket: &Path, now_millis: u64) -> Result<(), SafePatch
         .collect::<Vec<_>>();
     copies.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     for (position, (timestamp, path)) in copies.into_iter().enumerate() {
-        if position >= RECOVERY_MAX_COPIES
-            || now_millis.saturating_sub(timestamp) > max_age_millis
+        if position >= RECOVERY_MAX_COPIES || now_millis.saturating_sub(timestamp) > max_age_millis
         {
             fs::remove_file(path).map_err(|_| SafePatchError::RecoveryCopyFailed)?;
         }
@@ -231,8 +230,8 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SafePatchError> {
     let permissions = fs::metadata(path)
         .map_err(|_| SafePatchError::WriteFailed)?
         .permissions();
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|_| SafePatchError::WriteFailed)?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| SafePatchError::WriteFailed)?;
     temporary
         .write_all(bytes)
         .and_then(|_| temporary.flush())
@@ -251,8 +250,8 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SafePatchError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_extra_problem_link, atomic_replace, build_extra_problem_patch,
-        prune_recovery_copies, verify_postcondition, SafePatchError,
+        add_extra_problem_link, atomic_replace, build_extra_problem_patch, prune_recovery_copies,
+        verify_postcondition, SafePatchError,
     };
     use acm_os_application::ExtraProblemLinkTarget;
 
@@ -267,7 +266,8 @@ mod tests {
         let after = build_extra_problem_patch(&before, &target).expect("patch");
         let expected = [
             b"\xef\xbb\xbf".as_slice(),
-            "# Custom\r\n\r\n## 额外题目\r\n- [[CF-2000-A]]\r\n\r\n## User section\r\nkeep me\r\n".as_bytes(),
+            "# Custom\r\n\r\n## 额外题目\r\n- [[CF-2000-A]]\r\n\r\n## User section\r\nkeep me\r\n"
+                .as_bytes(),
         ]
         .concat();
         assert_eq!(after, expected);
@@ -281,17 +281,11 @@ mod tests {
             Err(SafePatchError::TargetSectionMissing)
         );
         assert_eq!(
-            build_extra_problem_patch(
-                "## 额外题目\n\n## 额外题目\n".as_bytes(),
-                &target,
-            ),
+            build_extra_problem_patch("## 额外题目\n\n## 额外题目\n".as_bytes(), &target,),
             Err(SafePatchError::TargetSectionAmbiguous)
         );
         assert_eq!(
-            build_extra_problem_patch(
-                "## 额外题目\n- [[CF-2000-A]]\n".as_bytes(),
-                &target,
-            ),
+            build_extra_problem_patch("## 额外题目\n- [[CF-2000-A]]\n".as_bytes(), &target,),
             Err(SafePatchError::LinkAlreadyPresent)
         );
     }
@@ -300,12 +294,18 @@ mod tests {
     fn recovery_retention_removes_expired_and_keeps_only_ten_recent_copies() {
         let directory = tempfile::tempdir().expect("recovery bucket");
         for timestamp in 0..12_u64 {
-            std::fs::write(directory.path().join(format!("{timestamp}-0-digest.md")), b"copy")
-                .expect("recovery fixture");
+            std::fs::write(
+                directory.path().join(format!("{timestamp}-0-digest.md")),
+                b"copy",
+            )
+            .expect("recovery fixture");
         }
         let now = 31 * 24 * 60 * 60 * 1000_u64;
-        std::fs::write(directory.path().join(format!("{now}-0-current.md")), b"current")
-            .expect("current fixture");
+        std::fs::write(
+            directory.path().join(format!("{now}-0-current.md")),
+            b"current",
+        )
+        .expect("current fixture");
         prune_recovery_copies(directory.path(), now).expect("prune recovery copies");
         let names = std::fs::read_dir(directory.path())
             .expect("read bucket")
@@ -424,8 +424,7 @@ mod tests {
             |_| {},
         )
         .expect("first patch");
-        std::fs::rename(vault.join("note.md"), vault.join("renamed.md"))
-            .expect("external rename");
+        std::fs::rename(vault.join("note.md"), vault.join("renamed.md")).expect("external rename");
         let second = ExtraProblemLinkTarget::parse("CF-2000-B").expect("second target");
         add_extra_problem_link(
             vault.to_str().expect("vault path"),

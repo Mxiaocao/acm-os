@@ -74,8 +74,15 @@ impl CodeforcesHttpAdapter {
     ) -> Result<String, CodeforcesHttpError> {
         let mut response = self.send(&contest_api_url(contest)).await?;
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| CodeforcesHttpError::RequestFailed)? {
-            let next_size = body.len().checked_add(chunk.len()).ok_or(CodeforcesHttpError::ResponseTooLarge)?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| CodeforcesHttpError::RequestFailed)?
+        {
+            let next_size = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(CodeforcesHttpError::ResponseTooLarge)?;
             if next_size > CONTEST_METADATA_MAX_BYTES {
                 return Err(CodeforcesHttpError::ResponseTooLarge);
             }
@@ -91,7 +98,8 @@ impl CodeforcesHttpAdapter {
         &self,
         problem: &CodeforcesProblemIdentity,
     ) -> Result<String, CodeforcesHttpError> {
-        self.fetch_text(&problem_page_url(problem), STATEMENT_MAX_BYTES).await
+        self.fetch_text(&problem_page_url(problem), STATEMENT_MAX_BYTES)
+            .await
     }
 
     /// Asset addresses originate in untrusted statement HTML but are validated
@@ -111,10 +119,16 @@ impl CodeforcesHttpAdapter {
 
     async fn fetch_bytes(&self, url: &str, maximum: usize) -> Result<Vec<u8>, CodeforcesHttpError> {
         let response = self.send(url).await?;
-        if response.content_length().is_some_and(|size| size > maximum as u64) {
+        if response
+            .content_length()
+            .is_some_and(|size| size > maximum as u64)
+        {
             return Err(CodeforcesHttpError::ResponseTooLarge);
         }
-        let bytes = response.bytes().await.map_err(|_| CodeforcesHttpError::RequestFailed)?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| CodeforcesHttpError::RequestFailed)?;
         if bytes.len() > maximum {
             return Err(CodeforcesHttpError::ResponseTooLarge);
         }
@@ -122,7 +136,12 @@ impl CodeforcesHttpAdapter {
     }
 
     async fn send(&self, url: &str) -> Result<reqwest::Response, CodeforcesHttpError> {
-        let response = self.client.get(url).send().await.map_err(|_| CodeforcesHttpError::RequestFailed)?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| CodeforcesHttpError::RequestFailed)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let diagnostic = response
@@ -199,7 +218,10 @@ impl ContestImportSource for CodeforcesHttpAdapter {
         &self,
         contest: &CodeforcesContestIdentity,
     ) -> Result<ContestImportDraft, ContestImportSourceError> {
-        let metadata = self.fetch_contest_metadata(contest).await.map_err(map_http_error)?;
+        let metadata = self
+            .fetch_contest_metadata(contest)
+            .await
+            .map_err(map_http_error)?;
         manifest_from_api_json(contest.clone(), &metadata)
             .map_err(|_| ContestImportSourceError::InvalidRemoteData)
     }
@@ -208,17 +230,30 @@ impl ContestImportSource for CodeforcesHttpAdapter {
         &self,
         problem: &CodeforcesProblemIdentity,
     ) -> Result<StatementSnapshotDraft, ContestImportSourceError> {
-        let page = self.fetch_problem_statement(problem).await.map_err(map_http_error)?;
-        let statement = extract_problem_statement(&page).ok_or(ContestImportSourceError::InvalidRemoteData)?;
+        let page = self
+            .fetch_problem_statement(problem)
+            .await
+            .map_err(map_http_error)?;
+        let statement =
+            extract_problem_statement(&page).ok_or(ContestImportSourceError::InvalidRemoteData)?;
         let mut assets = BTreeMap::new();
         for source_url in statement_asset_urls(statement) {
-            let bytes = self.fetch_statement_asset(&source_url).await.map_err(map_http_error)?;
-            assets.insert(source_url, FixtureAsset {
-                media_type: "application/octet-stream".to_owned(),
-                bytes,
-            });
+            let bytes = self
+                .fetch_statement_asset(&source_url)
+                .await
+                .map_err(map_http_error)?;
+            assets.insert(
+                source_url,
+                FixtureAsset {
+                    media_type: "application/octet-stream".to_owned(),
+                    bytes,
+                },
+            );
         }
-        let fixture = StatementFixture { html: statement.to_owned(), assets };
+        let fixture = StatementFixture {
+            html: statement.to_owned(),
+            assets,
+        };
         let (sanitized_html, assets) = sanitize_and_localize_statement(problem, &fixture)
             .map_err(|_| ContestImportSourceError::InvalidRemoteData)?;
         Ok(StatementSnapshotDraft {
@@ -232,7 +267,9 @@ impl ContestImportSource for CodeforcesHttpAdapter {
 
 fn map_http_error(error: CodeforcesHttpError) -> ContestImportSourceError {
     match error {
-        CodeforcesHttpError::InvalidUtf8 | CodeforcesHttpError::UnsafeAssetUrl(_) => ContestImportSourceError::InvalidRemoteData,
+        CodeforcesHttpError::InvalidUtf8 | CodeforcesHttpError::UnsafeAssetUrl(_) => {
+            ContestImportSourceError::InvalidRemoteData
+        }
         _ => ContestImportSourceError::Unavailable,
     }
 }
@@ -293,11 +330,15 @@ pub fn build_fixture_import(
     let draft = manifest_from_api_json(contest, api_json)?;
     let mut snapshots = Vec::with_capacity(draft.slots.len());
     for slot in &draft.slots {
-        let fixture = statements.get(slot.problem.index())
-            .ok_or_else(|| FixtureAdapterError::MissingStatement(slot.problem.index().to_owned()))?;
+        let fixture = statements.get(slot.problem.index()).ok_or_else(|| {
+            FixtureAdapterError::MissingStatement(slot.problem.index().to_owned())
+        })?;
         let (sanitized_html, assets) = sanitize_and_localize_statement(&slot.problem, fixture)?;
         snapshots.push(StatementSnapshotDraft {
-            problem: slot.problem.clone(), source_html: fixture.html.clone(), sanitized_html, assets,
+            problem: slot.problem.clone(),
+            source_html: fixture.html.clone(),
+            sanitized_html,
+            assets,
         });
     }
     Ok((draft, snapshots))
@@ -307,7 +348,8 @@ fn manifest_from_api_json(
     contest: CodeforcesContestIdentity,
     api_json: &str,
 ) -> Result<ContestImportDraft, FixtureAdapterError> {
-    let api: ApiEnvelope = serde_json::from_str(api_json).map_err(|_| FixtureAdapterError::MetadataInvalid)?;
+    let api: ApiEnvelope =
+        serde_json::from_str(api_json).map_err(|_| FixtureAdapterError::MetadataInvalid)?;
     if api.status != "OK" || api.result.contest.id != contest.contest_id() {
         return Err(FixtureAdapterError::ContestIdentityMismatch);
     }
@@ -317,11 +359,14 @@ fn manifest_from_api_json(
     let mut seen = HashSet::new();
     let mut slots = Vec::with_capacity(api.result.problems.len());
     for (offset, problem_metadata) in api.result.problems.iter().enumerate() {
-        if problem_metadata.contest_id != contest.contest_id() || problem_metadata.name.trim().is_empty() {
+        if problem_metadata.contest_id != contest.contest_id()
+            || problem_metadata.name.trim().is_empty()
+        {
             return Err(FixtureAdapterError::MetadataInvalid);
         }
-        let problem = CodeforcesProblemIdentity::new(contest.clone(), problem_metadata.index.clone())
-            .map_err(|_| FixtureAdapterError::MetadataInvalid)?;
+        let problem =
+            CodeforcesProblemIdentity::new(contest.clone(), problem_metadata.index.clone())
+                .map_err(|_| FixtureAdapterError::MetadataInvalid)?;
         if !seen.insert(problem.clone()) {
             return Err(FixtureAdapterError::MetadataInvalid);
         }
@@ -338,7 +383,10 @@ fn manifest_from_api_json(
         contest,
         api.result.contest.name,
         contest_source_url,
-        api.result.contest.start_time_seconds.map(|seconds| seconds.to_string()),
+        api.result
+            .contest
+            .start_time_seconds
+            .map(|seconds| seconds.to_string()),
         slots,
     )
     .map_err(FixtureAdapterError::ManifestInvalid)?;
@@ -361,7 +409,9 @@ fn extract_problem_statement(page: &str) -> Option<&str> {
             (_, Some(close)) => {
                 depth = depth.checked_sub(1)?;
                 cursor = close + "</div>".len();
-                if depth == 0 { return Some(&page[start..cursor]); }
+                if depth == 0 {
+                    return Some(&page[start..cursor]);
+                }
             }
             _ => return None,
         }
@@ -390,7 +440,9 @@ pub fn sanitize_and_localize_statement(
     fixture: &StatementFixture,
 ) -> Result<(String, Vec<StatementAssetDraft>), FixtureAdapterError> {
     if !fixture.html.contains("problem-statement") {
-        return Err(FixtureAdapterError::StatementInvalid("problem statement root missing".to_owned()));
+        return Err(FixtureAdapterError::StatementInvalid(
+            "problem statement root missing".to_owned(),
+        ));
     }
     let mut output = remove_dangerous_elements(&fixture.html);
     output = strip_event_attributes(&output);
@@ -399,7 +451,9 @@ pub fn sanitize_and_localize_statement(
     let mut assets = Vec::new();
     let mut ordinal = 0usize;
     let mut cursor = 0usize;
-    while let Some((relative_start, relative_end, source)) = next_attribute_value(&output[cursor..], "src") {
+    while let Some((relative_start, relative_end, source)) =
+        next_attribute_value(&output[cursor..], "src")
+    {
         let start = cursor + relative_start;
         let end = cursor + relative_end;
         let source_url = trusted_asset_url(&source)?;
@@ -410,7 +464,9 @@ pub fn sanitize_and_localize_statement(
         ordinal += 1;
         let local_ref = format!(
             "acm-os-asset://codeforces/{}/{}/{}",
-            problem.contest().contest_id(), problem.index(), ordinal
+            problem.contest().contest_id(),
+            problem.index(),
+            ordinal
         );
         output.replace_range(start..end, &local_ref);
         cursor = start + local_ref.len() + 1;
@@ -457,7 +513,9 @@ fn remove_dangerous_elements(input: &str) -> String {
         while let Some(start) = output.to_ascii_lowercase().find(&open) {
             let tail = &output[start..];
             let Some(close_offset) = tail.to_ascii_lowercase().find(&close) else {
-                let Some(end_offset) = tail.find('>') else { break; };
+                let Some(end_offset) = tail.find('>') else {
+                    break;
+                };
                 output.replace_range(start..start + end_offset + 1, "");
                 continue;
             };
@@ -471,7 +529,9 @@ fn strip_event_attributes(input: &str) -> String {
     let mut output = input.to_owned();
     for event in ["onclick", "onload", "onerror", "onmouseover", "onfocus"] {
         while let Some((start, end, _)) = next_attribute_value(&output, event) {
-            let attribute_start = output[..start].rfind(|character: char| character.is_ascii_whitespace()).unwrap_or(start);
+            let attribute_start = output[..start]
+                .rfind(|character: char| character.is_ascii_whitespace())
+                .unwrap_or(start);
             output.replace_range(attribute_start..end + 1, "");
         }
     }
@@ -481,12 +541,21 @@ fn strip_event_attributes(input: &str) -> String {
 fn rewrite_unsafe_links(input: &str) -> String {
     let mut output = input.to_owned();
     loop {
-        let Some((start, end, value)) = next_attribute_value(&output, "href") else { break; };
-        if value.trim_start().to_ascii_lowercase().starts_with("javascript:") || value.trim_start().to_ascii_lowercase().starts_with("data:") {
+        let Some((start, end, value)) = next_attribute_value(&output, "href") else {
+            break;
+        };
+        if value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("javascript:")
+            || value.trim_start().to_ascii_lowercase().starts_with("data:")
+        {
             output.replace_range(start..end, "#");
         } else {
             let next_start = end + 1;
-            let Some(relative) = output[next_start..].to_ascii_lowercase().find("href=") else { break; };
+            let Some(relative) = output[next_start..].to_ascii_lowercase().find("href=") else {
+                break;
+            };
             let prefix = output[..next_start + relative].to_owned();
             let suffix = rewrite_unsafe_links(&output[next_start + relative..]);
             return format!("{prefix}{suffix}");
@@ -500,7 +569,9 @@ fn next_attribute_value(input: &str, target: &str) -> Option<(usize, usize, Stri
     let needle = format!("{target}=");
     let start = lower.find(&needle)? + needle.len();
     let quote = input.as_bytes().get(start).copied()?;
-    if quote != b'\"' && quote != b'\'' { return None; }
+    if quote != b'\"' && quote != b'\'' {
+        return None;
+    }
     let value_start = start + 1;
     let end = value_start + input[value_start..].find(quote as char)?;
     Some((value_start, end, input[value_start..end].to_owned()))
@@ -510,7 +581,9 @@ fn next_attribute_value(input: &str, target: &str) -> Option<(usize, usize, Stri
 mod tests {
     use super::*;
 
-    fn contest() -> CodeforcesContestIdentity { CodeforcesContestIdentity::new(1979).expect("contest") }
+    fn contest() -> CodeforcesContestIdentity {
+        CodeforcesContestIdentity::new(1979).expect("contest")
+    }
     fn html(image: &str) -> String {
         format!("<div class=\"problem-statement\"><script>bad()</script><p onclick=\"bad()\">Text</p><a href=\"javascript:bad()\">bad</a><img src=\"{image}\"></div>")
     }
@@ -518,43 +591,79 @@ mod tests {
         r#"{"status":"OK","result":{"contest":{"id":1979,"name":"Round","startTimeSeconds":1710000000},"problems":[{"contestId":1979,"index":"A","name":"Alpha","rating":800},{"contestId":1979,"index":"B","name":"Beta","rating":900}]}}"#
     }
     fn fixtures() -> BTreeMap<String, StatementFixture> {
-        let asset = FixtureAsset { media_type: "image/png".to_owned(), bytes: vec![1, 2, 3] };
+        let asset = FixtureAsset {
+            media_type: "image/png".to_owned(),
+            bytes: vec![1, 2, 3],
+        };
         let mut result = BTreeMap::new();
         for index in ["A", "B"] {
-            result.insert(index.to_owned(), StatementFixture { html: html("/predownloaded/image.png"), assets: BTreeMap::from([("https://codeforces.com/predownloaded/image.png".to_owned(), asset.clone())]) });
+            result.insert(
+                index.to_owned(),
+                StatementFixture {
+                    html: html("/predownloaded/image.png"),
+                    assets: BTreeMap::from([(
+                        "https://codeforces.com/predownloaded/image.png".to_owned(),
+                        asset.clone(),
+                    )]),
+                },
+            );
         }
         result
     }
 
     #[test]
     fn fixture_adapter_builds_a_complete_ordered_manifest_and_local_snapshots() {
-        let (draft, snapshots) = build_fixture_import(contest(), metadata(), &fixtures()).expect("fixture import");
+        let (draft, snapshots) =
+            build_fixture_import(contest(), metadata(), &fixtures()).expect("fixture import");
         assert_eq!(draft.slots.len(), 2);
         assert_eq!(draft.slots[0].problem.index(), "A");
-        assert_eq!(contest_api_url(&draft.contest), "https://codeforces.com/api/contest.standings?contestId=1979");
+        assert_eq!(
+            contest_api_url(&draft.contest),
+            "https://codeforces.com/api/contest.standings?contestId=1979"
+        );
         assert_eq!(snapshots.len(), 2);
         assert!(!snapshots[0].sanitized_html.contains("<script"));
         assert!(!snapshots[0].sanitized_html.contains("onclick"));
         assert!(snapshots[0].sanitized_html.contains("href=\"#\""));
-        assert!(snapshots[0].sanitized_html.contains("acm-os-asset://codeforces/1979/A/1"));
+        assert!(snapshots[0]
+            .sanitized_html
+            .contains("acm-os-asset://codeforces/1979/A/1"));
         assert_eq!(snapshots[0].assets.len(), 1);
     }
 
     #[test]
     fn fixture_adapter_rejects_identity_and_missing_statement_or_asset_failures() {
         let mismatched = metadata().replace("\"id\":1979", "\"id\":1980");
-        assert_eq!(build_fixture_import(contest(), &mismatched, &fixtures()), Err(FixtureAdapterError::ContestIdentityMismatch));
-        let mut missing = fixtures(); missing.remove("B");
-        assert_eq!(build_fixture_import(contest(), metadata(), &missing), Err(FixtureAdapterError::MissingStatement("B".to_owned())));
-        let fixture = StatementFixture { html: html("https://evil.example/x.png"), assets: BTreeMap::new() };
+        assert_eq!(
+            build_fixture_import(contest(), &mismatched, &fixtures()),
+            Err(FixtureAdapterError::ContestIdentityMismatch)
+        );
+        let mut missing = fixtures();
+        missing.remove("B");
+        assert_eq!(
+            build_fixture_import(contest(), metadata(), &missing),
+            Err(FixtureAdapterError::MissingStatement("B".to_owned()))
+        );
+        let fixture = StatementFixture {
+            html: html("https://evil.example/x.png"),
+            assets: BTreeMap::new(),
+        };
         let problem = CodeforcesProblemIdentity::new(contest(), "A").expect("problem");
-        assert_eq!(sanitize_and_localize_statement(&problem, &fixture), Err(FixtureAdapterError::UnsafeAssetUrl("https://evil.example/x.png".to_owned())));
+        assert_eq!(
+            sanitize_and_localize_statement(&problem, &fixture),
+            Err(FixtureAdapterError::UnsafeAssetUrl(
+                "https://evil.example/x.png".to_owned()
+            ))
+        );
     }
 
     #[test]
     fn real_adapter_url_construction_is_identity_bound_and_assets_stay_codeforces_only() {
         let problem = CodeforcesProblemIdentity::new(contest(), "A").expect("problem");
-        assert_eq!(problem_page_url(&problem), "https://codeforces.com/contest/1979/problem/A");
+        assert_eq!(
+            problem_page_url(&problem),
+            "https://codeforces.com/contest/1979/problem/A"
+        );
         assert_eq!(
             trusted_asset_url_http("/predownloaded/asset.png"),
             Ok("https://codeforces.com/predownloaded/asset.png".to_owned())
@@ -565,18 +674,28 @@ mod tests {
         );
         assert_eq!(
             trusted_asset_url_http("https://espresso.codeforces.com.evil.example/asset.png"),
-            Err(CodeforcesHttpError::UnsafeAssetUrl("https://espresso.codeforces.com.evil.example/asset.png".to_owned()))
+            Err(CodeforcesHttpError::UnsafeAssetUrl(
+                "https://espresso.codeforces.com.evil.example/asset.png".to_owned()
+            ))
         );
         assert_eq!(
             trusted_asset_url_http("https://evil.example/asset.png"),
-            Err(CodeforcesHttpError::UnsafeAssetUrl("https://evil.example/asset.png".to_owned()))
+            Err(CodeforcesHttpError::UnsafeAssetUrl(
+                "https://evil.example/asset.png".to_owned()
+            ))
         );
     }
 
     #[test]
     fn statement_asset_urls_normalize_and_deduplicate_codeforces_sources() {
         let html = "<div class=\"problem-statement\"><img src=\"/x.png\"><img src=\"/x.png\"><img src=\"https://espresso.codeforces.com/y.png\"></div>";
-        assert_eq!(statement_asset_urls(html), vec!["https://codeforces.com/x.png", "https://espresso.codeforces.com/y.png"]);
+        assert_eq!(
+            statement_asset_urls(html),
+            vec![
+                "https://codeforces.com/x.png",
+                "https://espresso.codeforces.com/y.png"
+            ]
+        );
         assert!(statement_asset_urls("<img src=\"https://evil.example/x.png\">").is_empty());
     }
 
@@ -610,14 +729,22 @@ mod tests {
         // Contest 2256 reproduces the large unbounded standings response that
         // must be truncated after the manifest fields during release smoke.
         let contest = CodeforcesContestIdentity::new(2256).expect("contest identity");
-        let metadata = adapter.fetch_contest_metadata(&contest).await.expect("Codeforces metadata");
+        let metadata = adapter
+            .fetch_contest_metadata(&contest)
+            .await
+            .expect("Codeforces metadata");
         assert!(metadata.contains("\"status\":\"OK\""));
         assert!(metadata.contains("\"contestId\":2256"));
         assert!(!metadata.contains("\"party\""));
 
         let problem = CodeforcesProblemIdentity::new(contest, "C").expect("problem identity");
-        let snapshot = adapter.fetch_snapshot(&problem).await.expect("Codeforces 2256C snapshot");
-        assert!(snapshot.sanitized_html.contains("acm-os-asset://codeforces/2256/C/1"));
+        let snapshot = adapter
+            .fetch_snapshot(&problem)
+            .await
+            .expect("Codeforces 2256C snapshot");
+        assert!(snapshot
+            .sanitized_html
+            .contains("acm-os-asset://codeforces/2256/C/1"));
         assert!(!snapshot.assets.is_empty());
     }
 }

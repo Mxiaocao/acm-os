@@ -911,3 +911,225 @@ test("Obsidian open failure is scoped and exposes recovery actions", {
     await view.cleanup();
   }
 });
+
+test("Today drives stable reorder, Done, explicit suggestions, and confirmed replanning", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const entry = (id, problemId, reason, status = "notStarted", origin = "auto") => ({
+    entryId: id, problemId, reviewAttemptId: null, lane: "study", reason,
+    contestId: 1979, problemIndex: problemId === "1" ? "A" : problemId === "2" ? "B" : "C",
+    problemTitle: `Problem ${problemId}`,
+    planningCostMinutes: 60, position: 0, origin, status,
+  });
+  let snapshot = {
+    planId: "plan-today", localDate: "2026-08-12", budgetMinutes: 120,
+    plannedMinutes: 120, overBudgetMinutes: 0, reviewOnlyStreak: 0,
+    entries: [entry("entry-a", "1", "upsolve"), { ...entry("entry-b", "2", "relearn"), position: 1 }],
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    calls.push([command, args]);
+    if (command === "today_snapshot") return snapshot;
+    if (command === "reorder_today") {
+      snapshot = { ...snapshot, entries: args.input.orderedEntryIds.map((id, position) => ({ ...snapshot.entries.find((item) => item.entryId === id), position })) };
+      return snapshot;
+    }
+    if (command === "complete_today_entry") {
+      snapshot = { ...snapshot, entries: snapshot.entries.map((item) => ({ ...item, status: "completed" })) };
+      return snapshot;
+    }
+    if (command === "today_extra_suggestions") return {
+      expectedSnapshot: snapshot, remainingBudgetMinutes: 60,
+      suggestions: [{ problemId: "3", contestId: 1979, problemIndex: "C", problemTitle: "Problem 3", reviewAttemptId: null, lane: "study", reason: "upsolve", planningCostMinutes: 60 }],
+    };
+    if (command === "accept_today_extra_suggestion") {
+      snapshot = { ...snapshot, plannedMinutes: 180, overBudgetMinutes: 60, entries: [...snapshot.entries, { ...entry("entry-c", "3", "upsolve", "notStarted", "manual"), position: 2 }] };
+      return snapshot;
+    }
+    if (command === "preview_today_replan") return {
+      expectedSnapshot: snapshot, proposedBudgetMinutes: args.input.budgetMinutes,
+      proposedPlannedMinutes: 120, proposedOverBudgetMinutes: 25,
+      proposedReviewOnlyStreak: 0,
+      entries: snapshot.entries.map(({ entryId, position: _position, ...item }) => ({ ...item, existingEntryId: entryId })),
+    };
+    if (command === "apply_today_replan") {
+      snapshot = { ...snapshot, budgetMinutes: args.preview.proposedBudgetMinutes, overBudgetMinutes: 25 };
+      return snapshot;
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/today");
+  try {
+    assert.match(view.document.body.textContent, /Upsolve/);
+    const down = view.document.querySelector('button[aria-label="Move Upsolve down"]');
+    await act(async () => down.click()); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "reorder_today")[1].input.orderedEntryIds, ["entry-b", "entry-a"]);
+    const firstEntry = view.document.querySelector(".today-entry");
+    await act(async () => firstEntry.dispatchEvent(new view.window.KeyboardEvent("keydown", { altKey: true, key: "ArrowDown", bubbles: true })));
+    await settle();
+    assert.equal(calls.filter(([name]) => name === "reorder_today").length, 2);
+
+    const entries = view.document.querySelectorAll(".today-entry");
+    const handle = entries[0].querySelector(".today-drag-handle");
+    let capturedPointer = null;
+    handle.setPointerCapture = (pointerId) => { capturedPointer = pointerId; };
+    handle.hasPointerCapture = (pointerId) => capturedPointer === pointerId;
+    handle.releasePointerCapture = () => { capturedPointer = null; };
+    view.document.elementFromPoint = () => entries[1];
+    const pointerEvent = (type, fields = {}) => {
+      const event = new view.window.Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { button: 0, pointerId: 7, clientX: 100, clientY: 200, ...fields });
+      return event;
+    };
+    await act(async () => {
+      handle.dispatchEvent(pointerEvent("pointerdown"));
+      handle.dispatchEvent(pointerEvent("pointermove"));
+      handle.dispatchEvent(pointerEvent("pointerup"));
+    });
+    await settle();
+    const reorderCalls = calls.filter(([name]) => name === "reorder_today");
+    assert.equal(reorderCalls.length, 3);
+    assert.deepEqual(reorderCalls[2][1].input, {
+      planId: "plan-today",
+      orderedEntryIds: ["entry-b", "entry-a"],
+    });
+
+    const done = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Done for today");
+    await act(async () => done.click()); await settle();
+    assert.ok(calls.some(([name]) => name === "complete_today_entry"));
+    assert.match(view.document.body.textContent, /Extra suggestions/);
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add to Today");
+    await act(async () => add.click()); await settle();
+    assert.ok(calls.some(([name, args]) => name === "accept_today_extra_suggestion" && args.input.problemId === "3"));
+    assert.match(view.document.body.textContent, /Manual/);
+
+    const budget = view.document.querySelector('.today-toolbar input[type="number"]');
+    await act(async () => {
+      budget.value = "";
+      budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    assert.equal(budget.value, "", "the controlled budget input must remain clear while the user replaces its value");
+    await act(async () => {
+      budget.value = "95";
+      budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    assert.equal(budget.value, "95");
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Preview replan");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(budget, "-1");
+      budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      budget.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => preview.click());
+    await settle();
+    assert.match(view.document.body.textContent, /Daily budget must be a non-negative whole number/);
+    assert.equal(calls.filter(([name]) => name === "preview_today_replan").length, 0);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(budget, "95");
+      budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      budget.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await act(async () => preview.click()); await settle();
+    assert.match(view.document.body.textContent, /Apply this replan/);
+    const apply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Apply replan");
+    await act(async () => apply.click()); await settle();
+    assert.ok(calls.some(([name]) => name === "apply_today_replan"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Today asks for a budget before creating the first daily snapshot", {
+  concurrency: false,
+}, async () => {
+  const loads = [];
+  const empty = {
+    planId: "new-plan", localDate: "2026-08-12", budgetMinutes: 90,
+    plannedMinutes: 0, overBudgetMinutes: 0, reviewOnlyStreak: 0, entries: [],
+  };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "today_snapshot") {
+      loads.push(args.input.budgetMinutes);
+      return args.input.budgetMinutes === null ? null : { ...empty, budgetMinutes: args.input.budgetMinutes };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/today");
+  try {
+    assert.deepEqual(loads, [null]);
+    assert.match(view.document.body.textContent, /Set today's budget/);
+    const create = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Create Today plan");
+    const initialBudget = view.document.querySelector(".today-budget-start input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(initialBudget, "");
+      initialBudget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      initialBudget.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => create.click());
+    await settle();
+    assert.deepEqual(loads, [null]);
+    assert.match(view.document.body.textContent, /Daily budget must be a non-negative whole number/);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(initialBudget, "60");
+      initialBudget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      initialBudget.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await act(async () => create.click()); await settle();
+    assert.deepEqual(loads, [null, 60]);
+    assert.match(view.document.body.textContent, /No tasks fit this budget/);
+  } finally { await view.cleanup(); }
+});
+
+test("Settings saves optional arbitrary-minute weekly defaults without touching Today", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  let schedule = { monday: null, tuesday: null, wednesday: 95, thursday: null, friday: null, saturday: 101, sunday: 0 };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "weekly_acm_budget") return schedule;
+    if (command === "save_weekly_acm_budget") {
+      calls.push(args.schedule);
+      schedule = args.schedule;
+      return schedule;
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/settings");
+  try {
+    await settle();
+    const wednesday = view.document.querySelector('input[aria-label="Wednesday ACM budget in minutes"]');
+    const thursday = view.document.querySelector('input[aria-label="Thursday ACM budget in minutes"]');
+    assert.equal(wednesday.value, "95");
+    assert.equal(thursday.value, "");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "73");
+      wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await settle();
+    assert.equal(wednesday.value, "73");
+    const save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save weekly budget");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "-1");
+      wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => save.click());
+    await settle();
+    assert.equal(calls.length, 0);
+    assert.match(view.document.body.textContent, /Each weekly budget must be blank or a non-negative whole number/);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "73");
+      wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await act(async () => save.click()); await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].wednesday, 73);
+    assert.equal(calls[0].thursday, null);
+    assert.match(view.document.body.textContent, /Existing Today plans and one-day overrides were not changed/);
+  } finally { await view.cleanup(); }
+});

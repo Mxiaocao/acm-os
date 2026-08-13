@@ -51,6 +51,22 @@ import {
   type SubmissionResultDto,
 } from "../ipc/contest";
 import { onPersonalNoteInvalidated } from "../ipc/personal-note-events";
+import {
+  acceptTodayExtraSuggestion,
+  applyTodayReplan,
+  completeTodayEntry,
+  loadToday,
+  loadTodayExtraSuggestions,
+  loadWeeklyAcmBudget,
+  previewTodayReplan,
+  reorderToday,
+  saveWeeklyAcmBudget,
+  type TodayEntryDto,
+  type TodayExtraSuggestionsPreviewDto,
+  type TodayReplanPreviewDto,
+  type TodaySnapshotDto,
+  type WeeklyAcmBudgetDto,
+} from "../ipc/today";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -583,15 +599,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
 function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; workspace: ConfiguredWorkspace; navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   if (page === "today") {
-    return (
-      <>
-        <PageHeader eyebrow="Normal app shell" headingRef={headingRef} title="Today" />
-        <section className="empty-state">
-          <h2>Nothing planned yet</h2>
-          <p>The workspace is ready. Today planning is introduced in a later milestone.</p>
-        </section>
-      </>
-    );
+    return <TodayPage navigate={navigate} />;
   }
   if (page === "settings") {
     return (
@@ -606,6 +614,7 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
           </dl>
           <p className="safe-note">Changing the Active Vault requires a future preview-and-confirm flow.</p>
         </section>
+        <WeeklyAcmBudgetSettings />
       </>
     );
   }
@@ -624,6 +633,222 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
     </>
   );
 }
+
+const weekBudgetFields: Array<[keyof WeeklyAcmBudgetDto, string]> = [
+  ["monday", "Monday"], ["tuesday", "Tuesday"], ["wednesday", "Wednesday"],
+  ["thursday", "Thursday"], ["friday", "Friday"], ["saturday", "Saturday"], ["sunday", "Sunday"],
+];
+
+function WeeklyAcmBudgetSettings() {
+  const [draft, setDraft] = useState<Record<keyof WeeklyAcmBudgetDto, string>>({
+    monday: "", tuesday: "", wednesday: "", thursday: "", friday: "", saturday: "", sunday: "",
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void loadWeeklyAcmBudget()
+      .then((schedule) => setDraft(Object.fromEntries(weekBudgetFields.map(([key]) => [key, schedule[key] === null ? "" : String(schedule[key])])) as Record<keyof WeeklyAcmBudgetDto, string>))
+      .catch(() => setMessage("Weekly budget is temporarily unavailable."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setMessage(null);
+    const schedule = {} as WeeklyAcmBudgetDto;
+    for (const [key] of weekBudgetFields) {
+      const value = draft[key].trim();
+      const minutes = value === "" ? null : Number(value);
+      if (minutes !== null && (!Number.isInteger(minutes) || minutes < 0)) {
+        setMessage("Each weekly budget must be blank or a non-negative whole number of minutes.");
+        return;
+      }
+      schedule[key] = minutes;
+    }
+    setSaving(true);
+    try {
+      const saved = await saveWeeklyAcmBudget(schedule);
+      setDraft(Object.fromEntries(weekBudgetFields.map(([key]) => [key, saved[key] === null ? "" : String(saved[key])])) as Record<keyof WeeklyAcmBudgetDto, string>);
+      setMessage("Weekly ACM budget saved. Existing Today plans and one-day overrides were not changed.");
+    } catch { setMessage("Weekly budget could not be saved."); }
+    finally { setSaving(false); }
+  };
+
+  return <section aria-labelledby="weekly-acm-budget" className="content-panel"><h2 id="weekly-acm-budget">Weekly ACM budget</h2><p>These defaults repeat every week. Leave a day blank to ask for that day&apos;s budget when Today is first opened.</p>{loading ? <p>Loading weekly budget...</p> : <form className="weekly-budget-form" noValidate onSubmit={submit}><div>{weekBudgetFields.map(([key, label]) => <label key={key}>{label}<input aria-label={`${label} ACM budget in minutes`} min="0" onInput={(event) => { const value = event.currentTarget.value; setDraft((current) => ({ ...current, [key]: value })); }} placeholder="Not set" type="number" value={draft[key]} /></label>)}</div><button className="primary-action" disabled={saving} type="submit">{saving ? "Saving..." : "Save weekly budget"}</button></form>}{message ? <p aria-live="polite" className="safe-note">{message}</p> : null}</section>;
+}
+
+function TodayPage({ navigate }: { navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [snapshot, setSnapshot] = useState<TodaySnapshotDto | null>(null);
+  const [needsBudget, setNeedsBudget] = useState(false);
+  const [initialBudgetDraft, setInitialBudgetDraft] = useState("60");
+  const [budgetDraft, setBudgetDraft] = useState("60");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyEntry, setBusyEntry] = useState<string | null>(null);
+  const [replan, setReplan] = useState<TodayReplanPreviewDto | null>(null);
+  const [suggestions, setSuggestions] = useState<TodayExtraSuggestionsPreviewDto | null>(null);
+  const draggedEntryIdRef = useRef<string | null>(null);
+  const pointerTargetEntryIdRef = useRef<string | null>(null);
+
+  const refreshSuggestions = useCallback(async (next: TodaySnapshotDto) => {
+    if (next.entries.length > 0 && next.entries.every((entry) => entry.status === "completed")) {
+      setSuggestions(await loadTodayExtraSuggestions());
+    } else {
+      setSuggestions(null);
+    }
+  }, []);
+
+  const load = useCallback(async (create = false) => {
+    setLoading(true); setError(null);
+    try {
+      const next = await loadToday(create ? Number(initialBudgetDraft) : null);
+      if (!next) { setNeedsBudget(true); setSnapshot(null); return; }
+      setNeedsBudget(false);
+      setSnapshot(next); setBudgetDraft(String(next.budgetMinutes));
+      await refreshSuggestions(next);
+    } catch (cause) { setError(todayErrorMessage(cause)); }
+    finally { setLoading(false); }
+  }, [initialBudgetDraft, refreshSuggestions]);
+
+  useEffect(() => { void load(false); }, []);
+
+  const commitSnapshot = async (next: TodaySnapshotDto) => {
+    setSnapshot(next); setBudgetDraft(String(next.budgetMinutes)); setReplan(null); setError(null);
+    await refreshSuggestions(next);
+  };
+
+  const move = async (index: number, offset: -1 | 1) => {
+    if (!snapshot) return;
+    const target = index + offset;
+    if (target < 0 || target >= snapshot.entries.length) return;
+    const ids = snapshot.entries.map((entry) => entry.entryId);
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    try { await commitSnapshot(await reorderToday(snapshot.planId, ids)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+  };
+
+  const dropEntry = async (targetEntryId: string) => {
+    const sourceEntryId = draggedEntryIdRef.current;
+    if (!snapshot || !sourceEntryId || sourceEntryId === targetEntryId) {
+      draggedEntryIdRef.current = null;
+      return;
+    }
+    const ids = snapshot.entries.map((entry) => entry.entryId);
+    const from = ids.indexOf(sourceEntryId);
+    const target = ids.indexOf(targetEntryId);
+    if (from < 0 || target < 0) { draggedEntryIdRef.current = null; return; }
+    const [moved] = ids.splice(from, 1);
+    ids.splice(target, 0, moved);
+    draggedEntryIdRef.current = null;
+    try { await commitSnapshot(await reorderToday(snapshot.planId, ids)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+  };
+
+  const clearPointerDrag = () => {
+    draggedEntryIdRef.current = null;
+    pointerTargetEntryIdRef.current = null;
+    document.querySelectorAll(".today-entry--dragging, .today-entry--drop-target")
+      .forEach((item) => item.classList.remove("today-entry--dragging", "today-entry--drop-target"));
+  };
+
+  const startPointerDrag = (event: React.PointerEvent<HTMLButtonElement>, entryId: string) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    draggedEntryIdRef.current = entryId;
+    pointerTargetEntryIdRef.current = entryId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.closest(".today-entry")?.classList.add("today-entry--dragging");
+  };
+
+  const movePointerDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!draggedEntryIdRef.current) return;
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".today-entry");
+    const targetEntryId = target?.dataset.entryId ?? null;
+    document.querySelectorAll(".today-entry--drop-target")
+      .forEach((item) => item.classList.remove("today-entry--drop-target"));
+    if (target && targetEntryId && targetEntryId !== draggedEntryIdRef.current) {
+      target.classList.add("today-entry--drop-target");
+      pointerTargetEntryIdRef.current = targetEntryId;
+    } else {
+      pointerTargetEntryIdRef.current = draggedEntryIdRef.current;
+    }
+  };
+
+  const finishPointerDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const targetEntryId = pointerTargetEntryIdRef.current;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (targetEntryId && targetEntryId !== draggedEntryIdRef.current) {
+      void dropEntry(targetEntryId);
+    }
+    clearPointerDrag();
+  };
+
+  const done = async (entry: TodayEntryDto) => {
+    if (!snapshot || busyEntry) return;
+    setBusyEntry(entry.entryId);
+    try { await commitSnapshot(await completeTodayEntry(snapshot.planId, entry.entryId)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+    finally { setBusyEntry(null); }
+  };
+
+  const previewBudget = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setError(null);
+    const proposedBudget = Number(budgetDraft);
+    if (budgetDraft.trim() === "" || !Number.isInteger(proposedBudget) || proposedBudget < 0) {
+      setError("Daily budget must be a non-negative whole number of minutes.");
+      return;
+    }
+    try { setReplan(await previewTodayReplan(proposedBudget)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+  };
+
+  const applyBudget = async () => {
+    if (!replan) return;
+    try { await commitSnapshot(await applyTodayReplan(replan)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+  };
+
+  const acceptSuggestion = async (problemId: string) => {
+    if (!suggestions) return;
+    setBusyEntry(problemId);
+    try { await commitSnapshot(await acceptTodayExtraSuggestion(suggestions, problemId)); }
+    catch (cause) { setError(todayErrorMessage(cause)); }
+    finally { setBusyEntry(null); }
+  };
+
+  return <>
+    <PageHeader eyebrow="Daily execution" headingRef={headingRef} title="Today" />
+    {loading ? <p aria-live="polite">Loading today plan...</p> : null}
+    {error ? <p aria-live="assertive" className="error-message">{error}</p> : null}
+    {!loading && needsBudget ? <section className="empty-state"><h2>Set today&apos;s budget</h2><p>No weekly default is set for this weekday. Enter any non-negative whole number of minutes; tasks still use complete 30 or 60 minute planning blocks.</p><form className="today-budget-start" noValidate onSubmit={(event) => { event.preventDefault(); const value = Number(initialBudgetDraft); if (initialBudgetDraft.trim() === "" || !Number.isInteger(value) || value < 0) { setError("Daily budget must be a non-negative whole number of minutes."); return; } void load(true); }}><label>Minutes<input min="0" onInput={(event) => setInitialBudgetDraft(event.currentTarget.value)} required type="number" value={initialBudgetDraft} /></label><button className="primary-action" type="submit">Create Today plan</button></form></section> : null}
+    {!loading && !snapshot && !needsBudget ? <section className="empty-state"><h2>Plan unavailable</h2><button className="secondary-action" onClick={() => void load(false)} type="button">Retry</button></section> : null}
+    {snapshot ? <>
+      <section className="today-toolbar" aria-label="Today plan summary">
+        <dl><div><dt>Date</dt><dd>{snapshot.localDate}</dd></div><div><dt>Planned</dt><dd>{snapshot.plannedMinutes} min</dd></div><div><dt>Budget</dt><dd>{snapshot.budgetMinutes} min</dd></div><div><dt>Over</dt><dd>{snapshot.overBudgetMinutes} min</dd></div></dl>
+        <form noValidate onSubmit={previewBudget}><label>Today override<input aria-label="Daily budget in minutes" min="0" onInput={(event) => setBudgetDraft(event.currentTarget.value)} required type="number" value={budgetDraft} /></label><button className="secondary-action" type="submit">Preview replan</button></form>
+      </section>
+      {snapshot.entries.length === 0 ? <section className="empty-state"><h2>No tasks fit this budget</h2><p>Only complete 30 or 60 minute tasks are scheduled.</p></section> :
+        <ol className="today-list">{snapshot.entries.map((entry, index) => <li className={`today-entry today-entry--${entry.status}`} data-entry-id={entry.entryId} key={entry.entryId} onKeyDown={(event) => { if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); void move(index, -1); } if (event.altKey && event.key === "ArrowDown") { event.preventDefault(); void move(index, 1); } }} tabIndex={0}>
+          <div className="today-entry__order"><button aria-label={`Drag ${todayReasonLabel(entry.reason)} to reorder`} className="today-drag-handle" onPointerCancel={clearPointerDrag} onPointerDown={(event) => startPointerDrag(event, entry.entryId)} onPointerMove={movePointerDrag} onPointerUp={finishPointerDrag} title="Drag to reorder" type="button">⋮⋮</button><button aria-label={`Move ${todayReasonLabel(entry.reason)} up`} disabled={index === 0} onClick={() => void move(index, -1)} type="button">↑</button><button aria-label={`Move ${todayReasonLabel(entry.reason)} down`} disabled={index === snapshot.entries.length - 1} onClick={() => void move(index, 1)} type="button">↓</button></div>
+          <div className="today-entry__body"><div><span className="today-lane">{todayLaneLabel(entry.lane)}</span><span className={`today-status today-status--${entry.status}`}>{todayStatusLabel(entry.status)}</span>{entry.origin === "manual" ? <span className="today-origin">Manual</span> : null}</div><button className="today-problem-link" onClick={() => navigate(entry.reviewAttemptId && entry.status === "inProgress" ? `/review/${entry.reviewAttemptId}` : `/problems/${entry.contestId}/${entry.problemIndex}`)} type="button"><strong>{entry.problemTitle}</strong><span>CF {entry.contestId}{entry.problemIndex} · {todayReasonLabel(entry.reason)} · {entry.planningCostMinutes} min</span></button></div>
+          {todayDoneAllowed(entry) && entry.status !== "completed" ? <button className="primary-action" disabled={busyEntry === entry.entryId || entry.status === "unavailable"} onClick={() => void done(entry)} type="button">Done for today</button> : null}
+        </li>)}</ol>}
+      {suggestions && suggestions.suggestions.length > 0 ? <section className="today-suggestions"><h2>Extra suggestions</h2><p>{suggestions.remainingBudgetMinutes} minutes remain. Nothing is added without your action.</p><ul>{suggestions.suggestions.map((item) => <li key={item.problemId}><span><strong>{item.problemTitle}</strong><small>CF {item.contestId}{item.problemIndex} · {todayReasonLabel(item.reason)} · {item.planningCostMinutes} min</small></span><button className="secondary-action" disabled={busyEntry === item.problemId} onClick={() => void acceptSuggestion(item.problemId)} type="button">Add to Today</button></li>)}</ul></section> : null}
+    </> : null}
+    {replan ? <div className="modal-backdrop"><div aria-labelledby="today-replan-title" aria-modal="true" role="dialog"><h2 id="today-replan-title">Apply this replan?</h2><p>Budget {replan.expectedSnapshot.budgetMinutes} → {replan.proposedBudgetMinutes} minutes. This is a one-day override; the weekly default and next week&apos;s same weekday remain unchanged. Planned work becomes {replan.proposedPlannedMinutes} minutes across {replan.entries.length} entries. Completed, in-progress, and manual entries stay protected.</p><div className="button-row"><button className="primary-action" onClick={() => void applyBudget()} type="button">Apply replan</button><button className="secondary-action" onClick={() => { setBudgetDraft(String(snapshot?.budgetMinutes ?? Number(initialBudgetDraft))); setReplan(null); }} type="button">Cancel</button></div></div></div> : null}
+  </>;
+}
+
+function todayDoneAllowed(entry: TodayEntryDto) { return entry.reason === "continueLearning" || entry.reason === "relearn" || entry.reason === "upsolve"; }
+function todayLaneLabel(lane: TodayEntryDto["lane"]) { return lane === "carryIn" ? "Carry-in" : lane === "review" ? "Review" : "Study"; }
+function todayStatusLabel(status: TodayEntryDto["status"]) { return ({ notStarted: "Not started", inProgress: "In progress", completed: "Completed", unavailable: "Unavailable" } as const)[status]; }
+function todayReasonLabel(reason: TodayEntryDto["reason"]) { return ({ continueReview: "Continue Review", continueLearning: "Continue learning", dueFirstColdStart: "First cold-start Review", dueLongTermReview: "Long-term Review", relearn: "Relearn", upsolve: "Upsolve" } as const)[reason]; }
+function todayErrorMessage(cause: unknown) { const code = String(cause); if (code.includes("stale_today")) return "The Today plan changed. Reload and try again."; if (code.includes("invalid_today_done")) return "This entry cannot be completed from Today."; if (code.includes("invalid_today_reorder")) return "The saved order changed. Reload and try again."; if (code.includes("today_integrity")) return "Today data failed an integrity check."; return "Today is temporarily unavailable."; }
 
 function ContestShelf({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
