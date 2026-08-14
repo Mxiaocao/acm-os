@@ -96,6 +96,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
         assertText(summaryValue("Budget"), "95 min", "next Monday weekly default");
         await stage("next-week-default-restored");
         await invoke("desktop_e2e_finish", { input: { result: "passed" } });
+        await invoke("desktop_e2e_exit");
         return;
       }
 
@@ -313,10 +314,12 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       }
 
       await invoke("desktop_e2e_finish", { input: { result: "restart" } });
+      await invoke("desktop_e2e_exit");
     } catch (error) {
       await invoke("desktop_e2e_finish", {
         input: { result: `failed-${String(error).slice(0, 1500)}` },
       });
+      await invoke("desktop_e2e_exit");
     }
   }, 250);
 }

@@ -12,27 +12,35 @@ import "katex/dist/katex.min.css";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
   confirmKnowledgeUnderstanding,
+  confirmKnowledgeMarkdownDeleted,
   acceptExistingKnowledgeCandidate,
   loadKnowledgeDetail,
   loadKnowledgeIndex,
+  loadKnowledgeRelocationCandidates,
   loadKnowledgeCandidates,
   loadKnowledgeReevaluationSuggestion,
   openKnowledgeInObsidian,
+  rebindKnowledgeNode,
+  resolveKnowledgeIdentityConflict,
   setKnowledgeCandidateDisposition,
   type KnowledgeCandidateDto,
   type KnowledgeDetailDto,
   type KnowledgeNodeDto,
+  type KnowledgeRelocationCandidateDto,
+  type KnowledgeIdentityConflictDto,
   type KnowledgeUnderstandingLevel,
 } from "../ipc/knowledge";
 import {
   createPersonalNote,
   completeReview,
+  confirmPersonalNoteDeleted,
   deletePersonalNote,
   getContestDetail,
   getContestShelf,
   getLightweightProblemDetail,
   getLightweightProblems,
   getPersonalNoteProjection,
+  getPersonalNoteRelocationCandidates,
   getReviewFocus,
   getReviewHelpDrawer,
   getReviewAttemptHistory,
@@ -48,6 +56,7 @@ import {
   previewDeleteContest,
   deleteContest,
   openPersonalNoteInObsidian,
+  rebindPersonalNote,
   revealReviewHelp,
   startOrResumeReview,
   transitionProblemLifecycle,
@@ -64,6 +73,7 @@ import {
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
+  type PersonalNoteRelocationCandidateDto,
   type ProblemLifecycleActionDto,
   type ProblemMasteryEvidenceDto,
   type ReviewFocusDto,
@@ -93,6 +103,11 @@ import {
   type TodaySnapshotDto,
   type WeeklyAcmBudgetDto,
 } from "../ipc/today";
+import {
+  createDiagnosticExport,
+  previewDiagnosticExport,
+  type DiagnosticExportPreviewDto,
+} from "../ipc/startup";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -102,6 +117,13 @@ import {
   type WorkspaceConfigurationErrorDto,
   type WorkspacePathField,
   type WorkspaceStatusDto,
+} from "../ipc/workspace";
+import {
+  createManualBackup,
+  loadBackupInventory,
+  previewManualBackup,
+  type BackupInventoryDto,
+  type ManualBackupPreviewDto,
 } from "../ipc/workspace";
 import type { AppRoute, NormalPage } from "./routing";
 
@@ -136,6 +158,19 @@ export function RecoveryShell({
   foundSchemaVersion: number | null;
 }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [diagnosticPreview, setDiagnosticPreview] = useState<DiagnosticExportPreviewDto | null>(null);
+  const [diagnosticResult, setDiagnosticResult] = useState<string | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const inspectDiagnostics = () => {
+    setDiagnosticError(null);
+    previewDiagnosticExport().then(setDiagnosticPreview).catch(() => setDiagnosticError("Diagnostic export is unavailable while recovery state is being read."));
+  };
+  const exportDiagnostics = () => {
+    setExporting(true);
+    setDiagnosticError(null);
+    createDiagnosticExport().then((result) => setDiagnosticResult(result.path)).catch(() => setDiagnosticError("Diagnostic export was not created; no recovery state was changed.")).finally(() => setExporting(false));
+  };
   return (
     <main className="gate-shell gate-shell--recovery">
       <Brand />
@@ -165,6 +200,17 @@ export function RecoveryShell({
         </dl>
       </section>
       <p className="safe-note">No automatic repair or destructive action is performed in B0.4.</p>
+      <section aria-labelledby="recovery-tools" className="gate-panel">
+        <h2 id="recovery-tools">Recovery diagnostics</h2>
+        <p>Generate a privacy-filtered JSON diagnostic package for manual inspection or support.</p>
+        <div className="action-row">
+          <button className="secondary-action" onClick={inspectDiagnostics} type="button">Preview export</button>
+          <button className="primary-action" disabled={exporting} onClick={exportDiagnostics} type="button">{exporting ? "Exporting…" : "Create diagnostic export"}</button>
+        </div>
+        {diagnosticPreview ? <p className="system-caption">Output directory: {diagnosticPreview.outputDirectory}; sections: {diagnosticPreview.sections.length}</p> : null}
+        {diagnosticResult ? <p aria-live="polite" className="safe-note">Created: {diagnosticResult}</p> : null}
+        {diagnosticError ? <p role="alert" className="error-message">{diagnosticError}</p> : null}
+      </section>
     </main>
   );
 }
@@ -639,14 +685,62 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
             <dt>Knowledge Root</dt><dd>{workspace.knowledgeRootPath}</dd>
           </dl>
           <p className="safe-note">Changing the Active Vault requires a future preview-and-confirm flow.</p>
-        </section>
-        <WeeklyAcmBudgetSettings />
+         </section>
+         <ManualBackupSettings />
+         <WeeklyAcmBudgetSettings />
       </>
     );
   }
   if (page === "contests") return <ContestShelf navigate={navigate} />;
   if (page === "problems") return <ProblemIndex navigate={navigate} />;
   return <KnowledgePage navigate={navigate} />;
+}
+
+function ManualBackupSettings() {
+  const [preview, setPreview] = useState<ManualBackupPreviewDto | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [inventory, setInventory] = useState<BackupInventoryDto | null>(null);
+  const prepare = async () => {
+    try { setPreview(await previewManualBackup()); setMessage(null); }
+    catch { setMessage("Backup preview is temporarily unavailable."); }
+  };
+  const backup = async () => {
+    setBusy(true);
+    try {
+      const result = await createManualBackup();
+      setMessage(`Backup created: ${result.path}`);
+      setPreview(null);
+      setInventory(await loadBackupInventory());
+    } catch {
+      setMessage("Backup could not be created. No partial backup was published.");
+    } finally { setBusy(false); }
+  };
+  const inspect = async () => {
+    try { setInventory(await loadBackupInventory()); setMessage(null); }
+    catch { setMessage("Backup inventory is temporarily unavailable."); }
+  };
+  return (
+    <section aria-labelledby="manual-backup" className="content-panel">
+      <h2 id="manual-backup">System Facts backup</h2>
+      <p>Creates a SQLite-consistent snapshot. Markdown files are not copied or changed.</p>
+      <button className="secondary-action" onClick={() => void prepare()} type="button">Preview manual backup</button>
+      <button className="secondary-action" onClick={() => void inspect()} type="button">Inspect backup inventory</button>
+      {preview ? <div role="alertdialog">
+        <p>Schema {preview.schemaVersion}; destination <code>{preview.backupDirectory}</code>; filename prefix <code>{preview.filenamePrefix}</code>.</p>
+        <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "Creating backup…" : "Create backup"}</button>
+      </div> : null}
+      {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
+      {inventory ? <div>
+        <p>Retention preview: keep {inventory.dailyKeep} daily and {inventory.weeklyKeep} weekly snapshots. Manual and migration backups are protected.</p>
+        {inventory.entries.length === 0 ? <p>No published backups found.</p> : <ul className="backup-inventory">
+          {inventory.entries.map((entry) => <li key={entry.path}>
+            <code>{entry.path}</code><span>{entry.category} · {entry.integrityVerified ? "integrity verified" : "integrity failed"} · {entry.retention}</span>
+          </li>)}
+        </ul>}
+      </div> : null}
+    </section>
+  );
 }
 
 const knowledgeLevels: Array<[KnowledgeUnderstandingLevel, string]> = [
@@ -665,6 +759,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [nodes, setNodes] = useState<KnowledgeNodeDto[]>([]);
   const [anomalies, setAnomalies] = useState<KnowledgeNodeDto[]>([]);
+  const [identityConflicts, setIdentityConflicts] = useState<KnowledgeIdentityConflictDto[]>([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -673,6 +768,11 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [reevaluation, setReevaluation] = useState<{ shouldSuggest: boolean; qualifyingProblemCount: number } | null>(null);
+  const [repairingNodeId, setRepairingNodeId] = useState<string | null>(null);
+  const [relocationCandidates, setRelocationCandidates] = useState<Record<string, KnowledgeRelocationCandidateDto[]>>({});
+  const [confirmingDeletedNodeId, setConfirmingDeletedNodeId] = useState<string | null>(null);
+  const [deletePreviewNodeId, setDeletePreviewNodeId] = useState<string | null>(null);
+  const [resolvingConflict, setResolvingConflict] = useState(false);
 
   const refresh = useCallback(async (nextQuery = query) => {
     setLoading(true);
@@ -681,6 +781,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
       const index = await loadKnowledgeIndex(nextQuery);
       setNodes(index.nodes);
       setAnomalies(index.locationAnomalies);
+      setIdentityConflicts(index.identityConflicts ?? []);
     } catch {
       setError("Knowledge index is temporarily unavailable.");
     } finally {
@@ -719,6 +820,70 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
     }
   };
 
+  const findKnowledgeRelocationCandidates = async (knowledgeNodeId: string) => {
+    setError(null);
+    try {
+      const candidates = await loadKnowledgeRelocationCandidates(knowledgeNodeId);
+      setRelocationCandidates((current) => ({ ...current, [knowledgeNodeId]: candidates }));
+    } catch {
+      setError("Possible Knowledge locations could not be read fresh.");
+    }
+  };
+
+  const confirmKnowledgeRelocation = async (knowledgeNodeId: string, vaultRelativePath: string) => {
+    setRepairingNodeId(knowledgeNodeId);
+    setError(null);
+    try {
+      await rebindKnowledgeNode(knowledgeNodeId, vaultRelativePath);
+      setRelocationCandidates((current) => {
+        const next = { ...current };
+        delete next[knowledgeNodeId];
+        return next;
+      });
+      await refresh(query);
+    } catch {
+      setError("This Knowledge location could not be rebound. The binding was not changed.");
+    } finally {
+      setRepairingNodeId(null);
+    }
+  };
+
+  const confirmKnowledgeDeleted = async (knowledgeNodeId: string) => {
+    setConfirmingDeletedNodeId(knowledgeNodeId);
+    setError(null);
+    try {
+      await confirmKnowledgeMarkdownDeleted(knowledgeNodeId);
+      setDeletePreviewNodeId(null);
+      setRelocationCandidates((current) => {
+        const next = { ...current };
+        delete next[knowledgeNodeId];
+        return next;
+      });
+      await refresh(query);
+    } catch {
+      setError("Deletion could not be confirmed. The Knowledge identity and history were preserved.");
+    } finally {
+      setConfirmingDeletedNodeId(null);
+    }
+  };
+
+  const resolveIdentityConflict = async (conflict: KnowledgeIdentityConflictDto, restoreOldIdentity: boolean) => {
+    setResolvingConflict(true);
+    setError(null);
+    try {
+      await resolveKnowledgeIdentityConflict(
+        conflict.historicalKnowledgeNodeId,
+        conflict.candidateVaultRelativePath,
+        restoreOldIdentity,
+      );
+      await refresh(query);
+    } catch {
+      setError("This Knowledge identity conflict changed before confirmation. Nothing was reassigned.");
+    } finally {
+      setResolvingConflict(false);
+    }
+  };
+
   return (
     <>
       <PageHeader eyebrow="Markdown authority" headingRef={headingRef} title="Knowledge" />
@@ -736,7 +901,54 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
         <ul className="knowledge-node-list">
           {nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void openDetail(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}
         </ul>
-        {anomalies.length > 0 ? <p className="error-copy">{anomalies.length} bound Knowledge node(s) have a location anomaly and require recovery.</p> : null}
+        {anomalies.length > 0 ? (
+          <div className="recovery-actions">
+            <p className="error-copy">{anomalies.length} bound Knowledge node(s) have a location anomaly and require recovery.</p>
+            <ul className="knowledge-node-list">
+              {anomalies.map((node) => (
+                <li key={node.knowledgeNodeId}>
+                  <strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span>
+                  <button className="secondary-action" onClick={() => void findKnowledgeRelocationCandidates(node.knowledgeNodeId)} type="button">Find possible locations</button>
+                  {relocationCandidates[node.knowledgeNodeId] ? (
+                    <ul>
+                      {relocationCandidates[node.knowledgeNodeId].map((candidate) => (
+                        <li key={candidate.vaultRelativePath}>
+                          <code>{candidate.vaultRelativePath}</code>{candidate.occupied ? <span>Already bound to another Primary Object</span> : null}
+                          <button disabled={candidate.occupied || repairingNodeId !== null} onClick={() => void confirmKnowledgeRelocation(node.knowledgeNodeId, candidate.vaultRelativePath)} type="button">Use this Markdown</button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {deletePreviewNodeId === node.knowledgeNodeId ? (
+                    <div role="alertdialog" aria-labelledby={`confirm-knowledge-delete-${node.knowledgeNodeId}`}>
+                      <h3 id={`confirm-knowledge-delete-${node.knowledgeNodeId}`}>Confirm that this Knowledge Markdown was deleted?</h3>
+                      <p>This does not delete any file. The formal Knowledge Node leaves the current index, remaining WikiLinks become unresolved, and understanding history is preserved.</p>
+                      <button disabled={confirmingDeletedNodeId !== null} onClick={() => setDeletePreviewNodeId(null)} type="button">Cancel</button>
+                      <button className="danger-action" disabled={confirmingDeletedNodeId !== null} onClick={() => void confirmKnowledgeDeleted(node.knowledgeNodeId)} type="button">
+                        {confirmingDeletedNodeId === node.knowledgeNodeId ? "Revalidating absence…" : "Confirm deleted"}
+                      </button>
+                    </div>
+                  ) : <button className="danger-action" onClick={() => setDeletePreviewNodeId(node.knowledgeNodeId)} type="button">Confirm file was deleted…</button>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {identityConflicts.length > 0 ? (
+          <div className="recovery-actions">
+            <p className="error-copy">A Markdown name matches a previously deleted Knowledge Node. Identity was not chosen automatically.</p>
+            <ul className="knowledge-node-list">
+              {identityConflicts.map((conflict) => (
+                <li key={`${conflict.historicalKnowledgeNodeId}:${conflict.candidateVaultRelativePath}`}>
+                  <strong>{conflict.displayName}</strong><span>{conflict.candidateVaultRelativePath}</span>
+                  <p>Restore keeps the historical identity and understanding. Either choice rebuilds current relations only from this Markdown.</p>
+                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, true)} type="button">Restore old Knowledge Node</button>
+                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, false)} type="button">Create new Knowledge Node</button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
       {detail ? (
         <section aria-labelledby="knowledge-detail-title" className="content-panel knowledge-detail">
@@ -1148,6 +1360,11 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   const [openingNote, setOpeningNote] = useState(false);
   const [openNoteFailed, setOpenNoteFailed] = useState(false);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [relocationCandidates, setRelocationCandidates] = useState<PersonalNoteRelocationCandidateDto[] | null>(null);
+  const [relocationMessage, setRelocationMessage] = useState<string | null>(null);
+  const [repairingPath, setRepairingPath] = useState<string | null>(null);
+  const [showMissingNoteDeleteConfirm, setShowMissingNoteDeleteConfirm] = useState(false);
+  const [confirmingMissingNoteDelete, setConfirmingMissingNoteDelete] = useState(false);
   const [lifecycleAction, setLifecycleAction] = useState<ProblemLifecycleActionDto | null>(null);
   const [lifecycleMessage, setLifecycleMessage] = useState<string | null>(null);
   const [showDeletePreview, setShowDeletePreview] = useState(false);
@@ -1270,6 +1487,58 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setCopyMessage("Note path copied.");
     } catch {
       setCopyMessage(`Copy this note path: ${displayedNotePath}`);
+    }
+  };
+  const findRelocationCandidates = async () => {
+    setRelocationMessage(null);
+    try {
+      setRelocationCandidates(await getPersonalNoteRelocationCandidates(contestId, index));
+    } catch {
+      setRelocationMessage("Possible locations could not be listed. The existing binding and System Facts were not changed.");
+    }
+  };
+  const confirmRelocationCandidate = async (vaultRelativePath: string) => {
+    if (repairingPath) return;
+    setRepairingPath(vaultRelativePath);
+    setRelocationMessage(null);
+    try {
+      await rebindPersonalNote(contestId, index, vaultRelativePath);
+      setRelocationCandidates(null);
+      setRelocationMessage("The selected Markdown was revalidated and the binding was restored.");
+      await refreshPersonalNote();
+    } catch (error) {
+      const code = String(error);
+      setRelocationMessage(code.includes("occupied")
+        ? "That Markdown is already bound to another Problem and cannot be taken over."
+        : "The selected Markdown could not be safely rebound. The previous binding and System Facts were preserved.");
+    } finally {
+      setRepairingPath(null);
+    }
+  };
+  const confirmMissingNoteDeleted = async () => {
+    if (confirmingMissingNoteDelete) return;
+    setConfirmingMissingNoteDelete(true);
+    setRelocationMessage(null);
+    try {
+      const lifecycle = await confirmPersonalNoteDeleted(contestId, index);
+      setDetail((current) => current ? {
+        ...current,
+        identityType: "lightweight",
+        personalNote: null,
+        lifecycle,
+      } : current);
+      setNoteReadState(null);
+      setShowMissingNoteDeleteConfirm(false);
+      setNoteMessage("The missing Personal Markdown was confirmed deleted. Historical facts were preserved.");
+    } catch (error) {
+      const code = String(error);
+      setRelocationMessage(code.includes("review_in_progress")
+        ? "The note cannot be confirmed deleted while a Review Attempt is in progress."
+        : code.includes("vault_unavailable")
+          ? "The Vault is unavailable, so absence cannot be confirmed as deletion."
+          : "Deletion could not be confirmed. The Personal identity and existing System Facts were preserved.");
+    } finally {
+      setConfirmingMissingNoteDelete(false);
     }
   };
   const runLifecycleAction = async (action: ProblemLifecycleActionDto) => {
@@ -1482,7 +1751,34 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       ) : noteReadState.state === "vaultUnavailable" ? (
         <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>
       ) : noteReadState.state === "locationAnomaly" ? (
-        <section className="empty-state" role="status"><h2>Note location needs attention</h2><p>The original path is missing and no unique relocation was found. The Personal Problem was not deleted or downgraded.</p></section>
+        <section className="empty-state" role="status">
+          <h2>Note location needs attention</h2>
+          <p>The original path is missing and no unique relocation was found. The Personal Problem was not deleted or downgraded.</p>
+          <button className="secondary-action" onClick={() => void findRelocationCandidates()} type="button">Find possible locations</button>
+          {relocationCandidates ? relocationCandidates.length ? (
+            <ul className="detail-list" aria-label="Possible note locations">
+              {relocationCandidates.map((candidate) => <li key={candidate.vaultRelativePath}>
+                <span>{candidate.vaultRelativePath}{candidate.occupied ? " · already bound" : ""}</span>
+                <button disabled={candidate.occupied || repairingPath !== null} onClick={() => void confirmRelocationCandidate(candidate.vaultRelativePath)} type="button">
+                  {repairingPath === candidate.vaultRelativePath ? "Revalidating…" : "Use this Markdown"}
+                </button>
+              </li>)}
+            </ul>
+          ) : <p>No Markdown files are currently available for manual relinking.</p> : null}
+          {relocationMessage ? <p aria-live="polite" className="system-caption">{relocationMessage}</p> : null}
+          {showMissingNoteDeleteConfirm ? (
+            <div role="alertdialog" aria-labelledby="confirm-missing-note-title">
+              <h3 id="confirm-missing-note-title">Confirm that this Markdown was deleted?</h3>
+              <p>This does not delete any file. It removes the missing binding, returns the Problem to Lightweight, exits its learning lifecycle, and preserves Contest and Review history.</p>
+              <div className="action-row">
+                <button disabled={confirmingMissingNoteDelete} onClick={() => setShowMissingNoteDeleteConfirm(false)} type="button">Cancel</button>
+                <button className="danger-action" disabled={confirmingMissingNoteDelete} onClick={() => void confirmMissingNoteDeleted()} type="button">
+                  {confirmingMissingNoteDelete ? "Revalidating absence…" : "Confirm deleted"}
+                </button>
+              </div>
+            </div>
+          ) : <button className="danger-action" onClick={() => setShowMissingNoteDeleteConfirm(true)} type="button">Confirm file was deleted…</button>}
+        </section>
       ) : (
         <section className="content-panel" aria-label="Personal Markdown projection">
           <h2>My note</h2>

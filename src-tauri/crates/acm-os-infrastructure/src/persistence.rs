@@ -15,11 +15,12 @@ use acm_os_application::{
     ContestImportPersistenceError, ContestImportPort, ContestImportStatus, ContestManagementError,
     ContestManagementPort, ContestProblemCorrectionInput, ContestProblemDetailItem,
     ContestProblemFactInput, ContestReadError, ContestReadPort, ContestShelfItem,
-    CreatedPersonalNoteFile, ExtraProblemLinkTarget, KnowledgeCandidateDisposition,
-    KnowledgeCandidateError, KnowledgeCandidatePort, KnowledgeCandidateProjection,
-    KnowledgeDetailPort, KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort,
-    KnowledgeIndexProjection, KnowledgeLinkProjection, KnowledgeLinkResolution,
-    KnowledgeLocationState, KnowledgeNodeProjection, KnowledgeRelationPort,
+    CreatedPersonalNoteFile, ExtraProblemLinkTarget, KnowledgeBindingRepairError,
+    KnowledgeBindingRepairPort, KnowledgeCandidateDisposition, KnowledgeCandidateError,
+    KnowledgeCandidatePort, KnowledgeCandidateProjection, KnowledgeDetailPort,
+    KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort, KnowledgeIndexProjection,
+    KnowledgeLinkProjection, KnowledgeLinkResolution, KnowledgeLocationState,
+    KnowledgeNodeProjection, KnowledgeRelationPort, KnowledgeRelocationCandidate,
     KnowledgeUnderstandingPort, KnowledgeUnderstandingProjection, LightweightProblemDetail,
     LightweightProblemItem, LocalStatementAsset, PersistedContestImport, PersonalNoteBinding,
     PersonalNoteCreationContext, PersonalNoteDeletionError, PersonalNoteDeletionPort,
@@ -37,12 +38,13 @@ use acm_os_application::{
     WeeklyAcmBudgetSchedule, WorkspaceConfiguration, WorkspaceConfigurationPort,
     WorkspacePathResolutionError, WorkspacePersistenceError,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
 use crate::file_binding::{
-    markdown_files, resolve_personal_note, sha256_hex, windows_file_key, BindingResolution,
-    ResolvedNoteFile,
+    markdown_files, resolve_personal_note, resolve_relative_markdown, sha256_hex, windows_file_key,
+    BindingResolution, ResolvedNoteFile,
 };
 use crate::knowledge_index::{
     discover_markdown, extract_wikilink_targets, replace_index, resolve_links,
@@ -54,6 +56,8 @@ const DATABASE_FILENAME: &str = "system-facts.sqlite3";
 const STARTUP_LOCK_FILENAME: &str = ".database-startup.lock";
 const STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const DATABASE_RESTORE_ROLLBACK_SUFFIX: &str = ".restore-rollback";
+const DATABASE_RESTORE_INTENT_FILENAME: &str = "restore-intent.json";
 
 type SqliteColumnContract = (i64, String, String, i64, Option<String>, i64, i64);
 
@@ -63,21 +67,340 @@ pub struct DatabaseRuntime {
     status: StartupGateStatus,
     markdown_projection_cache: Mutex<HashMap<String, ProblemMarkdownProjection>>,
     recovery_root: Option<PathBuf>,
+    app_private_data: Option<PathBuf>,
+    daily_backup_lock: tokio::sync::Mutex<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreDiagnostics {
+    pub pending_intent: bool,
+    pub rollback_artifact_path: Option<String>,
+    pub rollback_integrity_verified: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreRollbackCleanupError {
+    Unavailable,
+    PendingIntent,
+    InvalidPath,
+    IntegrityFailed,
+    DeleteFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemHealthSnapshot {
+    pub pending_critical_operation_count: u64,
+    pub backup_file_count: u64,
+    pub pending_restore_intent: bool,
+    pub rollback_integrity_verified: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RestoreIntent {
+    staging_path: String,
+    pre_restore_snapshot_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreIntentError {
+    AlreadyPending,
+    WriteFailed,
+    Invalid,
+}
+
+fn write_restore_intent(
+    app_private_data: &Path,
+    staging_path: &Path,
+    pre_restore_snapshot_path: &Path,
+) -> Result<(), RestoreIntentError> {
+    let intent_path = app_private_data.join(DATABASE_RESTORE_INTENT_FILENAME);
+    if intent_path.exists() {
+        return Err(RestoreIntentError::AlreadyPending);
+    }
+    let intent = RestoreIntent {
+        staging_path: staging_path.to_string_lossy().into_owned(),
+        pre_restore_snapshot_path: pre_restore_snapshot_path.to_string_lossy().into_owned(),
+    };
+    let partial_path = app_private_data.join("restore-intent.json.partial");
+    let bytes = serde_json::to_vec(&intent).map_err(|_| RestoreIntentError::WriteFailed)?;
+    std::fs::write(&partial_path, bytes).map_err(|_| RestoreIntentError::WriteFailed)?;
+    std::fs::rename(&partial_path, &intent_path).map_err(|_| {
+        let _ = std::fs::remove_file(&partial_path);
+        RestoreIntentError::WriteFailed
+    })
+}
+
+fn read_restore_intent(
+    app_private_data: &Path,
+) -> Result<Option<RestoreIntent>, RestoreIntentError> {
+    let path = app_private_data.join(DATABASE_RESTORE_INTENT_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|_| RestoreIntentError::Invalid)?;
+    let intent = serde_json::from_slice(&bytes).map_err(|_| RestoreIntentError::Invalid)?;
+    Ok(Some(intent))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedDatabaseSwap {
+    rollback_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseSwapError {
+    CurrentDatabaseUnavailable,
+    StagingDatabaseUnavailable,
+    PreRestoreSnapshotUnavailable,
+    RollbackAlreadyExists,
+    CurrentDatabaseBusy,
+    SwapFailed,
+    RollbackFailed,
+}
+
+// This primitive is intentionally separate from DatabaseRuntime/IPC. The caller must have
+// closed all live SQLite connections and verified the candidate before invoking it.
+fn swap_verified_database_with_staging(
+    database_path: &Path,
+    staging_path: &Path,
+    pre_restore_snapshot_path: &Path,
+) -> Result<VerifiedDatabaseSwap, DatabaseSwapError> {
+    let current_metadata = std::fs::metadata(database_path)
+        .map_err(|_| DatabaseSwapError::CurrentDatabaseUnavailable)?;
+    let staging_metadata = std::fs::metadata(staging_path)
+        .map_err(|_| DatabaseSwapError::StagingDatabaseUnavailable)?;
+    let snapshot_metadata = std::fs::metadata(pre_restore_snapshot_path)
+        .map_err(|_| DatabaseSwapError::PreRestoreSnapshotUnavailable)?;
+    if !current_metadata.is_file() {
+        return Err(DatabaseSwapError::CurrentDatabaseUnavailable);
+    }
+    if !staging_metadata.is_file() {
+        return Err(DatabaseSwapError::StagingDatabaseUnavailable);
+    }
+    if !snapshot_metadata.is_file() {
+        return Err(DatabaseSwapError::PreRestoreSnapshotUnavailable);
+    }
+    if database_path.with_extension("sqlite3-wal").exists()
+        || database_path.with_extension("sqlite3-shm").exists()
+    {
+        return Err(DatabaseSwapError::CurrentDatabaseBusy);
+    }
+
+    let rollback_path = PathBuf::from(format!(
+        "{}{}",
+        database_path.to_string_lossy(),
+        DATABASE_RESTORE_ROLLBACK_SUFFIX
+    ));
+    if rollback_path.exists() {
+        return Err(DatabaseSwapError::RollbackAlreadyExists);
+    }
+
+    std::fs::rename(database_path, &rollback_path).map_err(|_| DatabaseSwapError::SwapFailed)?;
+    if let Err(error) = std::fs::rename(staging_path, database_path) {
+        if std::fs::rename(&rollback_path, database_path).is_err() {
+            return Err(DatabaseSwapError::RollbackFailed);
+        }
+        let _ = error;
+        return Err(DatabaseSwapError::SwapFailed);
+    }
+
+    Ok(VerifiedDatabaseSwap { rollback_path })
+}
+
+fn restore_path_is_under(root: &Path, candidate: &Path) -> Result<PathBuf, StartupRecoveryReason> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|_| StartupRecoveryReason::RestoreIntentInvalid)?;
+    let canonical_candidate = std::fs::canonicalize(candidate)
+        .map_err(|_| StartupRecoveryReason::RestoreIntentInvalid)?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(StartupRecoveryReason::RestoreIntentInvalid);
+    }
+    Ok(canonical_candidate)
+}
+
+async fn apply_pending_restore_intent(
+    app_private_data: &Path,
+    database_path: &Path,
+) -> Result<(), StartupRecoveryReason> {
+    let Some(intent) = read_restore_intent(app_private_data)
+        .map_err(|_| StartupRecoveryReason::RestoreIntentInvalid)?
+    else {
+        return Ok(());
+    };
+    let backups_root = app_private_data.join("backups");
+    let pre_restore_root = backups_root.join("pre-restore");
+    let staging_path = restore_path_is_under(&pre_restore_root, Path::new(&intent.staging_path))?;
+    let snapshot_path = restore_path_is_under(
+        &pre_restore_root,
+        Path::new(&intent.pre_restore_snapshot_path),
+    )?;
+    let staging_metadata = std::fs::metadata(&staging_path)
+        .map_err(|_| StartupRecoveryReason::RestoreIntentInvalid)?;
+    if !staging_metadata.is_file()
+        || staging_path.extension().and_then(|value| value.to_str()) != Some("sqlite3")
+    {
+        return Err(StartupRecoveryReason::RestoreIntentInvalid);
+    }
+
+    let staging_pool = connect_read_only(&staging_path)
+        .await
+        .map_err(|_| StartupRecoveryReason::RestoreFailed)?;
+    let staging_check = async {
+        verify_integrity(&staging_pool).await?;
+        let schema_version = inspect_schema_version(&staging_pool).await?;
+        let supported = supported_schema_version();
+        if schema_version != supported {
+            return Err(StartupRecoveryReason::RestoreFailed);
+        }
+        validate_schema_contract(&staging_pool, schema_version).await
+    }
+    .await;
+    staging_pool.close().await;
+    staging_check.map_err(|_| StartupRecoveryReason::RestoreFailed)?;
+
+    let swap = swap_verified_database_with_staging(database_path, &staging_path, &snapshot_path)
+        .map_err(|_| StartupRecoveryReason::RestoreFailed)?;
+    let current_pool = connect_read_only(database_path)
+        .await
+        .map_err(|_| StartupRecoveryReason::RestoreFailed)?;
+    let current_check = verify_integrity(&current_pool).await;
+    current_pool.close().await;
+    if current_check.is_err() {
+        let _ = std::fs::remove_file(database_path);
+        if std::fs::rename(&swap.rollback_path, database_path).is_err() {
+            return Err(StartupRecoveryReason::RestoreFailed);
+        }
+        return Err(StartupRecoveryReason::RestoreFailed);
+    }
+
+    std::fs::remove_file(app_private_data.join(DATABASE_RESTORE_INTENT_FILENAME))
+        .map_err(|_| StartupRecoveryReason::RestoreIntentCleanupFailed)
 }
 
 impl DatabaseRuntime {
     pub fn recovery(reason: StartupRecoveryReason) -> Self {
+        Self::recovery_with_app_private_data(reason, None)
+    }
+
+    fn recovery_with_app_private_data(
+        reason: StartupRecoveryReason,
+        app_private_data: Option<PathBuf>,
+    ) -> Self {
         Self {
             _pool: None,
             _startup_lock: None,
             status: StartupGateStatus::RecoveryRequired { reason },
             markdown_projection_cache: Mutex::new(HashMap::new()),
             recovery_root: None,
+            app_private_data,
+            daily_backup_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub fn status(&self) -> &StartupGateStatus {
         &self.status
+    }
+
+    pub fn has_pending_restore_intent(&self) -> bool {
+        self.app_private_data
+            .as_ref()
+            .is_some_and(|root| root.join(DATABASE_RESTORE_INTENT_FILENAME).is_file())
+    }
+
+    pub fn restore_diagnostics(&self) -> RestoreDiagnostics {
+        let Some(root) = self.app_private_data.as_ref() else {
+            return RestoreDiagnostics {
+                pending_intent: false,
+                rollback_artifact_path: None,
+                rollback_integrity_verified: None,
+            };
+        };
+        let rollback = root.join(format!(
+            "{}{}",
+            DATABASE_FILENAME, DATABASE_RESTORE_ROLLBACK_SUFFIX
+        ));
+        RestoreDiagnostics {
+            pending_intent: self.has_pending_restore_intent(),
+            rollback_artifact_path: rollback
+                .is_file()
+                .then(|| rollback.to_string_lossy().into_owned()),
+            rollback_integrity_verified: None,
+        }
+    }
+
+    pub async fn inspect_restore_diagnostics(&self) -> RestoreDiagnostics {
+        let mut diagnostics = self.restore_diagnostics();
+        let Some(path) = diagnostics.rollback_artifact_path.as_ref() else {
+            return diagnostics;
+        };
+        diagnostics.rollback_integrity_verified = match connect_read_only(Path::new(path)).await {
+            Ok(pool) => {
+                let verified = verify_integrity(&pool).await.is_ok();
+                pool.close().await;
+                Some(verified)
+            }
+            Err(_) => Some(false),
+        };
+        diagnostics
+    }
+
+    pub async fn system_health_snapshot(&self) -> Result<SystemHealthSnapshot, ()> {
+        let pool = self._pool.as_ref().ok_or(())?;
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM critical_operations WHERE operation_status IN ('pending', 'needs_recovery')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ())?;
+        let root = self.app_private_data.as_ref().ok_or(())?.join("backups");
+        let files = tokio::task::spawn_blocking(move || discover_backup_files(&root))
+            .await
+            .map_err(|_| ())
+            .and_then(|result| result.map_err(|_| ()))?;
+        let restore = self.inspect_restore_diagnostics().await;
+        Ok(SystemHealthSnapshot {
+            pending_critical_operation_count: u64::try_from(pending).map_err(|_| ())?,
+            backup_file_count: u64::try_from(files.len()).map_err(|_| ())?,
+            pending_restore_intent: restore.pending_intent,
+            rollback_integrity_verified: restore.rollback_integrity_verified,
+        })
+    }
+
+    pub async fn confirm_restore_rollback_cleanup(
+        &self,
+        requested_path: &str,
+    ) -> Result<(), RestoreRollbackCleanupError> {
+        if self.has_pending_restore_intent() {
+            return Err(RestoreRollbackCleanupError::PendingIntent);
+        }
+        let Some(root) = self.app_private_data.as_ref() else {
+            return Err(RestoreRollbackCleanupError::Unavailable);
+        };
+        let expected = root.join(format!(
+            "{}{}",
+            DATABASE_FILENAME, DATABASE_RESTORE_ROLLBACK_SUFFIX
+        ));
+        let requested = Path::new(requested_path);
+        let canonical_expected = std::fs::canonicalize(&expected)
+            .map_err(|_| RestoreRollbackCleanupError::Unavailable)?;
+        let canonical_requested = std::fs::canonicalize(requested)
+            .map_err(|_| RestoreRollbackCleanupError::InvalidPath)?;
+        if canonical_requested != canonical_expected {
+            return Err(RestoreRollbackCleanupError::InvalidPath);
+        }
+        let metadata = std::fs::metadata(&canonical_expected)
+            .map_err(|_| RestoreRollbackCleanupError::Unavailable)?;
+        if !metadata.is_file() {
+            return Err(RestoreRollbackCleanupError::InvalidPath);
+        }
+        let pool = connect_read_only(&canonical_expected)
+            .await
+            .map_err(|_| RestoreRollbackCleanupError::IntegrityFailed)?;
+        let integrity = verify_integrity(&pool).await;
+        pool.close().await;
+        integrity.map_err(|_| RestoreRollbackCleanupError::IntegrityFailed)?;
+        std::fs::remove_file(canonical_expected)
+            .map_err(|_| RestoreRollbackCleanupError::DeleteFailed)
     }
 
     fn pool(&self) -> Result<&SqlitePool, WorkspacePersistenceError> {
@@ -156,6 +479,13 @@ impl DatabaseRuntime {
         state: &str,
         expected: &PersonalNoteBinding,
     ) -> Result<(), PersonalNoteReadError> {
+        if state == "location_anomaly" {
+            let local_date = crate::current_local_date()
+                .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+            self.ensure_daily_backup(local_date)
+                .await
+                .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
+        }
         let result = sqlx::query(
             "UPDATE file_bindings \
              SET binding_state = ?1, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
@@ -256,7 +586,7 @@ impl KnowledgeIndexPort for DatabaseRuntime {
             .ok_or(KnowledgeIndexError::WorkspaceUnavailable)?;
         let active_vault = workspace.active_vault_path().to_owned();
         let knowledge_root = workspace.knowledge_root_path().to_owned();
-        let (discovered, relocation_candidates) =
+        let (mut discovered, relocation_candidates) =
             tokio::task::spawn_blocking(move || discover_markdown(&active_vault, &knowledge_root))
                 .await
                 .map_err(|_| KnowledgeIndexError::KnowledgeRootUnavailable)??;
@@ -265,14 +595,44 @@ impl KnowledgeIndexPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(KnowledgeIndexError::PersistenceUnavailable)?;
-        let stored_rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT knowledge_node_id, vault_relative_path, windows_file_key, content_digest \
-             FROM knowledge_file_bindings ORDER BY knowledge_node_id",
+        let deleted: Vec<(String, String)> = sqlx::query_as(
+            "SELECT knowledge_node_id, vault_relative_path FROM knowledge_file_bindings \
+             WHERE location_state = 'confirmed_deleted' ORDER BY knowledge_node_id",
         )
         .fetch_all(pool)
         .await
         .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
-        let stored = stored_rows
+        let mut identity_conflicts = Vec::new();
+        discovered.retain(|file| {
+            let candidate_name = std::path::Path::new(&file.relative_path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if let Some((node_id, _)) = deleted.iter().find(|(_, old_path)| {
+                std::path::Path::new(old_path)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(candidate_name))
+            }) {
+                identity_conflicts.push(acm_os_application::KnowledgeIdentityConflict {
+                    historical_knowledge_node_id: node_id.clone(),
+                    display_name: candidate_name.to_owned(),
+                    candidate_vault_relative_path: file.relative_path.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+        let stored_rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT knowledge_node_id, vault_relative_path, windows_file_key, content_digest \
+             FROM knowledge_file_bindings WHERE location_state IN ('ready', 'location_anomaly') \
+             ORDER BY knowledge_node_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        let stored: Vec<StoredKnowledgeBinding> = stored_rows
             .into_iter()
             .map(
                 |(node_id, relative_path, file_key, digest)| StoredKnowledgeBinding {
@@ -283,12 +643,20 @@ impl KnowledgeIndexPort for DatabaseRuntime {
                 },
             )
             .collect();
+        if !stored.is_empty() {
+            let local_date = crate::current_local_date()
+                .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+            self.ensure_daily_backup(local_date)
+                .await
+                .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        }
         let mut transaction = pool
             .begin()
             .await
             .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
-        let projection =
+        let mut projection =
             replace_index(&mut transaction, stored, discovered, relocation_candidates).await?;
+        projection.identity_conflicts = identity_conflicts;
         transaction
             .commit()
             .await
@@ -338,6 +706,427 @@ impl KnowledgeIndexPort for DatabaseRuntime {
                 },
             )
             .collect())
+    }
+}
+
+impl KnowledgeBindingRepairPort for DatabaseRuntime {
+    async fn knowledge_relocation_candidates(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<Vec<KnowledgeRelocationCandidate>, KnowledgeBindingRepairError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(Option<String>, String)> = sqlx::query_as(
+            "SELECT ws.active_vault_path, b.location_state FROM knowledge_file_bindings b \
+             LEFT JOIN workspace_settings ws ON ws.singleton = 1 WHERE b.knowledge_node_id = ?1",
+        )
+        .bind(knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let (active_vault, location_state) =
+            row.ok_or(KnowledgeBindingRepairError::KnowledgeNodeNotFound)?;
+        if location_state != "location_anomaly" {
+            return Err(KnowledgeBindingRepairError::LocationAnomalyRequired);
+        }
+        let active_vault = active_vault.ok_or(KnowledgeBindingRepairError::WorkspaceUnavailable)?;
+        let occupied: Vec<String> = sqlx::query_scalar(
+            "SELECT vault_relative_path FROM file_bindings \
+             UNION SELECT vault_relative_path FROM knowledge_file_bindings WHERE knowledge_node_id <> ?1",
+        )
+        .bind(knowledge_node_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        tokio::task::spawn_blocking(move || {
+            let vault = std::fs::canonicalize(&active_vault)
+                .map_err(|_| KnowledgeBindingRepairError::VaultUnavailable)?;
+            let occupied = occupied
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            markdown_files(&vault)
+                .map_err(|_| KnowledgeBindingRepairError::VaultUnavailable)?
+                .into_iter()
+                .map(|path| {
+                    let relative_path = path
+                        .strip_prefix(&vault)
+                        .map_err(|_| KnowledgeBindingRepairError::CandidateUnavailable)?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    Ok(KnowledgeRelocationCandidate {
+                        occupied: occupied.contains(&relative_path),
+                        vault_relative_path: relative_path,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::VaultUnavailable)?
+    }
+
+    async fn rebind_knowledge_node(
+        &self,
+        knowledge_node_id: &str,
+        vault_relative_path: &str,
+    ) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(Option<String>, String, String, String)> = sqlx::query_as(
+            "SELECT ws.active_vault_path, b.vault_relative_path, b.content_digest, b.location_state \
+             FROM knowledge_file_bindings b LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+             WHERE b.knowledge_node_id = ?1",
+        )
+        .bind(knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let (active_vault, old_path, old_digest, location_state) =
+            row.ok_or(KnowledgeBindingRepairError::KnowledgeNodeNotFound)?;
+        if location_state != "location_anomaly" {
+            return Err(KnowledgeBindingRepairError::LocationAnomalyRequired);
+        }
+        let active_vault = active_vault.ok_or(KnowledgeBindingRepairError::WorkspaceUnavailable)?;
+        let selected = vault_relative_path.to_owned();
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_relative_markdown(&active_vault, &selected)
+        })
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::CandidateUnavailable)?
+        .map_err(|_| KnowledgeBindingRepairError::CandidateUnavailable)?;
+
+        let occupied_by_problem: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM file_bindings WHERE vault_relative_path = ?1",
+        )
+        .bind(&resolved.relative_path)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let occupied_by_knowledge: Option<String> = sqlx::query_scalar(
+            "SELECT knowledge_node_id FROM knowledge_file_bindings \
+             WHERE vault_relative_path = ?1 AND knowledge_node_id <> ?2",
+        )
+        .bind(&resolved.relative_path)
+        .bind(knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by_problem.is_some() || occupied_by_knowledge.is_some() {
+            return Err(KnowledgeBindingRepairError::CandidateOccupied);
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let occupied_by_problem: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM file_bindings WHERE vault_relative_path = ?1",
+        )
+        .bind(&resolved.relative_path)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let occupied_by_knowledge: Option<String> = sqlx::query_scalar(
+            "SELECT knowledge_node_id FROM knowledge_file_bindings \
+             WHERE vault_relative_path = ?1 AND knowledge_node_id <> ?2",
+        )
+        .bind(&resolved.relative_path)
+        .bind(knowledge_node_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by_problem.is_some() || occupied_by_knowledge.is_some() {
+            return Err(KnowledgeBindingRepairError::CandidateOccupied);
+        }
+        let result = sqlx::query(
+            "UPDATE knowledge_file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, \
+                 content_digest = ?3, location_state = 'ready', \
+                 updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE knowledge_node_id = ?4 AND vault_relative_path = ?5 AND content_digest = ?6 \
+               AND location_state = 'location_anomaly'",
+        )
+        .bind(&resolved.relative_path)
+        .bind(&resolved.windows_file_key)
+        .bind(&resolved.content_digest)
+        .bind(knowledge_node_id)
+        .bind(&old_path)
+        .bind(&old_digest)
+        .execute(&mut *transaction)
+        .await;
+        match result {
+            Ok(result) if result.rows_affected() == 1 => transaction
+                .commit()
+                .await
+                .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?,
+            Ok(_) => return Err(KnowledgeBindingRepairError::LocationAnomalyRequired),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                return Err(KnowledgeBindingRepairError::CandidateOccupied)
+            }
+            Err(_) => return Err(KnowledgeBindingRepairError::PersistenceUnavailable),
+        }
+
+        let relations = self
+            .rebuild_knowledge_relations()
+            .await
+            .map_err(|error| match error {
+                KnowledgeIndexError::WorkspaceUnavailable => {
+                    KnowledgeBindingRepairError::WorkspaceUnavailable
+                }
+                KnowledgeIndexError::KnowledgeRootUnavailable => {
+                    KnowledgeBindingRepairError::VaultUnavailable
+                }
+                KnowledgeIndexError::KnowledgeNodeNotFound => {
+                    KnowledgeBindingRepairError::KnowledgeNodeNotFound
+                }
+                KnowledgeIndexError::PersistenceUnavailable => {
+                    KnowledgeBindingRepairError::PersistenceUnavailable
+                }
+                KnowledgeIndexError::IntegrityViolation => {
+                    KnowledgeBindingRepairError::IntegrityViolation
+                }
+            })?;
+        drop(relations);
+        load_knowledge_node(pool, knowledge_node_id)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?
+            .into_iter()
+            .next()
+            .ok_or(KnowledgeBindingRepairError::KnowledgeNodeNotFound)
+    }
+
+    async fn confirm_knowledge_markdown_deleted(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<(), KnowledgeBindingRepairError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(Option<String>, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT ws.active_vault_path, b.vault_relative_path, b.windows_file_key, \
+                    b.content_digest, b.location_state \
+             FROM knowledge_file_bindings b LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+             WHERE b.knowledge_node_id = ?1",
+        )
+        .bind(knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let (active_vault, relative_path, file_key, digest, location_state) =
+            row.ok_or(KnowledgeBindingRepairError::KnowledgeNodeNotFound)?;
+        if location_state != "location_anomaly" {
+            return Err(KnowledgeBindingRepairError::LocationAnomalyRequired);
+        }
+        let active_vault = active_vault.ok_or(KnowledgeBindingRepairError::WorkspaceUnavailable)?;
+        let check_vault = active_vault.clone();
+        let check_path = relative_path.clone();
+        let check_digest = digest.clone();
+        let resolution = tokio::task::spawn_blocking(move || {
+            resolve_personal_note(
+                &check_vault,
+                &check_path,
+                file_key.as_deref(),
+                &check_digest,
+            )
+        })
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::VaultUnavailable)?;
+        match resolution {
+            BindingResolution::LocationAnomaly => {}
+            BindingResolution::Ready(_) => {
+                return Err(KnowledgeBindingRepairError::LocationAnomalyRequired)
+            }
+            BindingResolution::VaultUnavailable => {
+                return Err(KnowledgeBindingRepairError::VaultUnavailable)
+            }
+            BindingResolution::InvalidBinding => {
+                return Err(KnowledgeBindingRepairError::IntegrityViolation)
+            }
+        }
+
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let updated = sqlx::query(
+            "UPDATE knowledge_file_bindings SET location_state = 'confirmed_deleted', \
+                 updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE knowledge_node_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3 \
+               AND location_state = 'location_anomaly'",
+        )
+        .bind(knowledge_node_id)
+        .bind(&relative_path)
+        .bind(&digest)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(KnowledgeBindingRepairError::LocationAnomalyRequired);
+        }
+        sqlx::query("DELETE FROM knowledge_discovery_index WHERE knowledge_node_id = ?1")
+            .bind(knowledge_node_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        self.rebuild_knowledge_relations()
+            .await
+            .map_err(|error| match error {
+                KnowledgeIndexError::WorkspaceUnavailable => {
+                    KnowledgeBindingRepairError::WorkspaceUnavailable
+                }
+                KnowledgeIndexError::KnowledgeRootUnavailable => {
+                    KnowledgeBindingRepairError::VaultUnavailable
+                }
+                KnowledgeIndexError::KnowledgeNodeNotFound => {
+                    KnowledgeBindingRepairError::KnowledgeNodeNotFound
+                }
+                KnowledgeIndexError::PersistenceUnavailable => {
+                    KnowledgeBindingRepairError::PersistenceUnavailable
+                }
+                KnowledgeIndexError::IntegrityViolation => {
+                    KnowledgeBindingRepairError::IntegrityViolation
+                }
+            })?;
+        Ok(())
+    }
+
+    async fn resolve_knowledge_identity_conflict(
+        &self,
+        historical_knowledge_node_id: &str,
+        candidate_vault_relative_path: &str,
+        restore_old_identity: bool,
+    ) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT b.vault_relative_path, ws.active_vault_path FROM knowledge_file_bindings b \
+             LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+             WHERE b.knowledge_node_id = ?1 AND b.location_state = 'confirmed_deleted'",
+        )
+        .bind(historical_knowledge_node_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let (old_path, active_vault) =
+            row.ok_or(KnowledgeBindingRepairError::IdentityConflictRequired)?;
+        let old_name = Path::new(&old_path)
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .ok_or(KnowledgeBindingRepairError::IntegrityViolation)?
+            .to_owned();
+        let active_vault = active_vault.ok_or(KnowledgeBindingRepairError::WorkspaceUnavailable)?;
+        let selected = candidate_vault_relative_path.to_owned();
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_relative_markdown(&active_vault, &selected)
+        })
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::CandidateUnavailable)?
+        .map_err(|_| KnowledgeBindingRepairError::CandidateUnavailable)?;
+        let candidate_name = Path::new(&resolved.relative_path)
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .ok_or(KnowledgeBindingRepairError::IntegrityViolation)?;
+        if !candidate_name.eq_ignore_ascii_case(&old_name) {
+            return Err(KnowledgeBindingRepairError::IdentityConflictRequired);
+        }
+        let occupied: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM file_bindings WHERE vault_relative_path = ?1) + \
+                    (SELECT COUNT(*) FROM knowledge_file_bindings WHERE vault_relative_path = ?1 AND knowledge_node_id <> ?2)",
+        )
+        .bind(&resolved.relative_path)
+        .bind(historical_knowledge_node_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if occupied != 0 {
+            return Err(KnowledgeBindingRepairError::CandidateOccupied);
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let occupied: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM file_bindings WHERE vault_relative_path = ?1) + \
+                    (SELECT COUNT(*) FROM knowledge_file_bindings WHERE vault_relative_path = ?1 AND knowledge_node_id <> ?2)",
+        ).bind(&resolved.relative_path).bind(historical_knowledge_node_id).fetch_one(&mut *tx).await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if occupied != 0 {
+            return Err(KnowledgeBindingRepairError::CandidateOccupied);
+        }
+        if restore_old_identity {
+            let changed = sqlx::query(
+                "UPDATE knowledge_file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, \
+                 content_digest = ?3, location_state = 'ready', updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE knowledge_node_id = ?4 AND location_state = 'confirmed_deleted'",
+            ).bind(&resolved.relative_path).bind(&resolved.windows_file_key).bind(&resolved.content_digest)
+             .bind(historical_knowledge_node_id).execute(&mut *tx).await
+             .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+            if changed.rows_affected() != 1 {
+                return Err(KnowledgeBindingRepairError::IdentityConflictRequired);
+            }
+        } else {
+            let changed = sqlx::query(
+                "UPDATE knowledge_file_bindings SET vault_relative_path = ?1, \
+                 location_state = 'confirmed_deleted_replaced', \
+                 updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE knowledge_node_id = ?2 AND location_state = 'confirmed_deleted'",
+            )
+            .bind(format!(".acm-os-deleted/{historical_knowledge_node_id}"))
+            .bind(historical_knowledge_node_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+            if changed.rows_affected() != 1 {
+                return Err(KnowledgeBindingRepairError::IdentityConflictRequired);
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        self.rebuild_knowledge_relations()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        let index = self
+            .rebuild_knowledge_index()
+            .await
+            .map_err(|_| KnowledgeBindingRepairError::PersistenceUnavailable)?;
+        if restore_old_identity {
+            index
+                .nodes
+                .into_iter()
+                .find(|n| n.knowledge_node_id == historical_knowledge_node_id)
+        } else {
+            index
+                .nodes
+                .into_iter()
+                .find(|n| n.vault_relative_path == resolved.relative_path)
+        }
+        .ok_or(KnowledgeBindingRepairError::KnowledgeNodeNotFound)
     }
 }
 
@@ -479,6 +1268,11 @@ impl KnowledgeUnderstandingPort for DatabaseRuntime {
             .transpose()?;
         let decision =
             acm_os_domain::confirm_knowledge_understanding(previous, selected, confirmed_on);
+        let local_date =
+            crate::current_local_date().map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
         sqlx::query("INSERT INTO knowledge_understanding_states (knowledge_node_id, current_level, historical_highest_level, first_reached_highest_local_date) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(knowledge_node_id) DO UPDATE SET current_level = excluded.current_level, historical_highest_level = excluded.historical_highest_level, first_reached_highest_local_date = excluded.first_reached_highest_local_date, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
             .bind(knowledge_node_id).bind(understanding_value(decision.current)).bind(understanding_value(decision.historical_highest)).bind(decision.first_reached_highest_on.to_iso_string()).execute(pool).await.map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
         Ok(KnowledgeUnderstandingProjection {
@@ -634,6 +1428,11 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         if identity_type != "personal" {
             return Err(KnowledgeCandidateError::NotPersonal);
         }
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
         sqlx::query(
             "INSERT INTO knowledge_candidate_records \
                 (problem_id, fingerprint, target_ref, disposition) \
@@ -665,6 +1464,23 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         if identity_type != "personal" {
             return Err(KnowledgeCandidateError::NotPersonal);
         }
+        let candidate_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_candidate_records \
+             WHERE problem_id = ?1 AND fingerprint = ?2)",
+        )
+        .bind(problem_id)
+        .bind(fingerprint)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        if candidate_exists == 0 {
+            return Err(KnowledgeCandidateError::CandidateNotFound);
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
         let result = sqlx::query(
             "UPDATE knowledge_candidate_records SET disposition = ?1, \
                 updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
@@ -1025,42 +1841,25 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ProblemLifecycleError::PersistenceUnavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+            validate_problem_lifecycle_decision_state(&mut connection, problem, decision).await?;
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+
         let mut transaction = pool
             .begin()
             .await
             .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-        let row: Option<(i64, String, String)> = sqlx::query_as(
-            "SELECT p.id, p.identity_type, pls.learning_status \
-             FROM problems p \
-             LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
-             WHERE p.platform = 'codeforces' \
-               AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
-        )
-        .bind(problem.contest().contest_id() as i64)
-        .bind(problem.index())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-        let (problem_id, identity_type, current_status) =
-            row.ok_or(ProblemLifecycleError::ProblemNotFound)?;
-        if identity_type != "personal" {
-            return Err(ProblemLifecycleError::NotPersonal);
-        }
-        if parse_learning_status(&current_status)? != decision.previous_status {
-            return Err(ProblemLifecycleError::InvalidTransition);
-        }
-        let in_progress_review: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM review_attempts \
-             WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
-        )
-        .bind(problem_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-        if in_progress_review != 0 {
-            return Err(ProblemLifecycleError::InvalidTransition);
-        }
+        let problem_id =
+            validate_problem_lifecycle_decision_state(&mut transaction, problem, decision).await?;
 
         match decision.review_cycle {
             StartFirstColdStart => {
@@ -1134,6 +1933,46 @@ impl ProblemLifecyclePort for DatabaseRuntime {
     }
 }
 
+async fn validate_problem_lifecycle_decision_state(
+    connection: &mut sqlx::SqliteConnection,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    decision: acm_os_domain::ProblemLifecycleDecision,
+) -> Result<i64, ProblemLifecycleError> {
+    let row: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT p.id, p.identity_type, pls.learning_status \
+         FROM problems p \
+         LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+         WHERE p.platform = 'codeforces' \
+           AND p.external_contest_key = ?1 \
+           AND p.external_problem_key = ?2",
+    )
+    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.index())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+    let (problem_id, identity_type, current_status) =
+        row.ok_or(ProblemLifecycleError::ProblemNotFound)?;
+    if identity_type != "personal" {
+        return Err(ProblemLifecycleError::NotPersonal);
+    }
+    if parse_learning_status(&current_status)? != decision.previous_status {
+        return Err(ProblemLifecycleError::InvalidTransition);
+    }
+    let in_progress_review: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM review_attempts \
+         WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+    )
+    .bind(problem_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+    if in_progress_review != 0 {
+        return Err(ProblemLifecycleError::InvalidTransition);
+    }
+    Ok(problem_id)
+}
+
 fn parse_learning_status(
     value: &str,
 ) -> Result<acm_os_domain::LearningStatus, ProblemLifecycleError> {
@@ -1203,6 +2042,11 @@ impl WeeklyAcmBudgetPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let local_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -1479,6 +2323,50 @@ impl TodaySnapshotPort for DatabaseRuntime {
                 }
             }
         }
+        let needs_reconciliation: i64 = sqlx::query_scalar(
+            "SELECT CASE WHEN \
+                EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                    JOIN review_attempts ra ON ra.id = e.review_attempt_id \
+                    WHERE tp.local_date = ?1 AND ra.attempt_status = 'void') \
+                OR EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                    JOIN review_attempts ra ON ra.id = e.review_attempt_id \
+                    WHERE tp.local_date = ?1 AND ra.attempt_status = 'completed' AND e.entry_status != 'completed') \
+                OR EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                    JOIN review_attempts ra ON ra.problem_id = e.problem_id AND ra.attempt_status = 'in_progress' \
+                    WHERE tp.local_date = ?1 AND (e.entry_status != 'in_progress' OR e.review_attempt_id IS NOT ra.id)) \
+                OR EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                    JOIN file_bindings fb ON fb.problem_id = e.problem_id \
+                    WHERE tp.local_date = ?1 AND e.entry_status != 'completed' \
+                      AND e.reason IN ('continue_learning', 'relearn', 'upsolve') \
+                      AND fb.binding_state IN ('external_source_unavailable', 'location_anomaly') \
+                      AND e.entry_status != 'unavailable') \
+                OR EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                    JOIN file_bindings fb ON fb.problem_id = e.problem_id \
+                    WHERE tp.local_date = ?1 AND e.entry_status = 'unavailable' \
+                      AND e.reason IN ('continue_learning', 'relearn', 'upsolve') AND fb.binding_state = 'linked') \
+                OR EXISTS (SELECT 1 FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+                    WHERE ra.attempt_status = 'in_progress' AND p.identity_type = 'personal' \
+                      AND NOT EXISTS (SELECT 1 FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+                          WHERE tp.local_date = ?1 AND e.problem_id = ra.problem_id)) \
+                OR EXISTS (SELECT 1 FROM (SELECT e.position, ROW_NUMBER() OVER (ORDER BY e.position, e.id) - 1 AS expected_position \
+                    FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id WHERE tp.local_date = ?1) \
+                    WHERE position != expected_position) \
+                OR EXISTS (SELECT 1 FROM today_plans tp WHERE tp.local_date = ?1 AND \
+                    (tp.planned_minutes != COALESCE((SELECT SUM(e.planning_cost_minutes) FROM today_plan_entries e WHERE e.today_plan_id = tp.id), 0) \
+                     OR tp.over_budget_minutes != MAX(0, COALESCE((SELECT SUM(e.planning_cost_minutes) FROM today_plan_entries e WHERE e.today_plan_id = tp.id), 0) - tp.budget_minutes))) \
+                THEN 1 ELSE 0 END",
+        )
+        .bind(local_date.to_iso_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if needs_reconciliation == 1 {
+            let backup_date = crate::current_local_date()
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+            self.ensure_daily_backup(backup_date)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        }
         let mut transaction = pool
             .begin()
             .await
@@ -1695,6 +2583,40 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let preflight_plan_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM today_plans WHERE id = ?1")
+                .bind(plan_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if preflight_plan_exists != 1 {
+            return Err(TodaySnapshotError::InvalidReorder);
+        }
+        let preflight_entry_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM today_plan_entries WHERE today_plan_id = ?1 ORDER BY position",
+        )
+        .bind(plan_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let preflight_stored = preflight_entry_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let preflight_requested = ordered_entry_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        if preflight_entry_ids.len() != ordered_entry_ids.len()
+            || preflight_stored.len() != preflight_entry_ids.len()
+            || preflight_requested.len() != ordered_entry_ids.len()
+            || preflight_stored != preflight_requested
+        {
+            return Err(TodaySnapshotError::InvalidReorder);
+        }
+        let backup_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(backup_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -1779,6 +2701,45 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let preflight: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT tp.local_date, e.lane, e.reason, e.entry_status, e.review_attempt_id \
+             FROM today_plan_entries e JOIN today_plans tp ON tp.id = e.today_plan_id \
+             WHERE e.id = ?1 AND e.today_plan_id = ?2",
+        )
+        .bind(entry_id)
+        .bind(plan_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        let (preflight_date, preflight_lane, preflight_reason, preflight_status, preflight_review) =
+            preflight.ok_or(TodaySnapshotError::InvalidTodayDone)?;
+        let preflight_legal_learning_entry = matches!(
+            (preflight_lane.as_str(), preflight_reason.as_str()),
+            ("carry_in", "continue_learning") | ("study", "relearn" | "upsolve")
+        );
+        if !preflight_legal_learning_entry
+            || preflight_review.is_some()
+            || preflight_status == "unavailable"
+            || !matches!(
+                preflight_status.as_str(),
+                "not_started" | "in_progress" | "completed"
+            )
+        {
+            return Err(TodaySnapshotError::InvalidTodayDone);
+        }
+        if preflight_status == "completed" {
+            let local_date = acm_os_domain::LocalDate::parse_iso(&preflight_date)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            return self
+                .load_today_snapshot(local_date)
+                .await?
+                .ok_or(TodaySnapshotError::IntegrityViolation);
+        }
+        let backup_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(backup_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -1851,6 +2812,86 @@ impl TodaySnapshotPort for DatabaseRuntime {
             .problem_id
             .parse::<i64>()
             .map_err(|_| TodaySnapshotError::InvalidExtraSuggestion)?;
+        let current = self
+            .load_today_snapshot(expected_snapshot.local_date)
+            .await?
+            .ok_or(TodaySnapshotError::InvalidExtraSuggestion)?;
+        if current != *expected_snapshot {
+            return Err(TodaySnapshotError::StaleExtraSuggestions);
+        }
+        if current
+            .entries
+            .iter()
+            .any(|entry| entry.status != TodayEntryStatus::Completed)
+            || suggestion.planning_cost_minutes
+                > current
+                    .budget_minutes
+                    .saturating_sub(current.planned_minutes)
+            || !matches!(
+                (
+                    suggestion.lane,
+                    suggestion.reason,
+                    suggestion.planning_cost_minutes
+                ),
+                (
+                    acm_os_domain::TodayCandidateLane::CarryIn,
+                    acm_os_domain::TodayCandidateReason::ContinueReview,
+                    30
+                ) | (
+                    acm_os_domain::TodayCandidateLane::CarryIn,
+                    acm_os_domain::TodayCandidateReason::ContinueLearning,
+                    60
+                ) | (
+                    acm_os_domain::TodayCandidateLane::Review,
+                    acm_os_domain::TodayCandidateReason::DueFirstColdStart
+                        | acm_os_domain::TodayCandidateReason::DueLongTermReview,
+                    30
+                ) | (
+                    acm_os_domain::TodayCandidateLane::Study,
+                    acm_os_domain::TodayCandidateReason::Relearn
+                        | acm_os_domain::TodayCandidateReason::Upsolve,
+                    60
+                )
+            )
+            || (suggestion.reason == acm_os_domain::TodayCandidateReason::ContinueReview)
+                != suggestion.review_attempt_id.is_some()
+        {
+            return Err(TodaySnapshotError::InvalidExtraSuggestion);
+        }
+        let candidate_valid: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM problems p \
+             JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             JOIN file_bindings fb ON fb.problem_id = p.id AND fb.binding_state = 'linked' \
+             LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+             LEFT JOIN review_attempts ra ON ra.id = ?4 AND ra.problem_id = p.id \
+             WHERE p.id = ?1 AND p.identity_type = 'personal' \
+               AND NOT EXISTS (SELECT 1 FROM today_plan_entries e \
+                   WHERE e.today_plan_id = ?2 AND e.problem_id = p.id) \
+               AND ((?3 = 'continue_learning' AND pls.learning_status = 'learning') \
+                 OR (?3 = 'relearn' AND pls.learning_status = 'relearning') \
+                 OR (?3 = 'upsolve' AND pls.learning_status = 'upsolve_pending') \
+                 OR (?3 = 'due_first_cold_start' AND pls.learning_status = 'waiting_cold_start' \
+                     AND rc.next_due_local_date <= ?5 AND ?4 IS NULL) \
+                 OR (?3 = 'due_long_term_review' AND pls.learning_status = 'long_term_review' \
+                     AND rc.next_due_local_date <= ?5 AND ?4 IS NULL) \
+                 OR (?3 = 'continue_review' AND ra.attempt_status = 'in_progress'))",
+        )
+        .bind(problem_id)
+        .bind(&expected_snapshot.plan_id)
+        .bind(today_reason_value(suggestion.reason))
+        .bind(&suggestion.review_attempt_id)
+        .bind(expected_snapshot.local_date.to_iso_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if candidate_valid != 1 {
+            return Err(TodaySnapshotError::InvalidExtraSuggestion);
+        }
+        let backup_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(backup_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -2032,6 +3073,35 @@ impl TodaySnapshotPort for DatabaseRuntime {
         {
             return Err(TodaySnapshotError::IntegrityViolation);
         }
+        let preflight_protected_ids = preview
+            .expected_snapshot
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.origin == TodayEntryOrigin::Manual
+                    || entry.status != TodayEntryStatus::NotStarted
+            })
+            .map(|entry| entry.entry_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let preflight_proposed_existing_ids = preview
+            .entries
+            .iter()
+            .filter_map(|entry| entry.existing_entry_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        if preflight_proposed_existing_ids != preflight_protected_ids
+            || preview.entries.iter().any(|entry| {
+                entry.existing_entry_id.is_some()
+                    && !(entry.origin == TodayEntryOrigin::Manual
+                        || entry.status != TodayEntryStatus::NotStarted)
+            })
+        {
+            return Err(TodaySnapshotError::IntegrityViolation);
+        }
+        let backup_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(backup_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -2230,6 +3300,23 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
+        let existing: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM today_plans WHERE local_date = ?1")
+                .bind(local_date.to_iso_string())
+                .fetch_one(pool)
+                .await
+                .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        if existing != 0 {
+            return self
+                .load_today_snapshot(local_date)
+                .await?
+                .ok_or(TodaySnapshotError::IntegrityViolation);
+        }
+        let backup_date =
+            crate::current_local_date().map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(backup_date)
+            .await
+            .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -2857,74 +3944,40 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if let Some(existing) =
+                load_in_progress_review_attempt_from_connection(&mut connection, problem).await?
+            {
+                return Ok(existing);
+            }
+            validate_review_attempt_creation_state(&mut connection, problem, eligibility).await?;
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+
         let mut transaction = pool
             .begin()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let existing: Option<ReviewAttemptRow> = sqlx::query_as(
-            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
-                    ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
-                    ra.started_at_utc \
-             FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
-        )
-        .bind(problem.contest().contest_id() as i64)
-        .bind(problem.index())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        if let Some(row) = existing {
+        if let Some(existing) =
+            load_in_progress_review_attempt_from_connection(&mut transaction, problem).await?
+        {
             transaction
                 .commit()
                 .await
                 .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-            return review_attempt_from_row(row);
+            return Ok(existing);
         }
 
-        let current: Option<(i64, String, String, String, String, Option<i64>)> = sqlx::query_as(
-            "SELECT p.id, p.identity_type, pls.learning_status, rc.id, rc.next_due_local_date, \
-                    ss.problem_id \
-             FROM problems p \
-             JOIN problem_learning_states pls ON pls.problem_id = p.id \
-             JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
-             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
-        )
-        .bind(problem.contest().contest_id() as i64)
-        .bind(problem.index())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let (problem_id, identity_type, status, review_cycle_id, due, statement_problem_id) =
-            current.ok_or(ReviewAttemptError::ProblemNotFound)?;
-        if identity_type != "personal" {
-            return Err(ReviewAttemptError::NotPersonal);
-        }
-        if statement_problem_id != Some(problem_id) {
-            return Err(ReviewAttemptError::StatementMissing);
-        }
-        let status =
-            parse_learning_status(&status).map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-        if due != eligibility.scheduled_due_local_date.to_iso_string() {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
-        let expected_scheduled_type = match status {
-            acm_os_domain::LearningStatus::WaitingColdStart => {
-                acm_os_domain::ReviewAttemptType::FirstColdStart
-            }
-            acm_os_domain::LearningStatus::LongTermReview => {
-                acm_os_domain::ReviewAttemptType::LongTermReview
-            }
-            _ => return Err(ReviewAttemptError::NotEligible),
-        };
-        if (eligibility.started_early
-            && eligibility.attempt_type != acm_os_domain::ReviewAttemptType::EarlyCheck)
-            || (!eligibility.started_early && eligibility.attempt_type != expected_scheduled_type)
-        {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
+        let (problem_id, review_cycle_id) =
+            validate_review_attempt_creation_state(&mut transaction, problem, eligibility).await?;
 
         let attempt_id = uuid::Uuid::now_v7().to_string();
         let started_at: String = sqlx::query_scalar(
@@ -3092,6 +4145,39 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM review_attempts WHERE id = ?1 AND attempt_status = 'in_progress'",
+            )
+            .bind(attempt_id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if active != 1 {
+                return Err(ReviewAttemptError::AttemptNotFound);
+            }
+            let previously_revealed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM review_help_usage_events \
+                 WHERE review_attempt_id = ?1 AND help_level = ?2",
+            )
+            .bind(attempt_id)
+            .bind(i64::from(level.number()))
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if previously_revealed == 0 && !impact_acknowledged {
+                return Err(ReviewAttemptError::HelpConfirmationRequired);
+            }
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let mut transaction = pool
             .begin()
             .await
@@ -3220,77 +4306,40 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            validate_review_completion_state(
+                &mut connection,
+                context,
+                input,
+                judgement,
+                &scheduling,
+                completed_on,
+            )
+            .await?;
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+
         let mut transaction = pool
             .begin()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let current: Option<(String, String, i64, String)> = sqlx::query_as(
-            "SELECT ra.attempt_status, pls.learning_status, rc.stage, rc.cycle_status \
-             FROM review_attempts ra \
-             JOIN problem_learning_states pls ON pls.problem_id = ra.problem_id \
-             JOIN review_cycles rc ON rc.id = ra.review_cycle_id \
-             WHERE ra.id = ?1",
-        )
-        .bind(&context.attempt.attempt_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let (attempt_status, learning_status, stage, cycle_status) =
-            current.ok_or(ReviewAttemptError::AttemptNotFound)?;
-        if attempt_status != "in_progress" {
-            return Err(ReviewAttemptError::AttemptAlreadyFinished);
-        }
-        if cycle_status != "active"
-            || parse_learning_status(&learning_status)
-                .map_err(|_| ReviewAttemptError::IntegrityViolation)?
-                != context.learning_status
-            || u32::try_from(stage).map_err(|_| ReviewAttemptError::IntegrityViolation)?
-                != context.current_stage
-        {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
-        let highest_help: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(help_level) FROM review_help_usage_events WHERE review_attempt_id = ?1",
-        )
-        .bind(&context.attempt.attempt_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let highest_help = highest_help
-            .map(|number| {
-                u8::try_from(number)
-                    .ok()
-                    .and_then(acm_os_domain::ReviewHelpLevel::from_number)
-                    .ok_or(ReviewAttemptError::IntegrityViolation)
-            })
-            .transpose()?;
-        if highest_help != context.highest_help_level {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
-        let verified_judgement =
-            acm_os_domain::ReviewJudgementEngine::judge(&input.domain_facts(), highest_help)
-                .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
-        if &verified_judgement != judgement {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
-        let verified_scheduling = acm_os_domain::ReviewSchedulingEngine::complete_review(
-            context.learning_status,
-            context.attempt.attempt_type,
-            judgement.judgement,
-            context.current_stage,
+        validate_review_completion_state(
+            &mut transaction,
+            context,
+            input,
+            judgement,
+            &scheduling,
             completed_on,
         )
-        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-        if verified_scheduling != scheduling {
-            return Err(ReviewAttemptError::IntegrityViolation);
-        }
-        if judgement.judgement == acm_os_domain::ReviewJudgement::Mastered {
-            if !input.failure_reasons.is_empty() {
-                return Err(ReviewAttemptError::InvalidCompletionFacts);
-            }
-        } else if input.failure_reasons.is_empty() {
-            return Err(ReviewAttemptError::FailureReasonRequired);
-        }
+        .await?;
         for reason in &input.failure_reasons {
             let (code, other) = failure_reason_value(reason);
             sqlx::query(
@@ -3417,10 +4466,30 @@ impl ReviewAttemptPort for DatabaseRuntime {
         attempt_id: &str,
         reason: &str,
     ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+        if reason.trim().is_empty() || reason.len() > 500 {
+            return Err(ReviewAttemptError::InvalidVoidReason);
+        }
         let pool = self
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT attempt_status FROM review_attempts WHERE id = ?1")
+                .bind(attempt_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        match status.as_deref() {
+            None => return Err(ReviewAttemptError::AttemptNotFound),
+            Some("in_progress") => {}
+            Some(_) => return Err(ReviewAttemptError::AttemptAlreadyFinished),
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+
         let mut transaction = pool
             .begin()
             .await
@@ -3530,6 +4599,23 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let problem_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = ?1 AND external_problem_key = ?2)",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if problem_exists == 0 {
+            return Err(ReviewAttemptError::ProblemNotFound);
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let thorough = evidence.is_thoroughly_digested();
         let updated = sqlx::query(
             "INSERT INTO problem_mastery_evidence (\
@@ -3578,6 +4664,84 @@ impl ReviewAttemptPort for DatabaseRuntime {
     }
 }
 
+async fn validate_review_completion_state(
+    connection: &mut sqlx::SqliteConnection,
+    context: &ReviewCompletionContext,
+    input: &ReviewCompletionInput,
+    judgement: &acm_os_domain::ReviewJudgementDecision,
+    scheduling: &acm_os_domain::ReviewCompletionDecision,
+    completed_on: acm_os_domain::LocalDate,
+) -> Result<(), ReviewAttemptError> {
+    let current: Option<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT ra.attempt_status, pls.learning_status, rc.stage, rc.cycle_status \
+         FROM review_attempts ra \
+         JOIN problem_learning_states pls ON pls.problem_id = ra.problem_id \
+         JOIN review_cycles rc ON rc.id = ra.review_cycle_id \
+         WHERE ra.id = ?1",
+    )
+    .bind(&context.attempt.attempt_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let (attempt_status, learning_status, stage, cycle_status) =
+        current.ok_or(ReviewAttemptError::AttemptNotFound)?;
+    if attempt_status != "in_progress" {
+        return Err(ReviewAttemptError::AttemptAlreadyFinished);
+    }
+    if cycle_status != "active"
+        || parse_learning_status(&learning_status)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?
+            != context.learning_status
+        || u32::try_from(stage).map_err(|_| ReviewAttemptError::IntegrityViolation)?
+            != context.current_stage
+    {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    let highest_help: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(help_level) FROM review_help_usage_events WHERE review_attempt_id = ?1",
+    )
+    .bind(&context.attempt.attempt_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let highest_help = highest_help
+        .map(|number| {
+            u8::try_from(number)
+                .ok()
+                .and_then(acm_os_domain::ReviewHelpLevel::from_number)
+                .ok_or(ReviewAttemptError::IntegrityViolation)
+        })
+        .transpose()?;
+    if highest_help != context.highest_help_level {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    let verified_judgement =
+        acm_os_domain::ReviewJudgementEngine::judge(&input.domain_facts(), highest_help)
+            .map_err(|_| ReviewAttemptError::InvalidCompletionFacts)?;
+    if &verified_judgement != judgement {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    let verified_scheduling = acm_os_domain::ReviewSchedulingEngine::complete_review(
+        context.learning_status,
+        context.attempt.attempt_type,
+        judgement.judgement,
+        context.current_stage,
+        completed_on,
+    )
+    .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    if &verified_scheduling != scheduling {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    if judgement.judgement == acm_os_domain::ReviewJudgement::Mastered {
+        if !input.failure_reasons.is_empty() {
+            return Err(ReviewAttemptError::InvalidCompletionFacts);
+        }
+    } else if input.failure_reasons.is_empty() {
+        return Err(ReviewAttemptError::FailureReasonRequired);
+    }
+    Ok(())
+}
+
 async fn load_problem_mastery_projection(
     pool: &SqlitePool,
     problem: &acm_os_domain::CodeforcesProblemIdentity,
@@ -3624,6 +4788,77 @@ async fn load_problem_mastery_projection(
         historical_thoroughly_digested: row.6,
         first_thoroughly_digested_local_date: first_date,
     })
+}
+
+async fn load_in_progress_review_attempt_from_connection(
+    connection: &mut sqlx::SqliteConnection,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<Option<ReviewAttempt>, ReviewAttemptError> {
+    let row: Option<ReviewAttemptRow> = sqlx::query_as(
+        "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                ra.started_at_utc \
+         FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+           AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
+    )
+    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.index())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    row.map(review_attempt_from_row).transpose()
+}
+
+async fn validate_review_attempt_creation_state(
+    connection: &mut sqlx::SqliteConnection,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    eligibility: acm_os_domain::ReviewEligibilityDecision,
+) -> Result<(i64, String), ReviewAttemptError> {
+    let current: Option<(i64, String, String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT p.id, p.identity_type, pls.learning_status, rc.id, rc.next_due_local_date, \
+         ss.problem_id \
+         FROM problems p \
+         JOIN problem_learning_states pls ON pls.problem_id = p.id \
+         JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
+         LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+           AND p.external_problem_key = ?2",
+    )
+    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.index())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let (problem_id, identity_type, status, review_cycle_id, due, statement_problem_id) =
+        current.ok_or(ReviewAttemptError::ProblemNotFound)?;
+    if identity_type != "personal" {
+        return Err(ReviewAttemptError::NotPersonal);
+    }
+    if statement_problem_id != Some(problem_id) {
+        return Err(ReviewAttemptError::StatementMissing);
+    }
+    let status =
+        parse_learning_status(&status).map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    if due != eligibility.scheduled_due_local_date.to_iso_string() {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    let expected_scheduled_type = match status {
+        acm_os_domain::LearningStatus::WaitingColdStart => {
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+        }
+        acm_os_domain::LearningStatus::LongTermReview => {
+            acm_os_domain::ReviewAttemptType::LongTermReview
+        }
+        _ => return Err(ReviewAttemptError::NotEligible),
+    };
+    if (eligibility.started_early
+        && eligibility.attempt_type != acm_os_domain::ReviewAttemptType::EarlyCheck)
+        || (!eligibility.started_early && eligibility.attempt_type != expected_scheduled_type)
+    {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
+    Ok((problem_id, review_cycle_id))
 }
 
 impl PersonalNoteDeletionPort for DatabaseRuntime {
@@ -3730,6 +4965,11 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         if sha256_hex(&final_bytes) != binding.content_digest {
             return Err(PersonalNoteDeletionError::ConcurrentModification);
         }
+        let local_date = crate::current_local_date()
+            .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
         std::fs::remove_file(&target).map_err(|_| PersonalNoteDeletionError::FileDeleteFailed)?;
         match target.try_exists() {
             Ok(false) => {}
@@ -4048,6 +5288,414 @@ impl PersonalNoteReadPort for DatabaseRuntime {
     }
 }
 
+impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
+    async fn personal_note_relocation_candidates(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<
+        Vec<acm_os_application::PersonalNoteRelocationCandidate>,
+        acm_os_application::PersonalNoteBindingRepairError,
+    > {
+        use acm_os_application::PersonalNoteBindingRepairError;
+
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(i64, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, ws.active_vault_path, fb.binding_state \
+             FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (_problem_id, identity_type, active_vault, binding_state) =
+            row.ok_or(PersonalNoteBindingRepairError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(PersonalNoteBindingRepairError::NotPersonal);
+        }
+        if binding_state != "location_anomaly" {
+            return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+        }
+        let active_vault = active_vault.ok_or(PersonalNoteBindingRepairError::VaultUnavailable)?;
+        let occupied: Vec<String> = sqlx::query_scalar(
+            "SELECT vault_relative_path FROM file_bindings \
+             UNION SELECT vault_relative_path FROM knowledge_file_bindings",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        tokio::task::spawn_blocking(move || {
+            let vault = std::fs::canonicalize(&active_vault)
+                .map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?;
+            let files = markdown_files(&vault)
+                .map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?;
+            let occupied = occupied
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            files
+                .into_iter()
+                .map(|path| {
+                    let relative_path = path
+                        .strip_prefix(&vault)
+                        .map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    Ok(acm_os_application::PersonalNoteRelocationCandidate {
+                        occupied: occupied.contains(&relative_path),
+                        vault_relative_path: relative_path,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?
+    }
+
+    async fn rebind_personal_note(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        vault_relative_path: &str,
+    ) -> Result<PersonalNoteBinding, acm_os_application::PersonalNoteBindingRepairError> {
+        use acm_os_application::PersonalNoteBindingRepairError;
+
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = sqlx::query_as(
+            "SELECT p.id, p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
+                        fb.content_digest, fb.binding_state \
+                 FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+                 WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+                   AND p.external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (problem_id, identity_type, active_vault, old_path, old_digest, binding_state) =
+            row.ok_or(PersonalNoteBindingRepairError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(PersonalNoteBindingRepairError::NotPersonal);
+        }
+        if binding_state != "location_anomaly" {
+            return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+        }
+        let old_path = old_path.ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let old_digest =
+            old_digest.ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let active_vault = active_vault.ok_or(PersonalNoteBindingRepairError::VaultUnavailable)?;
+        let selected = vault_relative_path.to_owned();
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_relative_markdown(&active_vault, &selected)
+        })
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?
+        .map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?;
+        let occupied_by: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM file_bindings WHERE vault_relative_path = ?1 AND problem_id <> ?2",
+        )
+        .bind(&resolved.relative_path)
+        .bind(problem_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by.is_some() {
+            return Err(PersonalNoteBindingRepairError::CandidateOccupied);
+        }
+        let occupied_by_knowledge: Option<String> = sqlx::query_scalar(
+            "SELECT knowledge_node_id FROM knowledge_file_bindings WHERE vault_relative_path = ?1",
+        )
+        .bind(&resolved.relative_path)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by_knowledge.is_some() {
+            return Err(PersonalNoteBindingRepairError::CandidateOccupied);
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let occupied_by: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM file_bindings WHERE vault_relative_path = ?1 AND problem_id <> ?2",
+        )
+        .bind(&resolved.relative_path)
+        .bind(problem_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by.is_some() {
+            return Err(PersonalNoteBindingRepairError::CandidateOccupied);
+        }
+        let occupied_by_knowledge: Option<String> = sqlx::query_scalar(
+            "SELECT knowledge_node_id FROM knowledge_file_bindings WHERE vault_relative_path = ?1",
+        )
+        .bind(&resolved.relative_path)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied_by_knowledge.is_some() {
+            return Err(PersonalNoteBindingRepairError::CandidateOccupied);
+        }
+        let result = sqlx::query(
+            "UPDATE file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, \
+                content_digest = ?3, binding_state = 'linked', \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?4 AND vault_relative_path = ?5 AND content_digest = ?6 \
+               AND binding_state = 'location_anomaly'",
+        )
+        .bind(&resolved.relative_path)
+        .bind(&resolved.windows_file_key)
+        .bind(&resolved.content_digest)
+        .bind(problem_id)
+        .bind(old_path)
+        .bind(old_digest)
+        .execute(&mut *transaction)
+        .await;
+        match result {
+            Ok(result) if result.rows_affected() == 1 => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+                Ok(resolved_binding(&resolved))
+            }
+            Ok(_) => Err(PersonalNoteBindingRepairError::LocationAnomalyRequired),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(PersonalNoteBindingRepairError::CandidateOccupied)
+            }
+            Err(_) => Err(PersonalNoteBindingRepairError::PersistenceUnavailable),
+        }
+    }
+
+    async fn confirm_personal_note_deleted(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemLifecycleState, acm_os_application::PersonalNoteBindingRepairError> {
+        use acm_os_application::PersonalNoteBindingRepairError;
+
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(i64, String, String, String, Option<String>, String, String)> =
+            sqlx::query_as(
+                "SELECT p.id, p.identity_type, pls.learning_status, fb.vault_relative_path, \
+                        fb.windows_file_key, fb.content_digest, ws.active_vault_path \
+                 FROM problems p \
+                 LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+                 LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
+                 WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+                   AND p.external_problem_key = ?2 AND fb.binding_state = 'location_anomaly'",
+            )
+            .bind(problem.contest().contest_id() as i64)
+            .bind(problem.index())
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (problem_id, identity_type, status, relative_path, file_key, digest, active_vault) =
+            row.ok_or(PersonalNoteBindingRepairError::LocationAnomalyRequired)?;
+        if identity_type != "personal" {
+            return Err(PersonalNoteBindingRepairError::NotPersonal);
+        }
+        let check_vault = active_vault.clone();
+        let check_path = relative_path.clone();
+        let check_digest = digest.clone();
+        let resolution = tokio::task::spawn_blocking(move || {
+            resolve_personal_note(
+                &check_vault,
+                &check_path,
+                file_key.as_deref(),
+                &check_digest,
+            )
+        })
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?;
+        match resolution {
+            BindingResolution::LocationAnomaly => {}
+            BindingResolution::Ready(_) => {
+                return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired)
+            }
+            BindingResolution::VaultUnavailable => {
+                return Err(PersonalNoteBindingRepairError::VaultUnavailable)
+            }
+            BindingResolution::InvalidBinding => {
+                return Err(PersonalNoteBindingRepairError::IntegrityViolation)
+            }
+        }
+
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+            let current: Option<(String, String, String, String)> = sqlx::query_as(
+                "SELECT p.identity_type, pls.learning_status, fb.vault_relative_path, fb.content_digest \
+                 FROM problems p JOIN problem_learning_states pls ON pls.problem_id = p.id \
+                 JOIN file_bindings fb ON fb.problem_id = p.id \
+                 WHERE p.id = ?1 AND fb.binding_state = 'location_anomaly'",
+            )
+            .bind(problem_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+            if current
+                != Some((
+                    identity_type.clone(),
+                    status.clone(),
+                    relative_path.clone(),
+                    digest.clone(),
+                ))
+            {
+                return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+            }
+            let in_progress_review: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM review_attempts \
+                 WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+            )
+            .bind(problem_id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+            if in_progress_review != 0 {
+                return Err(PersonalNoteBindingRepairError::ReviewInProgress);
+            }
+            let status_value = parse_learning_status(&status)
+                .map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+            acm_os_domain::ProblemLifecycleEngine::decide(
+                status_value,
+                acm_os_domain::ProblemLifecycleAction::DeletePersonalNote,
+            )
+            .map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let current: Option<(String, String, String, String)> = sqlx::query_as(
+            "SELECT p.identity_type, pls.learning_status, fb.vault_relative_path, fb.content_digest \
+             FROM problems p JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             JOIN file_bindings fb ON fb.problem_id = p.id \
+             WHERE p.id = ?1 AND fb.binding_state = 'location_anomaly'",
+        )
+        .bind(problem_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if current
+            != Some((
+                identity_type.clone(),
+                status.clone(),
+                relative_path.clone(),
+                digest.clone(),
+            ))
+        {
+            return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+        }
+        let in_progress_review: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts \
+             WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+        )
+        .bind(problem_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if in_progress_review != 0 {
+            return Err(PersonalNoteBindingRepairError::ReviewInProgress);
+        }
+        let status = parse_learning_status(&status)
+            .map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+        let decision = acm_os_domain::ProblemLifecycleEngine::decide(
+            status,
+            acm_os_domain::ProblemLifecycleAction::DeletePersonalNote,
+        )
+        .map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+        sqlx::query(
+            "UPDATE review_cycles SET cycle_status = 'cancelled', next_due_local_date = NULL, \
+                ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?1 AND cycle_status = 'active'",
+        )
+        .bind(problem_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let learning_status_since_utc: Option<String> = sqlx::query_scalar(
+            "UPDATE problem_learning_states SET learning_status = 'unstarted', \
+                learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?1 AND learning_status = ?2 RETURNING learning_status_since_utc",
+        )
+        .bind(problem_id)
+        .bind(learning_status_value(decision.previous_status))
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let learning_status_since_utc = learning_status_since_utc
+            .ok_or(PersonalNoteBindingRepairError::LocationAnomalyRequired)?;
+        let deleted = sqlx::query(
+            "DELETE FROM file_bindings WHERE problem_id = ?1 AND vault_relative_path = ?2 \
+             AND content_digest = ?3 AND binding_state = 'location_anomaly'",
+        )
+        .bind(problem_id)
+        .bind(&relative_path)
+        .bind(&digest)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if deleted.rows_affected() != 1 {
+            return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+        }
+        let downgraded = sqlx::query(
+            "UPDATE problems SET identity_type = 'lightweight' \
+             WHERE id = ?1 AND identity_type = 'personal'",
+        )
+        .bind(problem_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if downgraded.rows_affected() != 1 {
+            return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        Ok(ProblemLifecycleState {
+            identity_type: ProblemIdentityType::Lightweight,
+            learning_status: acm_os_domain::LearningStatus::Unstarted,
+            learning_status_since_utc,
+            active_review_cycle: None,
+        })
+    }
+}
+
 impl PersonalNotePatchPort for DatabaseRuntime {
     async fn add_prerequisite_link(
         &self,
@@ -4083,8 +5731,11 @@ impl PersonalNotePatchPort for DatabaseRuntime {
             problem.contest().contest_id(),
             problem.index()
         );
+        let operation_id = self
+            .begin_prerequisite_patch_operation(problem, &expected, target.as_str())
+            .await?;
         let target = target.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
+        let patch_result = tokio::task::spawn_blocking(move || {
             crate::safe_patch::add_prerequisite_link(
                 &active_vault,
                 &relative_path,
@@ -4095,9 +5746,17 @@ impl PersonalNotePatchPort for DatabaseRuntime {
             )
         })
         .await
-        .map_err(|_| PersonalNotePatchError::WriteFailed)?
-        .map_err(map_safe_patch_error)?;
-        self.commit_patch_outcome(problem, &expected, outcome).await
+        .map_err(|_| PersonalNotePatchError::WriteFailed)?;
+        let outcome = match patch_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.settle_failed_prerequisite_patch_operation(&operation_id, error)
+                    .await?;
+                return Err(map_safe_patch_error(error));
+            }
+        };
+        self.commit_patch_outcome(problem, &expected, outcome, Some(&operation_id))
+            .await
     }
 
     async fn add_extra_problem_link(
@@ -4149,16 +5808,94 @@ impl PersonalNotePatchPort for DatabaseRuntime {
         .map_err(|_| PersonalNotePatchError::WriteFailed)?
         .map_err(map_safe_patch_error)?;
 
-        self.commit_patch_outcome(problem, &expected, outcome).await
+        self.commit_patch_outcome(problem, &expected, outcome, None)
+            .await
     }
 }
 
 impl DatabaseRuntime {
+    async fn settle_failed_prerequisite_patch_operation(
+        &self,
+        operation_id: &str,
+        error: crate::safe_patch::SafePatchError,
+    ) -> Result<(), PersonalNotePatchError> {
+        use crate::safe_patch::SafePatchError;
+
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let result = match error {
+            SafePatchError::VaultUnavailable
+            | SafePatchError::BindingUnavailable
+            | SafePatchError::InvalidUtf8
+            | SafePatchError::TargetSectionMissing
+            | SafePatchError::TargetSectionAmbiguous
+            | SafePatchError::LinkAlreadyPresent
+            | SafePatchError::RecoveryCopyFailed => {
+                resolve_critical_operation(pool, operation_id, "abandoned").await
+            }
+            SafePatchError::ConcurrentModification => {
+                mark_critical_operation_needs_recovery(pool, operation_id).await
+            }
+            SafePatchError::WriteFailed | SafePatchError::VerificationFailed => Ok(()),
+        };
+        result.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)
+    }
+
+    async fn begin_prerequisite_patch_operation(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        expected: &PersonalNoteBinding,
+        target: &str,
+    ) -> Result<String, PersonalNotePatchError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT p.id, fb.id FROM problems p \
+             JOIN file_bindings fb ON fb.problem_id = p.id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
+               AND p.external_problem_key = ?2 AND fb.vault_relative_path = ?3 \
+               AND fb.content_digest = ?4 AND fb.binding_state = 'linked'",
+        )
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .bind(&expected.vault_relative_path)
+        .bind(&expected.content_digest)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        let (problem_id, binding_id) = row.ok_or(PersonalNotePatchError::BindingUnavailable)?;
+        let operation_id = uuid::Uuid::now_v7().to_string();
+        let postcondition_json = serde_json::json!({
+            "kind": "prerequisite_link",
+            "target": target,
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO critical_operations (id, operation_kind, object_type, object_id, \
+                binding_id, pre_content_digest, postcondition_json) \
+             VALUES (?1, 'markdown_system_fact', 'problem', ?2, ?3, ?4, ?5)",
+        )
+        .bind(&operation_id)
+        .bind(problem_id.to_string())
+        .bind(binding_id)
+        .bind(&expected.content_digest)
+        .bind(postcondition_json)
+        .execute(pool)
+        .await
+        .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        Ok(operation_id)
+    }
+
     async fn commit_patch_outcome(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
         expected: &PersonalNoteBinding,
         outcome: crate::safe_patch::SafePatchOutcome,
+        critical_operation_id: Option<&str>,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
         let problem_id: i64 = sqlx::query_scalar(
             "SELECT id FROM problems WHERE platform = 'codeforces' \
@@ -4181,13 +5918,67 @@ impl DatabaseRuntime {
             windows_file_key: outcome.windows_file_key,
             relocated: false,
         };
-        if !self
-            .commit_resolved_binding(problem_id, &expected, &resolved)
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
             .await
-            .map_err(map_personal_note_read_to_patch_error)?
-        {
-            return Err(PersonalNotePatchError::BindingUnavailable);
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        let updated = sqlx::query(
+            "UPDATE file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, \
+                content_digest = ?3, binding_state = 'linked', \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE problem_id = ?4 AND vault_relative_path = ?5 AND content_digest = ?6",
+        )
+        .bind(&resolved.relative_path)
+        .bind(&resolved.windows_file_key)
+        .bind(&resolved.content_digest)
+        .bind(problem_id)
+        .bind(&expected.vault_relative_path)
+        .bind(&expected.content_digest)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        if updated.rows_affected() != 1 {
+            let current = sqlx::query_as::<_, (String, Option<String>, String)>(
+                "SELECT vault_relative_path, windows_file_key, content_digest \
+                 FROM file_bindings WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+            if current
+                != Some((
+                    resolved.relative_path.clone(),
+                    resolved.windows_file_key.clone(),
+                    resolved.content_digest.clone(),
+                ))
+            {
+                return Err(PersonalNotePatchError::BindingUnavailable);
+            }
         }
+        if let Some(operation_id) = critical_operation_id {
+            let completed = sqlx::query(
+                "UPDATE critical_operations SET operation_status = 'completed', \
+                    resolved_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                    updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?1 AND operation_status = 'pending'",
+            )
+            .bind(operation_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+            if completed.rows_affected() != 1 {
+                return Err(PersonalNotePatchError::PersistenceUnavailable);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
         let old_cache_key = format!(
             "codeforces:{}:{}:{}",
             problem.contest().contest_id(),
@@ -4375,8 +6166,48 @@ impl PersonalNotePort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
         file: &CreatedPersonalNoteFile,
     ) -> Result<PersonalNoteBinding, PersonalNoteError> {
-        let mut transaction = self
-            .personal_note_pool()?
+        let pool = self.personal_note_pool()?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+            let row: Option<(String, Option<String>, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT p.identity_type, fb.vault_relative_path, fb.content_digest, \
+                            fb.windows_file_key
+                     FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id
+                     WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1
+                       AND p.external_problem_key = ?2",
+                )
+                .bind(problem.contest().contest_id() as i64)
+                .bind(problem.index())
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+            let (identity_type, relative_path, digest, file_key) =
+                row.ok_or(PersonalNoteError::ProblemNotFound)?;
+            if identity_type == "personal" {
+                return match (relative_path, digest) {
+                    (Some(vault_relative_path), Some(content_digest)) => Ok(PersonalNoteBinding {
+                        vault_relative_path,
+                        content_digest,
+                        windows_file_key: file_key,
+                    }),
+                    _ => Err(PersonalNoteError::PersistenceUnavailable),
+                };
+            }
+            if identity_type != "lightweight" {
+                return Err(PersonalNoteError::PersistenceUnavailable);
+            }
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+
+        let mut transaction = pool
             .begin()
             .await
             .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
@@ -4980,6 +6811,11 @@ impl ContestAiAnalysisPort for DatabaseRuntime {
         .await
         .map_err(|_| ContestAiAnalysisError::Unavailable)?
         .ok_or(ContestAiAnalysisError::NotFound)?;
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestAiAnalysisError::Unavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestAiAnalysisError::Unavailable)?;
         sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(contest_id) DO UPDATE SET raw_text = excluded.raw_text, parse_status = excluded.parse_status, parsed_projection_json = excluded.parsed_projection_json, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
             .bind(contest_id).bind(&preview.raw_text).bind(match preview.parse_status { ContestAiParseStatus::Complete => "complete", ContestAiParseStatus::Partial => "partial", ContestAiParseStatus::Failed => "failed" }).bind(&preview.parsed_projection_json).execute(pool).await.map_err(|_| ContestAiAnalysisError::Unavailable)?;
         self.contest_detail(contest)
@@ -4998,10 +6834,26 @@ impl ContestManagementPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ContestManagementError::Unavailable)?;
-        let result = sqlx::query("UPDATE contests SET archived_at_utc = CASE WHEN ?1 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE platform = 'codeforces' AND external_contest_key = ?2")
-            .bind(archived).bind(contest.contest_id() as i64).execute(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
-        if result.rows_affected() == 0 {
-            return Err(ContestManagementError::NotFound);
+        let current_archived: bool = sqlx::query_scalar(
+            "SELECT archived_at_utc IS NOT NULL FROM contests \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ContestManagementError::Unavailable)?
+        .ok_or(ContestManagementError::NotFound)?;
+        if current_archived != archived {
+            let local_date =
+                crate::current_local_date().map_err(|_| ContestManagementError::Unavailable)?;
+            self.ensure_daily_backup(local_date)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+            let result = sqlx::query("UPDATE contests SET archived_at_utc = CASE WHEN ?1 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE platform = 'codeforces' AND external_contest_key = ?2 AND (archived_at_utc IS NOT NULL) != ?1")
+                .bind(archived).bind(contest.contest_id() as i64).execute(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
+            if result.rows_affected() != 1 {
+                return Err(ContestManagementError::Unavailable);
+            }
         }
         self.contest_detail(contest)
             .await
@@ -5019,7 +6871,12 @@ impl ContestManagementPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ContestManagementError::Unavailable)?;
-        contest_delete_preview(pool, contest).await
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+        let (_, _, preview) = contest_delete_state(&mut connection, contest).await?;
+        Ok(preview)
     }
 
     async fn delete_contest(
@@ -5030,24 +6887,29 @@ impl ContestManagementPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ContestManagementError::Unavailable)?;
-        let preview = contest_delete_preview(pool, contest).await?;
+        let preview = {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
+            let (_, _, preview) = contest_delete_state(&mut connection, contest).await?;
+            preview
+        };
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestManagementError::Unavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
+
         let mut tx = pool
             .begin()
             .await
             .map_err(|_| ContestManagementError::Unavailable)?;
-        let contest_id: i64 = sqlx::query_scalar(
-            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
-        )
-        .bind(contest.contest_id() as i64)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ContestManagementError::Unavailable)?
-        .ok_or(ContestManagementError::NotFound)?;
-        let cleanup_ids: Vec<i64> = sqlx::query_scalar(CLEANUP_PROBLEM_IDS_SQL)
-            .bind(contest_id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|_| ContestManagementError::Unavailable)?;
+        let (contest_id, cleanup_ids, current_preview) =
+            contest_delete_state(&mut tx, contest).await?;
+        if current_preview != preview {
+            return Err(ContestManagementError::Unavailable);
+        }
         sqlx::query("DELETE FROM contest_correction_events WHERE contest_id = ?1")
             .bind(contest_id)
             .execute(&mut *tx)
@@ -5099,31 +6961,37 @@ impl ContestManagementPort for DatabaseRuntime {
 
 const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id)";
 
-async fn contest_delete_preview(
-    pool: &SqlitePool,
+async fn contest_delete_state(
+    connection: &mut sqlx::SqliteConnection,
     contest: &acm_os_domain::CodeforcesContestIdentity,
-) -> Result<ContestDeletePreview, ContestManagementError> {
-    let row: Option<(i64, String)> = sqlx::query_as("SELECT id, title FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1").bind(contest.contest_id() as i64).fetch_optional(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
+) -> Result<(i64, Vec<i64>, ContestDeletePreview), ContestManagementError> {
+    let row: Option<(i64, String)> = sqlx::query_as("SELECT id, title FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1").bind(contest.contest_id() as i64).fetch_optional(&mut *connection).await.map_err(|_| ContestManagementError::Unavailable)?;
     let (contest_id, contest_title) = row.ok_or(ContestManagementError::NotFound)?;
     let relationship_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems WHERE contest_id = ?1")
             .bind(contest_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *connection)
             .await
             .map_err(|_| ContestManagementError::Unavailable)?;
-    let cleanup_problem_count = sqlx::query_scalar::<_, i64>(CLEANUP_PROBLEM_IDS_SQL)
+    let cleanup_ids = sqlx::query_scalar::<_, i64>(CLEANUP_PROBLEM_IDS_SQL)
         .bind(contest_id)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await
-        .map_err(|_| ContestManagementError::Unavailable)?
-        .len() as i64;
-    Ok(ContestDeletePreview {
-        contest_title,
-        relationship_count: relationship_count as u32,
-        cleanup_problem_count: cleanup_problem_count as u32,
-        preserved_problem_count: (relationship_count - cleanup_problem_count) as u32,
-    })
+        .map_err(|_| ContestManagementError::Unavailable)?;
+    let cleanup_problem_count = cleanup_ids.len() as i64;
+    Ok((
+        contest_id,
+        cleanup_ids,
+        ContestDeletePreview {
+            contest_title,
+            relationship_count: relationship_count as u32,
+            cleanup_problem_count: cleanup_problem_count as u32,
+            preserved_problem_count: (relationship_count - cleanup_problem_count) as u32,
+        },
+    ))
 }
+
+const CONTEST_CORRECTION_STATE_SQL: &str = "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 AND p.external_problem_key = ?2";
 
 impl ContestCorrectionPort for DatabaseRuntime {
     async fn correct_contest_problem_facts(
@@ -5138,13 +7006,41 @@ impl ContestCorrectionPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ContestCorrectionError::Unavailable)?;
+        let initial: Option<(i64, i64, String, Option<String>, String)> =
+            sqlx::query_as(CONTEST_CORRECTION_STATE_SQL)
+                .bind(contest.contest_id() as i64)
+                .bind(correction.problem.index())
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| ContestCorrectionError::Unavailable)?;
+        let (_, _, facts_status, old_result, old_upsolve) =
+            initial.ok_or(ContestCorrectionError::NotFound)?;
+        if facts_status != "completed" {
+            return Err(ContestCorrectionError::FactsNotCompleted);
+        }
+        let old_result = old_result.ok_or(ContestCorrectionError::Unavailable)?;
+        let new_result = contest_final_result_value(correction.final_contest_result);
+        let new_upsolve = contest_upsolve_decision_value(correction.upsolve_decision);
+        if old_result == new_result && old_upsolve == new_upsolve {
+            return Err(ContestCorrectionError::NoChange);
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestCorrectionError::Unavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestCorrectionError::Unavailable)?;
+
         let mut tx = pool
             .begin()
             .await
             .map_err(|_| ContestCorrectionError::Unavailable)?;
-        let row: Option<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 AND p.external_problem_key = ?2",
-        ).bind(contest.contest_id() as i64).bind(correction.problem.index()).fetch_optional(&mut *tx).await.map_err(|_| ContestCorrectionError::Unavailable)?;
+        let row: Option<(i64, i64, String, Option<String>, String)> =
+            sqlx::query_as(CONTEST_CORRECTION_STATE_SQL)
+                .bind(contest.contest_id() as i64)
+                .bind(correction.problem.index())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| ContestCorrectionError::Unavailable)?;
         let (contest_id, problem_id, facts_status, old_result, old_upsolve) =
             row.ok_or(ContestCorrectionError::NotFound)?;
         if facts_status != "completed" {
@@ -5213,36 +7109,23 @@ impl ContestFactsPort for DatabaseRuntime {
         problems: &[ContestProblemFactInput],
     ) -> Result<ContestDetail, ContestFactsError> {
         let pool = self._pool.as_ref().ok_or(ContestFactsError::Unavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ContestFactsError::Unavailable)?;
+            validate_contest_facts_state(&mut connection, contest, problems).await?;
+        }
+        let local_date = crate::current_local_date().map_err(|_| ContestFactsError::Unavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestFactsError::Unavailable)?;
+
         let mut tx = pool
             .begin()
             .await
             .map_err(|_| ContestFactsError::Unavailable)?;
-        let contest_row: Option<(i64, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT id, starts_at_utc, import_status, facts_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
-        )
-        .bind(contest.contest_id() as i64)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ContestFactsError::Unavailable)?;
-        let (contest_id, starts_at, import_status, facts_status) =
-            contest_row.ok_or(ContestFactsError::NotFound)?;
-        if import_status != "complete" {
-            return Err(ContestFactsError::ImportIncomplete);
-        }
-        if facts_status == "completed" {
-            return Err(ContestFactsError::AlreadyCompleted);
-        }
-        acm_os_application::validate_contest_facts_input(contest, starts_at.as_deref(), problems)?;
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT p.id, p.external_problem_key FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
-        ).bind(contest_id).fetch_all(&mut *tx).await.map_err(|_| ContestFactsError::Unavailable)?;
-        if rows.len() != problems.len()
-            || rows
-                .iter()
-                .any(|(_, index)| !problems.iter().any(|item| item.problem.index() == index))
-        {
-            return Err(ContestFactsError::ProblemSetMismatch);
-        }
+        let (contest_id, rows) = validate_contest_facts_state(&mut tx, contest, problems).await?;
         for (problem_id, index) in rows {
             let input = problems
                 .iter()
@@ -5265,6 +7148,44 @@ impl ContestFactsPort for DatabaseRuntime {
                 ContestReadError::Unavailable => ContestFactsError::Unavailable,
             })
     }
+}
+
+async fn validate_contest_facts_state(
+    connection: &mut sqlx::SqliteConnection,
+    contest: &acm_os_domain::CodeforcesContestIdentity,
+    problems: &[ContestProblemFactInput],
+) -> Result<(i64, Vec<(i64, String)>), ContestFactsError> {
+    let contest_row: Option<(i64, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT id, starts_at_utc, import_status, facts_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+    )
+    .bind(contest.contest_id() as i64)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ContestFactsError::Unavailable)?;
+    let (contest_id, starts_at, import_status, facts_status) =
+        contest_row.ok_or(ContestFactsError::NotFound)?;
+    if import_status != "complete" {
+        return Err(ContestFactsError::ImportIncomplete);
+    }
+    if facts_status == "completed" {
+        return Err(ContestFactsError::AlreadyCompleted);
+    }
+    acm_os_application::validate_contest_facts_input(contest, starts_at.as_deref(), problems)?;
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT p.id, p.external_problem_key FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+    )
+    .bind(contest_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| ContestFactsError::Unavailable)?;
+    if rows.len() != problems.len()
+        || rows
+            .iter()
+            .any(|(_, index)| !problems.iter().any(|item| item.problem.index() == index))
+    {
+        return Err(ContestFactsError::ProblemSetMismatch);
+    }
+    Ok((contest_id, rows))
 }
 
 fn contest_final_result_value(value: ContestFinalResult) -> &'static str {
@@ -5387,7 +7308,10 @@ fn parse_contest_upsolve_decision(
 pub async fn start_database(app_private_data: &Path) -> DatabaseRuntime {
     match try_start_database(app_private_data).await {
         Ok(runtime) => runtime,
-        Err(reason) => DatabaseRuntime::recovery(reason),
+        Err(reason) => DatabaseRuntime::recovery_with_app_private_data(
+            reason,
+            Some(app_private_data.to_owned()),
+        ),
     }
 }
 
@@ -5399,6 +7323,7 @@ async fn try_start_database(
     let startup_lock = acquire_startup_lock(app_private_data, STARTUP_LOCK_TIMEOUT).await?;
 
     let database_path = app_private_data.join(DATABASE_FILENAME);
+    apply_pending_restore_intent(app_private_data, &database_path).await?;
     let database_exists = database_path
         .try_exists()
         .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
@@ -5457,6 +7382,8 @@ async fn try_start_database(
         return Err(StartupRecoveryReason::MigrationFailed);
     }
     validate_schema_contract(&pool, applied_schema_version).await?;
+    recover_pending_critical_operations(&pool).await?;
+    ensure_no_unresolved_critical_operations(&pool).await?;
 
     Ok(DatabaseRuntime {
         _pool: Some(pool),
@@ -5466,7 +7393,815 @@ async fn try_start_database(
         },
         markdown_projection_cache: Mutex::new(HashMap::new()),
         recovery_root: Some(app_private_data.join("markdown-recovery")),
+        app_private_data: Some(app_private_data.to_owned()),
+        daily_backup_lock: tokio::sync::Mutex::new(()),
     })
+}
+
+impl DatabaseRuntime {
+    async fn ensure_daily_backup(
+        &self,
+        local_date: acm_os_domain::LocalDate,
+    ) -> Result<Option<PathBuf>, StartupRecoveryReason> {
+        let _guard = self.daily_backup_lock.lock().await;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
+        let directory = root.join("backups/daily");
+        let filename_prefix = format!("daily-{}-", local_date.to_iso_string());
+        if published_backup_with_prefix_exists(&directory, &filename_prefix)? {
+            return Ok(None);
+        }
+        create_consistent_backup_with_prefix(
+            pool,
+            root,
+            "daily",
+            supported_schema_version(),
+            &filename_prefix,
+        )
+        .await
+        .map(Some)
+    }
+}
+
+impl acm_os_application::ManualBackupPort for DatabaseRuntime {
+    async fn preview_manual_backup(
+        &self,
+    ) -> Result<acm_os_application::ManualBackupPreview, acm_os_application::ManualBackupError>
+    {
+        let schema_version = supported_schema_version();
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        Ok(acm_os_application::ManualBackupPreview {
+            schema_version,
+            backup_directory: root.join("backups/manual").to_string_lossy().into_owned(),
+            filename_prefix: format!("manual-schema-{schema_version}-"),
+        })
+    }
+
+    async fn create_manual_backup(
+        &self,
+    ) -> Result<acm_os_application::ManualBackupResult, acm_os_application::ManualBackupError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let schema_version = supported_schema_version();
+        let path = create_consistent_backup(pool, root, "manual", schema_version)
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        Ok(acm_os_application::ManualBackupResult {
+            path: path.to_string_lossy().into_owned(),
+            schema_version,
+        })
+    }
+
+    async fn backup_inventory(
+        &self,
+    ) -> Result<acm_os_application::BackupInventory, acm_os_application::ManualBackupError> {
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?
+            .join("backups");
+        let discovered = tokio::task::spawn_blocking(move || discover_backup_files(&root))
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        let retention = backup_retention_preview(&discovered);
+        let mut entries = Vec::new();
+        for (position, backup) in discovered.into_iter().enumerate() {
+            let integrity_verified = match connect_read_only(&backup.path).await {
+                Ok(pool) => {
+                    let valid = verify_integrity(&pool).await.is_ok();
+                    pool.close().await;
+                    valid
+                }
+                Err(_) => false,
+            };
+            entries.push(acm_os_application::BackupInventoryEntry {
+                path: backup.path.to_string_lossy().into_owned(),
+                category: backup.category,
+                size_bytes: backup.size_bytes,
+                integrity_verified,
+                retention: retention[position].to_owned(),
+            });
+        }
+        Ok(acm_os_application::BackupInventory {
+            entries,
+            daily_keep: 7,
+            weekly_keep: 4,
+        })
+    }
+
+    async fn preview_system_restore_candidate(
+        &self,
+        source_path: String,
+    ) -> Result<
+        acm_os_application::SystemRestoreCandidatePreview,
+        acm_os_application::ManualBackupError,
+    > {
+        let app_private_data = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let backup_root = app_private_data.join("backups");
+        let display_source_path = source_path.clone();
+        let candidate = PathBuf::from(source_path);
+        let (canonical_root, canonical_candidate) = tokio::task::spawn_blocking(move || {
+            let root = std::fs::canonicalize(backup_root)
+                .map_err(|_| acm_os_application::ManualBackupError::RestoreCandidateUnavailable)?;
+            let candidate = std::fs::canonicalize(candidate)
+                .map_err(|_| acm_os_application::ManualBackupError::RestoreCandidateUnavailable)?;
+            Ok::<_, acm_os_application::ManualBackupError>((root, candidate))
+        })
+        .await
+        .map_err(|_| acm_os_application::ManualBackupError::RestoreCandidateUnavailable)??;
+
+        if !canonical_candidate.starts_with(&canonical_root) {
+            return Err(acm_os_application::ManualBackupError::RestoreCandidateOutsideBackupArea);
+        }
+        let relative = canonical_candidate
+            .strip_prefix(&canonical_root)
+            .map_err(|_| {
+                acm_os_application::ManualBackupError::RestoreCandidateOutsideBackupArea
+            })?;
+        let components = relative.components().collect::<Vec<_>>();
+        let category = components
+            .first()
+            .and_then(|component| component.as_os_str().to_str());
+        let published_category = matches!(
+            category,
+            Some("manual" | "pre-migration" | "pre-restore" | "daily" | "weekly")
+        );
+        let metadata = std::fs::metadata(&canonical_candidate)
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreCandidateUnavailable)?;
+        if components.len() != 2
+            || !published_category
+            || !metadata.is_file()
+            || canonical_candidate
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("sqlite3")
+        {
+            return Err(acm_os_application::ManualBackupError::RestoreCandidateNotPublished);
+        }
+
+        let pool = connect_read_only(&canonical_candidate)
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+        let inspection = async {
+            verify_integrity(&pool).await?;
+            let schema_version = inspect_schema_version(&pool).await?;
+            let supported = supported_schema_version();
+            if schema_version == 0 {
+                return Ok::<_, StartupRecoveryReason>((schema_version, supported, false));
+            }
+            if schema_version > supported {
+                return Ok::<_, StartupRecoveryReason>((schema_version, supported, true));
+            }
+            let legacy_m5 = schema_version == 10 && is_legacy_m5_schema(&pool).await?;
+            if !legacy_m5 {
+                validate_schema_contract(&pool, schema_version).await?;
+            }
+            Ok((schema_version, supported, false))
+        }
+        .await;
+        pool.close().await;
+        let (schema_version, supported_schema_version, unsupported) =
+            inspection.map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+        if schema_version == 0 {
+            return Err(acm_os_application::ManualBackupError::RestoreCandidateNotPublished);
+        }
+        if unsupported {
+            return Err(acm_os_application::ManualBackupError::RestoreCandidateSchemaUnsupported);
+        }
+
+        Ok(acm_os_application::SystemRestoreCandidatePreview {
+            source_path: display_source_path,
+            schema_version,
+            supported_schema_version,
+            migration_required: schema_version < supported_schema_version,
+            restores_system_facts: true,
+            overwrites_markdown: false,
+        })
+    }
+
+    async fn create_pre_restore_snapshot(
+        &self,
+        source_path: String,
+    ) -> Result<acm_os_application::PreRestoreSnapshotResult, acm_os_application::ManualBackupError>
+    {
+        let candidate =
+            <Self as acm_os_application::ManualBackupPort>::preview_system_restore_candidate(
+                self,
+                source_path,
+            )
+            .await?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let schema_version = supported_schema_version();
+        let path = create_consistent_backup(pool, root, "pre-restore", schema_version)
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::PreRestoreBackupFailed)?;
+        Ok(acm_os_application::PreRestoreSnapshotResult {
+            path: path.to_string_lossy().into_owned(),
+            schema_version,
+            candidate,
+        })
+    }
+
+    async fn prepare_restore_intent(
+        &self,
+        source_path: String,
+    ) -> Result<
+        acm_os_application::RestoreIntentPreparationResult,
+        acm_os_application::ManualBackupError,
+    > {
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        if root.join(DATABASE_RESTORE_INTENT_FILENAME).exists() {
+            return Err(acm_os_application::ManualBackupError::RestoreIntentPending);
+        }
+
+        let candidate =
+            <Self as acm_os_application::ManualBackupPort>::preview_system_restore_candidate(
+                self,
+                source_path,
+            )
+            .await?;
+        let snapshot = <Self as acm_os_application::ManualBackupPort>::create_pre_restore_snapshot(
+            self,
+            candidate.source_path.clone(),
+        )
+        .await?;
+
+        let staging_dir = root.join("backups/pre-restore");
+        std::fs::create_dir_all(&staging_dir)
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreStagingFailed)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreStagingFailed)?
+            .as_nanos();
+        let staging_path = staging_dir.join(format!("restore-staging-{timestamp}.sqlite3"));
+        let partial_path = staging_dir.join(format!("restore-staging-{timestamp}.sqlite3.partial"));
+        let source = PathBuf::from(&candidate.source_path);
+        std::fs::copy(&source, &partial_path)
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreStagingFailed)?;
+        let verification_pool = connect_read_only(&partial_path)
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreStagingFailed)?;
+        let verification = verify_integrity(&verification_pool).await;
+        verification_pool.close().await;
+        if verification.is_err() {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(acm_os_application::ManualBackupError::RestoreStagingFailed);
+        }
+        std::fs::rename(&partial_path, &staging_path)
+            .map_err(|_| acm_os_application::ManualBackupError::RestoreStagingFailed)?;
+
+        write_restore_intent(root, &staging_path, Path::new(&snapshot.path)).map_err(|error| {
+            let _ = std::fs::remove_file(&staging_path);
+            match error {
+                RestoreIntentError::AlreadyPending => {
+                    acm_os_application::ManualBackupError::RestoreIntentPending
+                }
+                RestoreIntentError::WriteFailed | RestoreIntentError::Invalid => {
+                    acm_os_application::ManualBackupError::RestoreIntentWriteFailed
+                }
+            }
+        })?;
+
+        Ok(acm_os_application::RestoreIntentPreparationResult {
+            staging_path: staging_path.to_string_lossy().into_owned(),
+            pre_restore_snapshot_path: snapshot.path,
+            candidate,
+        })
+    }
+
+    async fn preview_post_restore_rebuild(
+        &self,
+    ) -> Result<acm_os_application::PostRestoreRebuildPreview, acm_os_application::ManualBackupError>
+    {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let (problem_bindings, knowledge_bindings, derived_relations): (i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM file_bindings), \
+                        (SELECT COUNT(*) FROM knowledge_file_bindings), \
+                        (SELECT COUNT(*) FROM knowledge_link_index)",
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        Ok(acm_os_application::PostRestoreRebuildPreview {
+            problem_binding_count: u64::try_from(problem_bindings)
+                .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?,
+            knowledge_binding_count: u64::try_from(knowledge_bindings)
+                .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?,
+            derived_relation_count: u64::try_from(derived_relations)
+                .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?,
+            revalidates_bindings: true,
+            rebuilds_derived_knowledge: true,
+            overwrites_markdown: false,
+        })
+    }
+
+    async fn validate_post_restore_problem_bindings(
+        &self,
+    ) -> Result<
+        acm_os_application::PostRestoreProblemBindingValidation,
+        acm_os_application::ManualBackupError,
+    > {
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let bindings: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT problem_id, vault_relative_path, windows_file_key, content_digest \
+             FROM file_bindings ORDER BY problem_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let total_count = u64::try_from(bindings.len())
+            .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+        let active_vault = workspace.active_vault_path().to_owned();
+        let outcomes = tokio::task::spawn_blocking(move || {
+            bindings
+                .into_iter()
+                .map(|(problem_id, path, file_key, digest)| {
+                    let resolution =
+                        resolve_personal_note(&active_vault, &path, file_key.as_deref(), &digest);
+                    (problem_id, path, resolution)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let mut ready_count = 0_u64;
+        let mut anomalies = Vec::new();
+        for (problem_id, path, resolution) in outcomes {
+            let reason = match resolution {
+                BindingResolution::Ready(_) => {
+                    ready_count += 1;
+                    continue;
+                }
+                BindingResolution::LocationAnomaly => "location_anomaly",
+                BindingResolution::VaultUnavailable => "vault_unavailable",
+                BindingResolution::InvalidBinding => "invalid_binding",
+            };
+            anomalies.push(acm_os_application::PostRestoreBindingAnomaly {
+                problem_id,
+                vault_relative_path: path,
+                reason: reason.to_owned(),
+            });
+        }
+        Ok(acm_os_application::PostRestoreProblemBindingValidation {
+            total_count,
+            ready_count,
+            anomalies,
+        })
+    }
+
+    async fn validate_post_restore_knowledge_bindings(
+        &self,
+    ) -> Result<
+        acm_os_application::PostRestoreKnowledgeBindingValidation,
+        acm_os_application::ManualBackupError,
+    > {
+        let workspace = self
+            .load_workspace_configuration()
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let bindings: Vec<(String, String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT knowledge_node_id, vault_relative_path, windows_file_key, content_digest, location_state \
+             FROM knowledge_file_bindings ORDER BY knowledge_node_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let total_count = u64::try_from(bindings.len())
+            .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+        let confirmed_deleted_count = u64::try_from(
+            bindings
+                .iter()
+                .filter(|(_, _, _, _, state)| state == "confirmed_deleted")
+                .count(),
+        )
+        .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+        let active_vault = workspace.active_vault_path().to_owned();
+        let knowledge_root = workspace.knowledge_root_path().to_owned();
+        let discovered =
+            tokio::task::spawn_blocking(move || discover_markdown(&active_vault, &knowledge_root))
+                .await
+                .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?
+                .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?
+                .0;
+        let mut ready_count = 0_u64;
+        let mut anomalies = Vec::new();
+        for (node_id, path, file_key, digest, state) in bindings {
+            if state == "confirmed_deleted" {
+                continue;
+            }
+            let matches = discovered.iter().filter(|file| {
+                file.relative_path == path
+                    && (file.windows_file_key == file_key || file.content_digest == digest)
+            });
+            if matches.count() == 1 {
+                ready_count += 1;
+            } else {
+                anomalies.push(acm_os_application::PostRestoreKnowledgeBindingAnomaly {
+                    knowledge_node_id: node_id,
+                    vault_relative_path: path,
+                    reason: "location_anomaly".to_owned(),
+                });
+            }
+        }
+        Ok(acm_os_application::PostRestoreKnowledgeBindingValidation {
+            total_count,
+            ready_count,
+            confirmed_deleted_count,
+            anomalies,
+        })
+    }
+
+    async fn check_post_restore_rebuild_preconditions(
+        &self,
+    ) -> Result<
+        acm_os_application::PostRestoreRebuildPreconditionCheck,
+        acm_os_application::ManualBackupError,
+    > {
+        let problem =
+            <Self as acm_os_application::ManualBackupPort>::validate_post_restore_problem_bindings(
+                self,
+            )
+            .await?;
+        let knowledge = <Self as acm_os_application::ManualBackupPort>::validate_post_restore_knowledge_bindings(self).await?;
+        let mut blockers = Vec::new();
+        if self.has_pending_restore_intent() {
+            blockers.push("restore_intent_pending".to_owned());
+        }
+        if matches!(self.status(), StartupGateStatus::RecoveryRequired { .. }) {
+            blockers.push("startup_recovery_required".to_owned());
+        }
+        if !problem.anomalies.is_empty() {
+            blockers.push("problem_binding_anomalies".to_owned());
+        }
+        if !knowledge.anomalies.is_empty() {
+            blockers.push("knowledge_binding_anomalies".to_owned());
+        }
+        Ok(acm_os_application::PostRestoreRebuildPreconditionCheck {
+            eligible: blockers.is_empty(),
+            blockers,
+            problem_binding_anomaly_count: u64::try_from(problem.anomalies.len())
+                .unwrap_or(u64::MAX),
+            knowledge_binding_anomaly_count: u64::try_from(knowledge.anomalies.len())
+                .unwrap_or(u64::MAX),
+        })
+    }
+
+    async fn apply_post_restore_rebuild(
+        &self,
+    ) -> Result<
+        acm_os_application::PostRestoreRebuildApplyResult,
+        acm_os_application::ManualBackupError,
+    > {
+        let check = <Self as acm_os_application::ManualBackupPort>::check_post_restore_rebuild_preconditions(self).await?;
+        if !check.eligible {
+            return Err(acm_os_application::ManualBackupError::RestoreCandidateNotPublished);
+        }
+        let projection =
+            <Self as acm_os_application::KnowledgeIndexPort>::rebuild_knowledge_index(self)
+                .await
+                .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        let relation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_link_index")
+            .fetch_one(
+                self._pool
+                    .as_ref()
+                    .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?,
+            )
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        Ok(acm_os_application::PostRestoreRebuildApplyResult {
+            knowledge_node_count: u64::try_from(projection.nodes.len()).unwrap_or(u64::MAX),
+            relation_count: u64::try_from(relation_count).unwrap_or(u64::MAX),
+            location_anomaly_count: u64::try_from(projection.location_anomalies.len())
+                .unwrap_or(u64::MAX),
+        })
+    }
+
+    async fn preview_diagnostic_export(
+        &self,
+    ) -> Result<acm_os_application::DiagnosticExportPreview, acm_os_application::ManualBackupError>
+    {
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        Ok(acm_os_application::DiagnosticExportPreview {
+            output_directory: root.join("diagnostics").to_string_lossy().into_owned(),
+            sections: vec![
+                "startup_status".to_owned(),
+                "schema_version".to_owned(),
+                "critical_operation_summary".to_owned(),
+                "backup_inventory_summary".to_owned(),
+                "restore_diagnostics".to_owned(),
+                "binding_anomaly_summary".to_owned(),
+                "adapter_health_summary".to_owned(),
+            ],
+            privacy_exclusions: vec![
+                "markdown_content".to_owned(),
+                "statement_content".to_owned(),
+                "credentials".to_owned(),
+                "absolute_workspace_paths".to_owned(),
+            ],
+            creates_files: false,
+        })
+    }
+
+    async fn create_diagnostic_export(
+        &self,
+    ) -> Result<acm_os_application::DiagnosticExportResult, acm_os_application::ManualBackupError>
+    {
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let diagnostics = self.inspect_restore_diagnostics().await;
+        let pending_critical_operation_count = if let Some(pool) = self._pool.as_ref() {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM critical_operations WHERE operation_status IN ('pending', 'needs_recovery')",
+            )
+            .fetch_one(pool)
+            .await
+            .ok()
+            .and_then(|count| u64::try_from(count).ok())
+        } else {
+            None
+        };
+        let backup_file_count = discover_backup_files(&root.join("backups"))
+            .ok()
+            .and_then(|files| u64::try_from(files.len()).ok());
+        let (startup_state, schema_version) = match self.status() {
+            StartupGateStatus::Ready { schema_version } => ("ready", Some(*schema_version)),
+            StartupGateStatus::RecoveryRequired { .. } => ("recoveryRequired", None),
+        };
+        let output_dir = root.join("diagnostics");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?
+            .as_secs();
+        let filename = format!("diagnostic-{stamp}.json");
+        let partial = output_dir.join(format!("{filename}.partial"));
+        let published = output_dir.join(&filename);
+        let payload = serde_json::json!({
+            "format": "acm-os-diagnostic-v1",
+            "sections": ["startup_status", "schema_version", "critical_operation_summary", "backup_inventory_summary", "restore_diagnostics", "binding_anomaly_summary", "adapter_health_summary"],
+            "startup": {"state": startup_state, "schemaVersion": schema_version},
+            "health": {
+                "pendingCriticalOperationCount": pending_critical_operation_count,
+                "backupFileCount": backup_file_count,
+                "pendingRestoreIntent": diagnostics.pending_intent,
+                "rollbackIntegrityVerified": diagnostics.rollback_integrity_verified,
+            },
+            "restore": {
+                "pendingIntent": diagnostics.pending_intent,
+                "rollbackIntegrityVerified": diagnostics.rollback_integrity_verified,
+                "startupState": startup_state,
+                "schemaVersion": schema_version,
+            },
+            "adapterHealth": [{
+                "name": "codeforces",
+                "configured": true,
+                "available": crate::codeforces::CodeforcesHttpAdapter::new().is_ok(),
+                "networkProbePerformed": false,
+            }],
+            "privacy": {"markdownContent": false, "statementContent": false, "credentials": false, "absoluteWorkspacePaths": false},
+        });
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        std::fs::write(&partial, bytes)
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        std::fs::rename(&partial, &published)
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        Ok(acm_os_application::DiagnosticExportResult {
+            path: published.to_string_lossy().into_owned(),
+            sections: vec![
+                "startup_status".to_owned(),
+                "schema_version".to_owned(),
+                "critical_operation_summary".to_owned(),
+                "backup_inventory_summary".to_owned(),
+                "restore_diagnostics".to_owned(),
+                "binding_anomaly_summary".to_owned(),
+                "adapter_health_summary".to_owned(),
+            ],
+        })
+    }
+
+    async fn create_weekly_backup(
+        &self,
+    ) -> Result<acm_os_application::ManualBackupResult, acm_os_application::ManualBackupError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?;
+        let schema_version = supported_schema_version();
+        let path =
+            create_consistent_backup_with_prefix(pool, root, "weekly", schema_version, "weekly-")
+                .await
+                .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        Ok(acm_os_application::ManualBackupResult {
+            path: path.to_string_lossy().into_owned(),
+            schema_version,
+        })
+    }
+
+    async fn preview_backup_retention(
+        &self,
+    ) -> Result<acm_os_application::BackupRetentionPreview, acm_os_application::ManualBackupError>
+    {
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?
+            .join("backups");
+        let discovered = tokio::task::spawn_blocking(move || discover_backup_files(&root))
+            .await
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?
+            .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        let policy = backup_retention_preview(&discovered);
+        let mut protected_paths = Vec::new();
+        let mut prune_candidate_paths = Vec::new();
+        for (backup, decision) in discovered.into_iter().zip(policy) {
+            let path = backup.path.to_string_lossy().into_owned();
+            if decision == "prune_candidate" {
+                prune_candidate_paths.push(path);
+            } else {
+                protected_paths.push(path);
+            }
+        }
+        Ok(acm_os_application::BackupRetentionPreview {
+            protected_paths,
+            prune_candidate_paths,
+            daily_keep: 7,
+            weekly_keep: 4,
+        })
+    }
+
+    async fn apply_backup_retention(
+        &self,
+        mut paths: Vec<String>,
+    ) -> Result<u64, acm_os_application::ManualBackupError> {
+        let preview =
+            <Self as acm_os_application::ManualBackupPort>::preview_backup_retention(self).await?;
+        let mut expected = preview.prune_candidate_paths;
+        paths.sort();
+        paths.dedup();
+        expected.sort();
+        if paths != expected {
+            return Err(acm_os_application::ManualBackupError::IntegrityViolation);
+        }
+        let root = self
+            .app_private_data
+            .as_ref()
+            .ok_or(acm_os_application::ManualBackupError::PersistenceUnavailable)?
+            .join("backups");
+        let daily = std::fs::canonicalize(root.join("daily")).ok();
+        let weekly = std::fs::canonicalize(root.join("weekly")).ok();
+        for path in &paths {
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)?;
+            let allowed = daily
+                .as_ref()
+                .is_some_and(|value| canonical.starts_with(value))
+                || weekly
+                    .as_ref()
+                    .is_some_and(|value| canonical.starts_with(value));
+            if !allowed
+                || canonical.extension().and_then(|value| value.to_str()) != Some("sqlite3")
+                || !canonical.is_file()
+            {
+                return Err(acm_os_application::ManualBackupError::IntegrityViolation);
+            }
+        }
+        for path in &paths {
+            std::fs::remove_file(path)
+                .map_err(|_| acm_os_application::ManualBackupError::BackupFailed)?;
+        }
+        u64::try_from(paths.len())
+            .map_err(|_| acm_os_application::ManualBackupError::IntegrityViolation)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredBackup {
+    path: PathBuf,
+    category: String,
+    size_bytes: u64,
+    modified_nanos: u128,
+}
+
+fn discover_backup_files(root: &Path) -> Result<Vec<DiscoveredBackup>, ()> {
+    let mut items = Vec::new();
+    for category in ["manual", "pre-migration", "pre-restore", "daily", "weekly"] {
+        let directory = root.join(category);
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory).map_err(|_| ())? {
+            let entry = entry.map_err(|_| ())?;
+            let path = entry.path();
+            if !entry.file_type().map_err(|_| ())?.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("sqlite3")
+            {
+                continue;
+            }
+            let metadata = entry.metadata().map_err(|_| ())?;
+            let modified_nanos = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |value| value.as_nanos());
+            items.push(DiscoveredBackup {
+                path,
+                category: category.to_owned(),
+                size_bytes: metadata.len(),
+                modified_nanos,
+            });
+        }
+    }
+    items.sort_by(|left, right| {
+        right
+            .modified_nanos
+            .cmp(&left.modified_nanos)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(items)
+}
+
+fn backup_retention_preview(items: &[DiscoveredBackup]) -> Vec<&'static str> {
+    let mut daily_seen = 0;
+    let mut weekly_seen = 0;
+    items
+        .iter()
+        .map(|item| match item.category.as_str() {
+            "daily" => {
+                daily_seen += 1;
+                if daily_seen <= 7 {
+                    "keep"
+                } else {
+                    "prune_candidate"
+                }
+            }
+            "weekly" => {
+                weekly_seen += 1;
+                if weekly_seen <= 4 {
+                    "keep"
+                } else {
+                    "prune_candidate"
+                }
+            }
+            _ => "protected",
+        })
+        .collect()
 }
 
 const LEGACY_M5_MIGRATION_10_CHECKSUM: &[u8] = &[
@@ -5785,7 +8520,28 @@ async fn validate_schema_contract(
 
     if !matches!(
         schema_version,
-        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20
+        1 | 2
+            | 3
+            | 4
+            | 5
+            | 6
+            | 7
+            | 8
+            | 9
+            | 10
+            | 11
+            | 12
+            | 13
+            | 14
+            | 15
+            | 16
+            | 17
+            | 18
+            | 19
+            | 20
+            | 21
+            | 22
+            | 23
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -5905,6 +8661,12 @@ async fn validate_schema_contract(
             ],
         )
         .await?;
+    }
+    if schema_version >= 21 {
+        validate_critical_operations_contract(pool).await?;
+    }
+    if schema_version >= 22 {
+        validate_knowledge_index_contract(pool).await?;
     }
     Ok(())
 }
@@ -6147,7 +8909,285 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
         ));
         expected_objects.sort();
     }
+    if schema_version >= 21 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "critical_operations_by_status".to_owned(),
+                "critical_operations".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "critical_operations".to_owned(),
+                "critical_operations".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 22 {
+        expected_objects.sort();
+    }
     expected_objects
+}
+
+async fn validate_critical_operations_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "critical_operations",
+        &[
+            "id",
+            "operation_kind",
+            "object_type",
+            "object_id",
+            "binding_id",
+            "pre_content_digest",
+            "postcondition_json",
+            "operation_status",
+            "created_at_utc",
+            "updated_at_utc",
+            "resolved_at_utc",
+        ],
+    )
+    .await?;
+
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'critical_operations'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+    .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+    const EXPECTED_SQL: &str = "\
+        CREATE TABLE critical_operations (\
+            id TEXT PRIMARY KEY CHECK (length(id) = 36),\
+            operation_kind TEXT NOT NULL CHECK (operation_kind IN ('markdown_system_fact')),\
+            object_type TEXT NOT NULL CHECK (length(object_type) > 0),\
+            object_id TEXT NOT NULL CHECK (length(object_id) > 0),\
+            binding_id INTEGER REFERENCES file_bindings(id) ON DELETE RESTRICT,\
+            pre_content_digest TEXT NOT NULL CHECK (length(pre_content_digest) = 64),\
+            postcondition_json TEXT NOT NULL CHECK (length(postcondition_json) > 0),\
+            operation_status TEXT NOT NULL DEFAULT 'pending' CHECK (operation_status IN ('pending', 'needs_recovery', 'completed', 'abandoned')),\
+            created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
+            updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
+            resolved_at_utc TEXT,\
+            CHECK ((operation_status IN ('pending', 'needs_recovery') AND resolved_at_utc IS NULL) OR (operation_status IN ('completed', 'abandoned') AND resolved_at_utc IS NOT NULL))\
+        )";
+    if normalize_schema_sql(&table_sql) != normalize_schema_sql(EXPECTED_SQL) {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    Ok(())
+}
+
+async fn ensure_no_unresolved_critical_operations(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    let unresolved: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM critical_operations WHERE operation_status IN ('pending', 'needs_recovery')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if unresolved == 0 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::UnresolvedCriticalOperation)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CriticalMarkdownPostcondition {
+    kind: String,
+    target: String,
+}
+
+async fn recover_pending_critical_operations(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    let pending: Vec<(String, Option<i64>, String, String)> = sqlx::query_as(
+        "SELECT id, binding_id, pre_content_digest, postcondition_json \
+         FROM critical_operations WHERE operation_status = 'pending' ORDER BY created_at_utc, id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+
+    for (operation_id, binding_id, pre_digest, postcondition_json) in pending {
+        let Some(binding_id) = binding_id else {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        };
+        let Some((active_vault, relative_path, stored_digest)) =
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT ws.active_vault_path, fb.vault_relative_path, fb.content_digest \
+             FROM file_bindings fb CROSS JOIN workspace_settings ws \
+             WHERE fb.id = ?1 AND ws.singleton = 1",
+            )
+            .bind(binding_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+        else {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        };
+        let Ok(vault) = std::fs::canonicalize(&active_vault) else {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        };
+        let Ok(path) = std::fs::canonicalize(vault.join(&relative_path)) else {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        };
+        if !path.starts_with(&vault) || !path.is_file() {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        };
+        let current_digest = sha256_hex(&bytes);
+        if current_digest == pre_digest && stored_digest == pre_digest {
+            resolve_critical_operation(pool, &operation_id, "abandoned").await?;
+            continue;
+        }
+
+        let postcondition =
+            serde_json::from_str::<CriticalMarkdownPostcondition>(&postcondition_json);
+        let satisfied = postcondition.is_ok_and(|postcondition| {
+            postcondition.kind == "prerequisite_link"
+                && prerequisite_link_postcondition_satisfied(&bytes, &postcondition.target)
+        });
+        if !satisfied {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        }
+
+        if stored_digest != pre_digest && stored_digest != current_digest {
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        }
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        if stored_digest == pre_digest {
+            let updated = sqlx::query(
+                "UPDATE file_bindings SET content_digest = ?1, windows_file_key = ?2, \
+                    binding_state = 'linked', updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?3 AND content_digest = ?4",
+            )
+            .bind(&current_digest)
+            .bind(windows_file_key(&path))
+            .bind(binding_id)
+            .bind(&pre_digest)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+            if updated.rows_affected() != 1 {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+                mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+                continue;
+            }
+        } else if stored_digest != current_digest {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+            mark_critical_operation_needs_recovery(pool, &operation_id).await?;
+            continue;
+        }
+        let resolved = sqlx::query(
+            "UPDATE critical_operations SET operation_status = 'completed', \
+                resolved_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?1 AND operation_status = 'pending'",
+        )
+        .bind(&operation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        if resolved.rows_affected() != 1 {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    }
+
+    Ok(())
+}
+
+fn prerequisite_link_postcondition_satisfied(bytes: &[u8], target: &str) -> bool {
+    let Ok(markdown) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let projection = crate::markdown::parse_problem_markdown(markdown, sha256_hex(bytes));
+    let sections = projection
+        .known_sections
+        .iter()
+        .filter(|section| section.name == "前置知识")
+        .collect::<Vec<_>>();
+    let [section] = sections.as_slice() else {
+        return false;
+    };
+    crate::markdown::section_contains_wikilink_item(
+        markdown,
+        section.start_offset,
+        section.end_offset,
+        target,
+    )
+}
+
+async fn resolve_critical_operation(
+    pool: &SqlitePool,
+    operation_id: &str,
+    status: &str,
+) -> Result<(), StartupRecoveryReason> {
+    let updated = sqlx::query(
+        "UPDATE critical_operations SET operation_status = ?1, \
+            resolved_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+            updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ?2 AND operation_status = 'pending'",
+    )
+    .bind(status)
+    .bind(operation_id)
+    .execute(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if updated.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
+async fn mark_critical_operation_needs_recovery(
+    pool: &SqlitePool,
+    operation_id: &str,
+) -> Result<(), StartupRecoveryReason> {
+    let updated = sqlx::query(
+        "UPDATE critical_operations SET operation_status = 'needs_recovery', \
+            updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ?1 AND operation_status = 'pending'",
+    )
+    .bind(operation_id)
+    .execute(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if updated.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
 }
 
 async fn validate_contest_import_contract(
@@ -6602,6 +9642,7 @@ async fn validate_table_columns(
         "knowledge_candidate_records" => "PRAGMA table_xinfo('knowledge_candidate_records')",
         "contest_correction_events" => "PRAGMA table_xinfo('contest_correction_events')",
         "contest_ai_analyses" => "PRAGMA table_xinfo('contest_ai_analyses')",
+        "critical_operations" => "PRAGMA table_xinfo('critical_operations')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -6903,13 +9944,93 @@ async fn create_pre_migration_backup(
     let backup_directory = app_private_data.join("backups").join("pre-migration");
     std::fs::create_dir_all(&backup_directory)
         .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?;
-
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?
         .as_nanos();
     let backup_path = backup_directory.join(format!(
         "schema-{current_version}-to-{target_version}-{timestamp}.sqlite3"
+    ));
+    let mut partial_path = backup_path.as_os_str().to_os_string();
+    partial_path.push(".partial");
+    let partial_path = PathBuf::from(partial_path);
+    sqlx::query("VACUUM INTO ?1")
+        .bind(partial_path.to_string_lossy().into_owned())
+        .execute(pool)
+        .await
+        .map_err(|_| {
+            let _ = std::fs::remove_file(&partial_path);
+            StartupRecoveryReason::PreMigrationBackupFailed
+        })?;
+    verify_and_publish_backup(&partial_path, &backup_path).await?;
+    Ok(backup_path)
+}
+
+async fn create_consistent_backup(
+    pool: &SqlitePool,
+    app_private_data: &Path,
+    category: &str,
+    schema_version: i64,
+) -> Result<PathBuf, StartupRecoveryReason> {
+    let filename_prefix = if category == "manual" { "manual-" } else { "" };
+    create_consistent_backup_with_prefix(
+        pool,
+        app_private_data,
+        category,
+        schema_version,
+        filename_prefix,
+    )
+    .await
+}
+
+fn published_backup_with_prefix_exists(
+    directory: &Path,
+    filename_prefix: &str,
+) -> Result<bool, StartupRecoveryReason> {
+    if !directory.exists() {
+        return Ok(false);
+    }
+    let entries = std::fs::read_dir(directory)
+        .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?;
+    for entry in entries {
+        let entry = entry.map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?;
+        if !entry
+            .file_type()
+            .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let published = path.extension().and_then(|value| value.to_str()) == Some("sqlite3");
+        let matches_prefix = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(filename_prefix));
+        if published && matches_prefix {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn create_consistent_backup_with_prefix(
+    pool: &SqlitePool,
+    app_private_data: &Path,
+    category: &str,
+    schema_version: i64,
+    filename_prefix: &str,
+) -> Result<PathBuf, StartupRecoveryReason> {
+    let backup_directory = app_private_data.join("backups").join(category);
+    std::fs::create_dir_all(&backup_directory)
+        .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StartupRecoveryReason::PreMigrationBackupFailed)?
+        .as_nanos();
+    let backup_path = backup_directory.join(format!(
+        "{filename_prefix}schema-{schema_version}-{timestamp}.sqlite3"
     ));
     let mut partial_path = backup_path.as_os_str().to_os_string();
     partial_path.push(".partial");
@@ -6961,20 +10082,21 @@ mod tests {
     use acm_os_application::{
         accept_existing_knowledge_candidate, accept_today_extra_suggestion, add_extra_problem_link,
         apply_today_replan, complete_review, complete_today_entry, configure_workspace,
-        confirm_knowledge_understanding, create_personal_note, delete_personal_note,
-        import_codeforces_contest, list_knowledge_candidates, load_knowledge_detail,
-        load_or_generate_today_snapshot, preview_today_extra_suggestions, preview_today_replan,
-        query_workspace_configuration, rebuild_knowledge_index, rebuild_knowledge_relations,
-        register_knowledge_candidate, reorder_today_snapshot, reveal_review_help, review_focus,
-        review_help_drawer, review_history, search_knowledge_index,
-        set_knowledge_candidate_disposition, start_or_resume_review, transition_problem_lifecycle,
-        update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
-        ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
-        ContestImportStatus, ContestProblemSlotDraft, ContestReadPort, PersonalNoteError,
-        PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType,
-        ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason, StartupGateStatus,
-        StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft, SubmissionFact,
-        TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
+        confirm_knowledge_markdown_deleted, confirm_knowledge_understanding, create_personal_note,
+        delete_personal_note, import_codeforces_contest, knowledge_relocation_candidates,
+        list_knowledge_candidates, load_knowledge_detail, load_or_generate_today_snapshot,
+        preview_today_extra_suggestions, preview_today_replan, query_workspace_configuration,
+        rebind_knowledge_node, rebuild_knowledge_index, rebuild_knowledge_relations,
+        register_knowledge_candidate, reorder_today_snapshot, resolve_knowledge_identity_conflict,
+        reveal_review_help, review_focus, review_help_drawer, review_history,
+        search_knowledge_index, set_knowledge_candidate_disposition, start_or_resume_review,
+        transition_problem_lifecycle, update_problem_mastery_evidence, void_review,
+        weekly_acm_budget_for_date, ContestImportDraft, ContestImportPort, ContestImportSource,
+        ContestImportSourceError, ContestImportStatus, ContestProblemSlotDraft, ContestReadPort,
+        PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
+        ProblemIdentityType, ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason,
+        StartupGateStatus, StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft,
+        SubmissionFact, TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
         WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
         WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
     };
@@ -7232,6 +10354,330 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_knowledge_rebind_requires_anomaly_and_rebuilds_derived_relations() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Target.md"), "# Target\n").expect("target");
+        fs::write(knowledge.join("Old.md"), "# Old\n[[Target]]\n").expect("old");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        let old = first
+            .nodes
+            .iter()
+            .find(|node| node.display_name == "Old")
+            .expect("old node")
+            .clone();
+        assert_eq!(
+            knowledge_relocation_candidates(&runtime, &old.knowledge_node_id).await,
+            Err(KnowledgeBindingRepairError::LocationAnomalyRequired)
+        );
+
+        fs::remove_file(knowledge.join("Old.md")).expect("remove old");
+        fs::write(vault.join("candidate-a.md"), "# Old\n[[Target]]\n").expect("candidate a");
+        fs::write(vault.join("candidate-b.md"), "# Old\n[[Target]]\n").expect("candidate b");
+        let ambiguous = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("ambiguous index");
+        assert_eq!(ambiguous.location_anomalies.len(), 1);
+
+        let candidates = knowledge_relocation_candidates(&runtime, &old.knowledge_node_id)
+            .await
+            .expect("fresh candidates");
+        assert!(candidates
+            .iter()
+            .any(
+                |candidate| candidate.vault_relative_path == "candidate-a.md"
+                    && !candidate.occupied
+            ));
+        let rebound = rebind_knowledge_node(&runtime, &old.knowledge_node_id, "candidate-a.md")
+            .await
+            .expect("explicit rebind");
+        assert_eq!(rebound.knowledge_node_id, old.knowledge_node_id);
+        assert_eq!(rebound.vault_relative_path, "candidate-a.md");
+        assert_eq!(rebound.location_state, KnowledgeLocationState::Ready);
+
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let resolved_links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_link_index WHERE source_kind = 'knowledge' \
+             AND source_id = ?1 AND target_ref = 'Target' AND resolution = 'resolved'",
+        )
+        .bind(&old.knowledge_node_id)
+        .fetch_one(pool)
+        .await
+        .expect("rebuilt relation");
+        assert_eq!(resolved_links, 1);
+    }
+
+    #[tokio::test]
+    async fn manual_knowledge_rebind_never_steals_another_knowledge_binding() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Old.md"), "old").expect("old");
+        fs::write(knowledge.join("Occupied.md"), "occupied").expect("occupied");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        let old = first
+            .nodes
+            .iter()
+            .find(|node| node.display_name == "Old")
+            .unwrap();
+        fs::remove_file(knowledge.join("Old.md")).expect("remove old");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("mark anomaly");
+
+        let candidates = knowledge_relocation_candidates(&runtime, &old.knowledge_node_id)
+            .await
+            .expect("candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == "Knowledge/Occupied.md" && candidate.occupied
+        }));
+        assert_eq!(
+            rebind_knowledge_node(&runtime, &old.knowledge_node_id, "Knowledge/Occupied.md").await,
+            Err(KnowledgeBindingRepairError::CandidateOccupied)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_knowledge_rebind_never_steals_a_problem_binding() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Old.md"), "old").expect("old");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        let old = first.nodes[0].clone();
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem");
+        let source = CoreLoopContestSource {
+            manifest: contest_draft(),
+            snapshots: vec![
+                snapshot("A", "source", "safe"),
+                snapshot("B", "source", "safe"),
+            ],
+        };
+        import_codeforces_contest(&runtime, &source, contest.clone())
+            .await
+            .expect("contest import");
+        create_personal_note(&runtime, &problem)
+            .await
+            .expect("personal note");
+        let problem_path: String = sqlx::query_scalar(
+            "SELECT fb.vault_relative_path FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
+             WHERE p.external_contest_key = '1979' AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("problem binding");
+        assert!(problems
+            .join(problem_path.strip_prefix("Problems/").unwrap())
+            .is_file());
+
+        fs::remove_file(knowledge.join("Old.md")).expect("remove old");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("mark anomaly");
+        assert_eq!(
+            rebind_knowledge_node(&runtime, &old.knowledge_node_id, &problem_path).await,
+            Err(KnowledgeBindingRepairError::CandidateOccupied)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_knowledge_deletion_hides_node_preserves_history_and_keeps_file() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        let path = knowledge.join("Old.md");
+        fs::write(&path, "# Old\n").expect("old");
+        fs::write(knowledge.join("Linker.md"), "# Linker\n[[Old]]\n").expect("linker");
+        let unrelated_candidate = vault.join("possible.md");
+        fs::write(&unrelated_candidate, "possible replacement").expect("candidate");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        let node_id = first
+            .nodes
+            .iter()
+            .find(|node| node.display_name == "Old")
+            .expect("old node")
+            .knowledge_node_id
+            .clone();
+        rebuild_knowledge_relations(&runtime)
+            .await
+            .expect("initial relations");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO knowledge_understanding_states \
+             (knowledge_node_id, current_level, historical_highest_level, first_reached_highest_local_date) \
+             VALUES (?1, 'basic', 'proficient', '2026-08-13')",
+        )
+        .bind(&node_id)
+        .execute(pool)
+        .await
+        .expect("understanding history");
+        fs::remove_file(&path).expect("remove source");
+        let anomaly = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("anomaly index");
+        assert_eq!(anomaly.location_anomalies.len(), 1);
+        confirm_knowledge_markdown_deleted(&runtime, &node_id)
+            .await
+            .expect("confirm deletion");
+        assert!(
+            path.is_file() == false,
+            "the already-missing file stays missing"
+        );
+        assert!(
+            unrelated_candidate.is_file(),
+            "confirmation must not delete candidate Markdown"
+        );
+        let hidden = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("hidden index");
+        assert!(hidden
+            .nodes
+            .iter()
+            .all(|node| node.knowledge_node_id != node_id));
+        assert!(hidden.location_anomalies.is_empty());
+        let state: String = sqlx::query_scalar(
+            "SELECT location_state FROM knowledge_file_bindings WHERE knowledge_node_id = ?1",
+        )
+        .bind(&node_id)
+        .fetch_one(pool)
+        .await
+        .expect("tombstone state");
+        assert_eq!(state, "confirmed_deleted");
+        let history: (String, String) = sqlx::query_as(
+            "SELECT current_level, historical_highest_level FROM knowledge_understanding_states \
+             WHERE knowledge_node_id = ?1",
+        )
+        .bind(&node_id)
+        .fetch_one(pool)
+        .await
+        .expect("preserved history");
+        assert_eq!(history, ("basic".to_owned(), "proficient".to_owned()));
+        let unresolved: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_link_index \
+             WHERE source_kind = 'knowledge' AND target_ref = 'Old' \
+               AND target_knowledge_node_id IS NULL AND resolution = 'unresolved'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("unresolved residual link");
+        assert_eq!(unresolved, 1);
+    }
+
+    #[tokio::test]
+    async fn confirmed_knowledge_deletion_refuses_when_file_is_ready() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Ready.md"), "ready").expect("ready");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        assert_eq!(
+            confirm_knowledge_markdown_deleted(&runtime, &first.nodes[0].knowledge_node_id).await,
+            Err(KnowledgeBindingRepairError::LocationAnomalyRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_same_name_rebuild_requires_explicit_identity_choice() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        let original = knowledge.join("Segment Tree.md");
+        fs::write(&original, "# old\n").expect("old markdown");
+        let first = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("first index");
+        let old_id = first.nodes[0].knowledge_node_id.clone();
+        fs::remove_file(&original).expect("remove old markdown");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("anomaly index");
+        confirm_knowledge_markdown_deleted(&runtime, &old_id)
+            .await
+            .expect("confirm old deletion");
+        fs::write(&original, "# rebuilt\n").expect("same-name rebuild");
+        let conflict = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("conflict index");
+        assert_eq!(conflict.nodes.len(), 0);
+        assert_eq!(conflict.identity_conflicts.len(), 1);
+        assert_eq!(
+            conflict.identity_conflicts[0].historical_knowledge_node_id,
+            old_id
+        );
+
+        let restored = resolve_knowledge_identity_conflict(
+            &runtime,
+            &old_id,
+            "Knowledge/Segment Tree.md",
+            true,
+        )
+        .await
+        .expect("restore old identity");
+        assert_eq!(restored.knowledge_node_id, old_id);
+        assert_eq!(
+            rebuild_knowledge_index(&runtime)
+                .await
+                .unwrap()
+                .identity_conflicts
+                .len(),
+            0
+        );
+
+        fs::remove_file(&original).expect("remove restored markdown");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("second anomaly");
+        confirm_knowledge_markdown_deleted(&runtime, &old_id)
+            .await
+            .expect("confirm second deletion");
+        fs::write(&original, "# rebuilt again\n").expect("second rebuild");
+        assert_eq!(
+            rebuild_knowledge_index(&runtime)
+                .await
+                .unwrap()
+                .identity_conflicts
+                .len(),
+            1
+        );
+        let new_node = resolve_knowledge_identity_conflict(
+            &runtime,
+            &old_id,
+            "Knowledge/Segment Tree.md",
+            false,
+        )
+        .await
+        .expect("create new identity");
+        assert_ne!(new_node.knowledge_node_id, old_id);
+        let old_state: String = sqlx::query_scalar(
+            "SELECT location_state FROM knowledge_file_bindings WHERE knowledge_node_id = ?1",
+        )
+        .bind(&old_id)
+        .fetch_one(runtime._pool.as_ref().unwrap())
+        .await
+        .unwrap();
+        assert_eq!(old_state, "confirmed_deleted_replaced");
+    }
+
+    #[tokio::test]
     async fn knowledge_derived_index_rebuild_ignores_orphan_database_nodes() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
@@ -7477,6 +10923,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn knowledge_rebuild_with_existing_bindings_uses_a_daily_backup_boundary() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Flow.md"), "# Flow\n").expect("knowledge markdown");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("initial index");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("rebuild index");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_file_bindings")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up binding count");
+        assert_eq!(backed_up_binding_count, 1);
+        backup_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn first_knowledge_understanding_mutation_reuses_the_daily_backup_boundary() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        fs::write(knowledge.join("Flow.md"), "# Flow\n").expect("knowledge markdown");
+        let node = rebuild_knowledge_index(&runtime)
+            .await
+            .expect("index")
+            .nodes
+            .remove(0);
+        let today = crate::current_local_date().expect("current local date");
+
+        confirm_knowledge_understanding(
+            &runtime,
+            &node.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Deep,
+            today,
+        )
+        .await
+        .expect("first understanding mutation");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_understanding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_understanding_states")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up understanding count");
+        assert_eq!(backed_up_understanding_count, 0);
+        backup_pool.close().await;
+
+        confirm_knowledge_understanding(
+            &runtime,
+            &node.knowledge_node_id,
+            acm_os_domain::KnowledgeUnderstandingLevel::Vague,
+            today,
+        )
+        .await
+        .expect("second understanding mutation");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn rejected_knowledge_understanding_mutation_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let today = crate::current_local_date().expect("current local date");
+
+        assert_eq!(
+            confirm_knowledge_understanding(
+                &runtime,
+                "00000000-0000-0000-0000-000000000000",
+                acm_os_domain::KnowledgeUnderstandingLevel::Basic,
+                today,
+            )
+            .await,
+            Err(acm_os_application::KnowledgeIndexError::IntegrityViolation)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    #[tokio::test]
     async fn knowledge_detail_projects_fresh_neighbors_understanding_and_related_problems() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
         let binding = match runtime
@@ -7649,6 +11201,134 @@ mod tests {
             register_knowledge_candidate(&runtime, &problem, "bad", "Graphs").await,
             Err(KnowledgeCandidateError::InvalidFingerprint)
         );
+    }
+
+    #[tokio::test]
+    async fn first_knowledge_candidate_registration_uses_pre_mutation_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let first_fingerprint = "a1".repeat(32);
+
+        register_knowledge_candidate(&runtime, &problem, &first_fingerprint, "Segment Tree")
+            .await
+            .expect("first candidate registration");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_candidate_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_candidate_records")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up candidate count");
+        assert_eq!(backed_up_candidate_count, 0);
+        backup_pool.close().await;
+
+        register_knowledge_candidate(&runtime, &problem, &"b2".repeat(32), "Fenwick Tree")
+            .await
+            .expect("second candidate registration");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn rejected_knowledge_candidate_registration_does_not_create_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+
+        assert_eq!(
+            register_knowledge_candidate(&runtime, &problem, "bad", "Graphs").await,
+            Err(KnowledgeCandidateError::InvalidFingerprint)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    #[tokio::test]
+    async fn first_candidate_disposition_change_uses_pre_mutation_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let (problem_id, _) = candidate_problem_row(pool, &problem)
+            .await
+            .expect("personal problem");
+        let fingerprint = "c3".repeat(32);
+        sqlx::query(
+            "INSERT INTO knowledge_candidate_records \
+             (problem_id, fingerprint, target_ref, disposition) \
+             VALUES (?1, ?2, 'Graphs', 'pending')",
+        )
+        .bind(problem_id)
+        .bind(&fingerprint)
+        .execute(pool)
+        .await
+        .expect("seed pending candidate");
+
+        set_knowledge_candidate_disposition(
+            &runtime,
+            &problem,
+            &fingerprint,
+            KnowledgeCandidateDisposition::AcceptedIntent,
+        )
+        .await
+        .expect("first disposition change");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_disposition: String = sqlx::query_scalar(
+            "SELECT disposition FROM knowledge_candidate_records \
+             WHERE problem_id = ?1 AND fingerprint = ?2",
+        )
+        .bind(problem_id)
+        .bind(&fingerprint)
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up candidate disposition");
+        assert_eq!(backed_up_disposition, "pending");
+        backup_pool.close().await;
+
+        set_knowledge_candidate_disposition(
+            &runtime,
+            &problem,
+            &fingerprint,
+            KnowledgeCandidateDisposition::Ignored,
+        )
+        .await
+        .expect("second disposition change");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn missing_candidate_disposition_change_does_not_create_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+
+        assert_eq!(
+            set_knowledge_candidate_disposition(
+                &runtime,
+                &problem,
+                &"d4".repeat(32),
+                KnowledgeCandidateDisposition::Ignored,
+            )
+            .await,
+            Err(KnowledgeCandidateError::CandidateNotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
     }
 
     #[tokio::test]
@@ -7954,6 +11634,10 @@ mod tests {
         create_personal_note(&runtime, &problem)
             .await
             .expect("create personal note");
+        if directory.path().join("backups/daily").exists() {
+            fs::remove_dir_all(directory.path().join("backups/daily"))
+                .expect("remove fixture setup backup");
+        }
         (directory, runtime, vault, problems, problem)
     }
 
@@ -8088,6 +11772,8 @@ mod tests {
             "DROP TABLE knowledge_nodes",
             "DROP TABLE weekly_acm_budgets",
             "DROP TABLE contest_ai_analyses",
+            "DROP INDEX critical_operations_by_status",
+            "DROP TABLE critical_operations",
             "ALTER TABLE contests DROP COLUMN archived_at_utc",
             "ALTER TABLE contests DROP COLUMN facts_completed_at_utc",
             "ALTER TABLE contests DROP COLUMN facts_status",
@@ -8105,7 +11791,7 @@ mod tests {
             "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
             "DROP TABLE today_plan_entries_current",
             "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
-            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20)",
+            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)",
             "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -8128,14 +11814,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 20 }
+            &StartupGateStatus::Ready { schema_version: 23 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 20);
+        assert_eq!(ledger_count, 23);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -8163,7 +11849,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 20 }
+            &StartupGateStatus::Ready { schema_version: 23 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -8198,7 +11884,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-20-"));
+            .starts_with("schema-10-to-23-"));
     }
 
     #[tokio::test]
@@ -9333,6 +13019,28 @@ mod tests {
             fs::read_to_string(problems.join("CF-1979-A.md")).expect("read created note"),
             INITIAL_PROBLEM_MARKDOWN
         );
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_identity: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = 1979 AND external_problem_key = 'A'",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up problem identity");
+        assert_eq!(backed_up_identity, "lightweight");
+        let backed_up_bindings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("backed up binding count");
+        assert_eq!(backed_up_bindings, 0);
+        backup_pool.close().await;
 
         let second = create_personal_note(&runtime, &problem)
             .await
@@ -9353,6 +13061,11 @@ mod tests {
         .await
         .expect("personal note counts");
         assert_eq!(counts, (1, 1));
+        let published_after_idempotent = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_idempotent, published);
     }
 
     #[tokio::test]
@@ -9515,7 +13228,7 @@ mod tests {
 
     #[tokio::test]
     async fn help_reveal_commits_evidence_before_returning_fresh_content() {
-        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let (directory, runtime, vault, problems, problem) = personal_note_fixture().await;
         let note_path = problems.join("CF-1979-A.md");
         fs::write(
             &note_path,
@@ -9559,6 +13272,8 @@ mod tests {
             .await
             .expect("event count");
         assert_eq!(before, 0, "opening the drawer is not usage");
+        fs::remove_dir_all(directory.path().join("backups/daily"))
+            .expect("remove attempt creation backup");
         assert_eq!(
             reveal_review_help(
                 &runtime,
@@ -9575,6 +13290,7 @@ mod tests {
                 .await
                 .expect("event count");
         assert_eq!(after_refusal, 0);
+        assert!(!directory.path().join("backups/daily").exists());
 
         fs::write(
             &note_path,
@@ -9592,6 +13308,21 @@ mod tests {
         assert!(hint.content_markdown.contains("fresh external hint"));
         assert!(!hint.content_markdown.contains("full answer"));
         assert_eq!(hint.source_digest.len(), 64);
+        let published_after_hint = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_hint.len(), 1);
+        let backup_pool = connect_read_only(&published_after_hint[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM review_help_usage_events")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up help events");
+        assert_eq!(backed_up_events, 0);
+        backup_pool.close().await;
         let persisted: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM review_help_usage_events WHERE review_attempt_id = ?1",
         )
@@ -9627,6 +13358,11 @@ mod tests {
         .await
         .expect("append-only evidence");
         assert_eq!(final_count, 3);
+        let published_after_reveals = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_reveals, published_after_hint);
     }
 
     #[tokio::test]
@@ -9708,8 +13444,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_or_incomplete_facts_leave_attempt_in_progress() {
-        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+        let (directory, runtime, _vault, _problems, _problem, attempt) =
             review_ready_fixture().await;
+        fs::remove_dir_all(directory.path().join("backups/daily"))
+            .expect("remove attempt creation backup");
         let mut missing_reason = mastered_input();
         missing_reason.idea_independent = false;
         assert_eq!(
@@ -9742,6 +13480,7 @@ mod tests {
         .await
         .expect("active attempt");
         assert_eq!(active, 1);
+        assert!(!directory.path().join("backups/daily").exists());
         let mut no_ac = mastered_input();
         no_ac.final_ac = false;
         no_ac.first_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
@@ -9761,6 +13500,30 @@ mod tests {
             failed.lifecycle.learning_status,
             acm_os_domain::LearningStatus::Relearning
         );
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_status: String =
+            sqlx::query_scalar("SELECT attempt_status FROM review_attempts WHERE id = ?1")
+                .bind(&attempt.attempt_id)
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up attempt status");
+        assert_eq!(backed_up_status, "in_progress");
+        let backed_up_reasons: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_failure_reasons WHERE review_attempt_id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up failure reasons");
+        assert_eq!(backed_up_reasons, 0);
+        backup_pool.close().await;
     }
 
     #[tokio::test]
@@ -9796,7 +13559,7 @@ mod tests {
             acm_os_domain::LearningStatus::Relearning
         );
 
-        let (_directory2, runtime2, _vault2, problems2, problem2, mistaken) =
+        let (directory2, runtime2, _vault2, problems2, problem2, mistaken) =
             review_ready_fixture().await;
         fs::write(
             problems2.join("CF-1979-A.md"),
@@ -9811,6 +13574,17 @@ mod tests {
         )
         .await
         .expect("mistaken help reveal");
+        fs::remove_dir_all(directory2.path().join("backups/daily"))
+            .expect("remove review fixture backup");
+        assert_eq!(
+            void_review(&runtime2, &mistaken.attempt_id, "   ").await,
+            Err(ReviewAttemptError::InvalidVoidReason)
+        );
+        assert_eq!(
+            void_review(&runtime2, "missing-attempt", "Wrong problem").await,
+            Err(ReviewAttemptError::AttemptNotFound)
+        );
+        assert!(!directory2.path().join("backups/daily").exists());
         let before = runtime2
             .load_problem_lifecycle(&problem2)
             .await
@@ -9820,6 +13594,30 @@ mod tests {
             .expect("void mistaken attempt");
         assert_eq!(voided.status, ReviewAttemptStatus::Void);
         assert_eq!(voided.help_levels, [acm_os_domain::ReviewHelpLevel::Hints]);
+        let published = files_under(&directory2.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_status: String =
+            sqlx::query_scalar("SELECT attempt_status FROM review_attempts WHERE id = ?1")
+                .bind(&mistaken.attempt_id)
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up attempt status");
+        assert_eq!(backed_up_status, "in_progress");
+        let backed_up_void_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_void_events WHERE review_attempt_id = ?1",
+        )
+        .bind(&mistaken.attempt_id)
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up void events");
+        assert_eq!(backed_up_void_events, 0);
+        backup_pool.close().await;
         let after = runtime2
             .load_problem_lifecycle(&problem2)
             .await
@@ -9833,6 +13631,11 @@ mod tests {
         .await
         .expect("replacement attempt");
         assert_ne!(replacement.attempt_id, mistaken.attempt_id);
+        let published_after_replacement = files_under(&directory2.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_replacement, published);
         let history = review_history(&runtime2, &problem2)
             .await
             .expect("void history");
@@ -10039,11 +13842,12 @@ mod tests {
         )
         .await;
         assert_eq!(result, Err(ProblemLifecycleError::NotPersonal));
+        assert!(!directory.path().join("backups/daily").exists());
     }
 
     #[tokio::test]
     async fn delete_personal_note_downgrades_problem_and_preserves_history_relations() {
-        let (_directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let (directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
         let note_path = problems.join("CF-1979-A.md");
         let user_markdown =
             b"# User-owned title\n\n## \xe9\xa2\x98\xe8\xa7\xa3\n\nMy durable explanation.\n";
@@ -10062,6 +13866,8 @@ mod tests {
                 .await
                 .expect("lifecycle transition");
         }
+        fs::remove_dir_all(directory.path().join("backups/daily"))
+            .expect("remove lifecycle backup");
 
         let deleted = delete_personal_note(&runtime, &problem)
             .await
@@ -10096,6 +13902,32 @@ mod tests {
             fs::read(&recovery_files[0]).expect("recovery copy"),
             user_markdown
         );
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_identity: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE platform = 'codeforces' \
+             AND external_contest_key = 1979 AND external_problem_key = 'A'",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up problem identity");
+        assert_eq!(backed_up_identity, "personal");
+        let backed_up_bindings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
+             WHERE p.platform = 'codeforces' AND p.external_contest_key = 1979 \
+               AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up binding count");
+        assert_eq!(backed_up_bindings, 1);
+        backup_pool.close().await;
 
         let recreated = create_personal_note(&runtime, &problem)
             .await
@@ -10109,11 +13941,12 @@ mod tests {
 
     #[tokio::test]
     async fn delete_personal_note_refuses_vault_unavailable_without_downgrade() {
-        let (_directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
         fs::rename(&vault, vault.with_extension("offline")).expect("make vault unavailable");
 
         let result = delete_personal_note(&runtime, &problem).await;
         assert_eq!(result, Err(PersonalNoteDeletionError::VaultUnavailable));
+        assert!(!directory.path().join("backups/daily").exists());
         let detail = runtime
             .lightweight_problem_detail(&problem)
             .await
@@ -10334,6 +14167,268 @@ mod tests {
             .await
             .expect("binding state");
         assert_eq!(binding_state, "location_anomaly");
+    }
+
+    #[tokio::test]
+    async fn manual_rebind_requires_location_anomaly_and_revalidates_selected_markdown() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        assert_eq!(
+            acm_os_application::personal_note_relocation_candidates(&runtime, &problem).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::LocationAnomalyRequired)
+        );
+        let original = problems.join("CF-1979-A.md");
+        fs::remove_file(&original).expect("remove original note");
+        let selected = vault.join("Recovered/manual-choice.md");
+        fs::create_dir_all(selected.parent().expect("candidate parent")).expect("candidate parent");
+        fs::write(
+            &selected,
+            "# Manually selected\n\n## 题解\n\n### Restored route\n",
+        )
+        .expect("manual candidate");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove deterministic evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("location anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+
+        let candidates =
+            acm_os_application::personal_note_relocation_candidates(&runtime, &problem)
+                .await
+                .expect("relocation candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == "Recovered/manual-choice.md" && !candidate.occupied
+        }));
+        let binding = acm_os_application::rebind_personal_note(
+            &runtime,
+            &problem,
+            "Recovered/manual-choice.md",
+        )
+        .await
+        .expect("manual rebind");
+        assert_eq!(binding.vault_relative_path, "Recovered/manual-choice.md");
+        let state = runtime
+            .read_personal_note_projection(&problem)
+            .await
+            .expect("rebound projection");
+        let PersonalNoteReadState::Ready { projection, .. } = state else {
+            panic!("manual rebind must restore ready state");
+        };
+        assert_eq!(projection.solution_routes[0].name, "Restored route");
+    }
+
+    #[tokio::test]
+    async fn manual_rebind_never_steals_another_problem_binding() {
+        let (_directory, runtime, _vault, problems, problem_a) = personal_note_fixture().await;
+        let problem_b = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "B",
+        )
+        .expect("problem B");
+        create_personal_note(&runtime, &problem_b)
+            .await
+            .expect("create B note");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove A note");
+        sqlx::query(
+            "UPDATE file_bindings SET windows_file_key = NULL \
+             WHERE problem_id = (SELECT id FROM problems WHERE external_problem_key = 'A')",
+        )
+        .execute(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("remove A evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem_a)
+                .await
+                .expect("A anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let candidates =
+            acm_os_application::personal_note_relocation_candidates(&runtime, &problem_a)
+                .await
+                .expect("relocation candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == "Problems/CF-1979-B.md" && candidate.occupied
+        }));
+        assert_eq!(
+            acm_os_application::rebind_personal_note(
+                &runtime,
+                &problem_a,
+                "Problems/CF-1979-B.md",
+            )
+            .await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::CandidateOccupied)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_rebind_never_steals_a_knowledge_binding() {
+        let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        fs::write(
+            vault.join("Knowledge/Occupied.md"),
+            "# Knowledge-owned Markdown\n",
+        )
+        .expect("knowledge markdown");
+        rebuild_knowledge_index(&runtime)
+            .await
+            .expect("discover knowledge bindings");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove problem note");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(pool)
+            .await
+            .expect("remove problem evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("problem anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let knowledge_path: String =
+            sqlx::query_scalar("SELECT vault_relative_path FROM knowledge_file_bindings LIMIT 1")
+                .fetch_one(pool)
+                .await
+                .expect("knowledge binding");
+        let candidates =
+            acm_os_application::personal_note_relocation_candidates(&runtime, &problem)
+                .await
+                .expect("relocation candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == knowledge_path && candidate.occupied
+        }));
+        assert_eq!(
+            acm_os_application::rebind_personal_note(&runtime, &problem, &knowledge_path).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::CandidateOccupied)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_missing_note_downgrades_without_deleting_candidate_files() {
+        let (directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove bound note");
+        let candidate = vault.join("Unrelated/candidate.md");
+        fs::create_dir_all(candidate.parent().expect("candidate parent"))
+            .expect("candidate parent");
+        fs::write(&candidate, "# Different Markdown\n").expect("candidate markdown");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove deterministic evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("location anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        if directory.path().join("backups/daily").exists() {
+            fs::remove_dir_all(directory.path().join("backups/daily"))
+                .expect("remove anomaly fixture backup");
+        }
+
+        let lifecycle = acm_os_application::confirm_personal_note_deleted(&runtime, &problem)
+            .await
+            .expect("confirm missing note deleted");
+        assert_eq!(lifecycle.identity_type, ProblemIdentityType::Lightweight);
+        assert_eq!(
+            lifecycle.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
+        assert!(
+            candidate.exists(),
+            "confirmation must not delete any candidate file"
+        );
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let binding_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings")
+            .fetch_one(pool)
+            .await
+            .expect("binding count");
+        assert_eq!(binding_count, 0);
+        let identity_type: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem identity");
+        assert_eq!(identity_type, "lightweight");
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_identity: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up identity");
+        assert_eq!(backed_up_identity, "personal");
+        let backed_up_bindings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("backed up bindings");
+        assert_eq!(backed_up_bindings, 1);
+        backup_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_missing_note_refuses_unavailable_vault() {
+        let (directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove bound note");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove deterministic evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("location anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        fs::rename(&vault, directory.path().join("vault-offline")).expect("take vault offline");
+        assert_eq!(
+            acm_os_application::confirm_personal_note_deleted(&runtime, &problem).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::VaultUnavailable)
+        );
+        let identity_type: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("preserved identity");
+        assert_eq!(identity_type, "personal");
+    }
+
+    #[tokio::test]
+    async fn confirmed_missing_note_refuses_in_progress_review() {
+        let (_directory, runtime, _vault, problems, problem, _attempt) =
+            review_ready_fixture().await;
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove bound note");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("remove deterministic evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&problem)
+                .await
+                .expect("location anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        assert_eq!(
+            acm_os_application::confirm_personal_note_deleted(&runtime, &problem).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::ReviewInProgress)
+        );
     }
 
     #[tokio::test]
@@ -10660,6 +14755,133 @@ mod tests {
         );
     }
 
+    async fn persist_completed_contest_for_backup_test(
+        runtime: &DatabaseRuntime,
+        app_private_data: &Path,
+    ) -> (
+        acm_os_domain::CodeforcesContestIdentity,
+        Vec<ContestProblemFactInput>,
+    ) {
+        let mut draft = contest_draft();
+        draft.starts_at_utc = Some("2026-08-10T12:00:00Z".to_owned());
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        for index in ["A", "B"] {
+            runtime
+                .persist_first_snapshot(&snapshot(index, "source", "<p>safe</p>"))
+                .await
+                .expect("snapshot");
+        }
+        let contest = draft.contest;
+        let facts = vec![
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                    .expect("A"),
+                final_contest_result: ContestFinalResult::WrongAnswer,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+            },
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B")
+                    .expect("B"),
+                final_contest_result: ContestFinalResult::Unknown,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Undecided,
+            },
+        ];
+        runtime
+            .complete_contest_facts(&contest, &facts)
+            .await
+            .expect("complete facts");
+        fs::remove_dir_all(app_private_data.join("backups/daily"))
+            .expect("remove fixture daily backup");
+        (contest, facts)
+    }
+
+    #[tokio::test]
+    async fn first_contest_correction_uses_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (contest, _) =
+            persist_completed_contest_for_backup_test(&runtime, directory.path()).await;
+        let problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("A");
+
+        runtime
+            .correct_contest_problem_facts(
+                &contest,
+                &ContestProblemCorrectionInput {
+                    problem: problem.clone(),
+                    final_contest_result: ContestFinalResult::Accepted,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                },
+            )
+            .await
+            .expect("first correction");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up: (String, String) = sqlx::query_as(
+            "SELECT cp.final_contest_result, cp.upsolve_decision \
+             FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id \
+             WHERE p.external_contest_key = ?1 AND p.external_problem_key = 'A'",
+        )
+        .bind(contest.contest_id() as i64)
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up contest facts");
+        assert_eq!(backed_up, ("wrong_answer".to_owned(), "planned".to_owned()));
+        let backed_up_events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_correction_events")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up correction count");
+        assert_eq!(backed_up_events, 0);
+        backup_pool.close().await;
+
+        runtime
+            .correct_contest_problem_facts(
+                &contest,
+                &ContestProblemCorrectionInput {
+                    problem,
+                    final_contest_result: ContestFinalResult::TimeLimitExceeded,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+                },
+            )
+            .await
+            .expect("second correction");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn no_change_contest_correction_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (contest, facts) =
+            persist_completed_contest_for_backup_test(&runtime, directory.path()).await;
+        let unchanged = ContestProblemCorrectionInput {
+            problem: facts[0].problem.clone(),
+            final_contest_result: facts[0].final_contest_result,
+            upsolve_decision: facts[0].upsolve_decision,
+        };
+
+        assert_eq!(
+            runtime
+                .correct_contest_problem_facts(&contest, &unchanged)
+                .await,
+            Err(ContestCorrectionError::NoChange)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
     #[tokio::test]
     async fn contest_ai_analysis_preview_save_and_replace_never_change_contest_facts() {
         let directory = TempDir::new().expect("temporary app data");
@@ -10710,6 +14932,71 @@ mod tests {
             "unstructured raw text"
         );
         assert_eq!(replaced.problems, before.problems);
+    }
+
+    #[tokio::test]
+    async fn first_contest_ai_analysis_save_uses_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        let first = runtime
+            .preview_contest_ai_analysis("# Contest AI Analysis\n\n## Overall\nDraft")
+            .await
+            .expect("first preview");
+
+        runtime
+            .save_contest_ai_analysis(&draft.contest, &first)
+            .await
+            .expect("first analysis save");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_analysis_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_ai_analyses")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up analysis count");
+        assert_eq!(backed_up_analysis_count, 0);
+        backup_pool.close().await;
+
+        let second = runtime
+            .preview_contest_ai_analysis("unstructured replacement")
+            .await
+            .expect("second preview");
+        runtime
+            .save_contest_ai_analysis(&draft.contest, &second)
+            .await
+            .expect("second analysis save");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn missing_contest_ai_analysis_save_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = acm_os_domain::CodeforcesContestIdentity::new(9999).expect("contest");
+        let preview = runtime
+            .preview_contest_ai_analysis("unstructured analysis")
+            .await
+            .expect("preview");
+
+        assert_eq!(
+            runtime.save_contest_ai_analysis(&missing, &preview).await,
+            Err(ContestAiAnalysisError::NotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
     }
 
     #[tokio::test]
@@ -10820,6 +15107,73 @@ mod tests {
         assert_eq!(analysis_count, 0);
         drop(runtime);
         drop(directory);
+    }
+
+    #[tokio::test]
+    async fn first_real_contest_archive_change_uses_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.expect("manifest");
+
+        let unchanged = runtime
+            .set_contest_archived(&draft.contest, false)
+            .await
+            .expect("idempotent unarchive");
+        assert!(!unchanged.archived);
+        assert!(!directory.path().join("backups/daily").exists());
+
+        let archived = runtime
+            .set_contest_archived(&draft.contest, true)
+            .await
+            .expect("archive");
+        assert!(archived.archived);
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_archived: bool = sqlx::query_scalar(
+            "SELECT archived_at_utc IS NOT NULL FROM contests \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(draft.contest.contest_id() as i64)
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up archive state");
+        assert!(!backed_up_archived);
+        backup_pool.close().await;
+
+        runtime
+            .set_contest_archived(&draft.contest, true)
+            .await
+            .expect("idempotent archive");
+        runtime
+            .set_contest_archived(&draft.contest, false)
+            .await
+            .expect("same-day unarchive");
+        let published_after_more_changes = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_more_changes, published);
+    }
+
+    #[tokio::test]
+    async fn missing_contest_archive_change_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = acm_os_domain::CodeforcesContestIdentity::new(9999).expect("contest");
+
+        assert_eq!(
+            runtime.set_contest_archived(&missing, true).await,
+            Err(ContestManagementError::NotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
     }
 
     #[tokio::test]
@@ -11107,6 +15461,380 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unresolved_critical_operation_blocks_normal_startup() {
+        for status in ["pending", "needs_recovery"] {
+            let directory = TempDir::new().expect("temporary app data");
+            {
+                let runtime = start_database(directory.path()).await;
+                let pool = runtime._pool.as_ref().expect("ready database pool");
+                sqlx::query(
+                    "INSERT INTO critical_operations (\
+                        id, operation_kind, object_type, object_id, pre_content_digest, \
+                        postcondition_json, operation_status\
+                     ) VALUES (?1, 'markdown_system_fact', 'problem', 'problem-1', ?2, '{}', ?3)",
+                )
+                .bind("018f0d8e-4a5b-7c6d-8e9f-0123456789ab")
+                .bind("0".repeat(64))
+                .bind(status)
+                .execute(pool)
+                .await
+                .expect("persist unresolved critical operation");
+            }
+
+            let restarted = start_database(directory.path()).await;
+            assert_eq!(
+                restarted.status(),
+                &StartupGateStatus::RecoveryRequired {
+                    reason: StartupRecoveryReason::UnresolvedCriticalOperation,
+                },
+                "status {status} must block normal startup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_critical_operations_do_not_block_startup() {
+        let directory = TempDir::new().expect("temporary app data");
+        {
+            let runtime = start_database(directory.path()).await;
+            let pool = runtime._pool.as_ref().expect("ready database pool");
+            for (id, status) in [
+                ("018f0d8e-4a5b-7c6d-8e9f-0123456789ab", "completed"),
+                ("018f0d8e-4a5b-7c6d-8e9f-0123456789ac", "abandoned"),
+            ] {
+                sqlx::query(
+                    "INSERT INTO critical_operations (\
+                        id, operation_kind, object_type, object_id, pre_content_digest, \
+                        postcondition_json, operation_status, resolved_at_utc\
+                     ) VALUES (?1, 'markdown_system_fact', 'problem', 'problem-1', ?2, '{}', ?3, \
+                        '2026-08-13T00:00:00.000Z')",
+                )
+                .bind(id)
+                .bind("0".repeat(64))
+                .bind(status)
+                .execute(pool)
+                .await
+                .expect("persist resolved critical operation");
+            }
+        }
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+    }
+
+    #[tokio::test]
+    async fn critical_operation_resolution_state_is_database_enforced() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+
+        let unresolved_with_timestamp = sqlx::query(
+            "INSERT INTO critical_operations (\
+                id, operation_kind, object_type, object_id, pre_content_digest, \
+                postcondition_json, operation_status, resolved_at_utc\
+             ) VALUES (?1, 'markdown_system_fact', 'problem', 'problem-1', ?2, '{}', 'pending', \
+                '2026-08-13T00:00:00.000Z')",
+        )
+        .bind("018f0d8e-4a5b-7c6d-8e9f-0123456789ab")
+        .bind("0".repeat(64))
+        .execute(pool)
+        .await;
+        assert!(unresolved_with_timestamp.is_err());
+
+        let resolved_without_timestamp = sqlx::query(
+            "INSERT INTO critical_operations (\
+                id, operation_kind, object_type, object_id, pre_content_digest, \
+                postcondition_json, operation_status\
+             ) VALUES (?1, 'markdown_system_fact', 'problem', 'problem-1', ?2, '{}', 'completed')",
+        )
+        .bind("018f0d8e-4a5b-7c6d-8e9f-0123456789ac")
+        .bind("0".repeat(64))
+        .execute(pool)
+        .await;
+        assert!(resolved_without_timestamp.is_err());
+    }
+
+    async fn insert_pending_prerequisite_operation(
+        runtime: &DatabaseRuntime,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        target: &str,
+    ) -> (String, PersonalNoteBinding) {
+        let binding = match runtime
+            .read_personal_note_projection(problem)
+            .await
+            .expect("read personal note")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready personal note, got {other:?}"),
+        };
+        let operation_id = runtime
+            .begin_prerequisite_patch_operation(problem, &binding, target)
+            .await
+            .expect("begin critical operation");
+        (operation_id, binding)
+    }
+
+    #[tokio::test]
+    async fn crash_before_markdown_write_abandons_operation_and_allows_startup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let (operation_id, binding) =
+            insert_pending_prerequisite_operation(&runtime, &problem, "Segment Tree").await;
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+        let pool = restarted._pool.as_ref().expect("ready database pool");
+        let (status, resolved_at, current_digest): (String, Option<String>, String) =
+            sqlx::query_as(
+                "SELECT co.operation_status, co.resolved_at_utc, fb.content_digest \
+                 FROM critical_operations co JOIN file_bindings fb ON fb.id = co.binding_id \
+                 WHERE co.id = ?1",
+            )
+            .bind(operation_id)
+            .fetch_one(pool)
+            .await
+            .expect("resolved operation");
+        assert_eq!(status, "abandoned");
+        assert!(resolved_at.is_some());
+        assert_eq!(current_digest, binding.content_digest);
+    }
+
+    #[tokio::test]
+    async fn crash_after_markdown_write_completes_binding_and_operation_on_startup() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let (operation_id, binding) =
+            insert_pending_prerequisite_operation(&runtime, &problem, "Segment Tree").await;
+        let note_path = vault.join(&binding.vault_relative_path);
+        let before = fs::read_to_string(&note_path).expect("read note before simulated crash");
+        let after = before.replace("## 前置知识\n", "## 前置知识\n\n- [[Segment Tree]]\n");
+        fs::write(&note_path, after.as_bytes()).expect("simulate completed markdown write");
+        let post_digest = sha256_hex(after.as_bytes());
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+        let pool = restarted._pool.as_ref().expect("ready database pool");
+        let (status, resolved_at, current_digest): (String, Option<String>, String) =
+            sqlx::query_as(
+                "SELECT co.operation_status, co.resolved_at_utc, fb.content_digest \
+                 FROM critical_operations co JOIN file_bindings fb ON fb.id = co.binding_id \
+                 WHERE co.id = ?1",
+            )
+            .bind(operation_id)
+            .fetch_one(pool)
+            .await
+            .expect("completed operation");
+        assert_eq!(status, "completed");
+        assert!(resolved_at.is_some());
+        assert_eq!(current_digest, post_digest);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_completes_operation_when_binding_already_matches_post_state() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let (operation_id, binding) =
+            insert_pending_prerequisite_operation(&runtime, &problem, "Segment Tree").await;
+        let note_path = vault.join(&binding.vault_relative_path);
+        let before = fs::read_to_string(&note_path).expect("read note before simulated crash");
+        let after = before.replace("## 前置知识\n", "## 前置知识\n\n- [[Segment Tree]]\n");
+        fs::write(&note_path, after.as_bytes()).expect("simulate completed markdown write");
+        let post_digest = sha256_hex(after.as_bytes());
+        sqlx::query(
+            "UPDATE file_bindings SET content_digest = ?1, windows_file_key = ?2 \
+             WHERE problem_id = (SELECT id FROM problems WHERE platform = 'codeforces' \
+                 AND external_contest_key = ?3 AND external_problem_key = ?4)",
+        )
+        .bind(&post_digest)
+        .bind(windows_file_key(&note_path))
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .execute(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("simulate fresh-read binding refresh");
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+        let (status, stored_digest): (String, String) = sqlx::query_as(
+            "SELECT co.operation_status, fb.content_digest \
+             FROM critical_operations co JOIN file_bindings fb ON fb.id = co.binding_id \
+             WHERE co.id = ?1",
+        )
+        .bind(operation_id)
+        .fetch_one(restarted._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("completed operation");
+        assert_eq!(status, "completed");
+        assert_eq!(stored_digest, post_digest);
+    }
+
+    #[tokio::test]
+    async fn crash_with_unknown_markdown_state_requires_recovery_without_guessing() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let (operation_id, binding) =
+            insert_pending_prerequisite_operation(&runtime, &problem, "Segment Tree").await;
+        let note_path = vault.join(&binding.vault_relative_path);
+        fs::write(&note_path, "# externally replaced\n").expect("simulate unknown external edit");
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::UnresolvedCriticalOperation,
+            }
+        );
+        let inspection = connect_read_only(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("inspect recovery database");
+        let (status, resolved_at, stored_digest): (String, Option<String>, String) =
+            sqlx::query_as(
+                "SELECT co.operation_status, co.resolved_at_utc, fb.content_digest \
+                 FROM critical_operations co JOIN file_bindings fb ON fb.id = co.binding_id \
+                 WHERE co.id = ?1",
+            )
+            .bind(operation_id)
+            .fetch_one(&inspection)
+            .await
+            .expect("needs-recovery operation");
+        assert_eq!(status, "needs_recovery");
+        assert!(resolved_at.is_none());
+        assert_eq!(stored_digest, binding.content_digest);
+    }
+
+    #[tokio::test]
+    async fn successful_prerequisite_patch_completes_journal_with_binding_update() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let before_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM critical_operations")
+            .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("journal count before patch");
+        assert_eq!(before_count, 0);
+
+        let binding = acm_os_application::add_prerequisite_link(
+            &runtime,
+            &problem,
+            "Segment Tree".to_owned(),
+        )
+        .await
+        .expect("successful prerequisite patch");
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let (status, resolved_at, pre_digest, stored_digest): (
+            String,
+            Option<String>,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT co.operation_status, co.resolved_at_utc, co.pre_content_digest, \
+                    fb.content_digest \
+             FROM critical_operations co JOIN file_bindings fb ON fb.id = co.binding_id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("completed journal row");
+        assert_eq!(status, "completed");
+        assert!(resolved_at.is_some());
+        assert_ne!(pre_digest, stored_digest);
+        assert_eq!(stored_digest, binding.content_digest);
+    }
+
+    #[tokio::test]
+    async fn commit_patch_outcome_is_idempotent_when_binding_already_matches_post_state() {
+        let (_directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let (operation_id, binding) =
+            insert_pending_prerequisite_operation(&runtime, &problem, "Segment Tree").await;
+        let note_path = vault.join(&binding.vault_relative_path);
+        let before = fs::read_to_string(&note_path).expect("read note before patch");
+        let after = before.replace("## 前置知识\n", "## 前置知识\n\n- [[Segment Tree]]\n");
+        fs::write(&note_path, after.as_bytes()).expect("write patched note");
+        let post_digest = sha256_hex(after.as_bytes());
+        let post_file_key = windows_file_key(&note_path);
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        sqlx::query(
+            "UPDATE file_bindings SET content_digest = ?1, windows_file_key = ?2 \
+             WHERE problem_id = (SELECT id FROM problems WHERE platform = 'codeforces' \
+                 AND external_contest_key = ?3 AND external_problem_key = ?4)",
+        )
+        .bind(&post_digest)
+        .bind(&post_file_key)
+        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.index())
+        .execute(pool)
+        .await
+        .expect("simulate fresh-read binding refresh");
+
+        let committed = runtime
+            .commit_patch_outcome(
+                &problem,
+                &binding,
+                crate::safe_patch::SafePatchOutcome {
+                    relative_path: binding.vault_relative_path.clone(),
+                    content_digest: post_digest.clone(),
+                    windows_file_key: post_file_key.clone(),
+                },
+                Some(&operation_id),
+            )
+            .await
+            .expect("idempotent post-state commit");
+        assert_eq!(committed.content_digest, post_digest);
+        assert_eq!(committed.windows_file_key, post_file_key);
+        let status: String =
+            sqlx::query_scalar("SELECT operation_status FROM critical_operations WHERE id = ?1")
+                .bind(operation_id)
+                .fetch_one(pool)
+                .await
+                .expect("completed operation");
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn rejected_prerequisite_patch_abandons_journal_without_blocking_restart() {
+        let (directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let note_path = problems.join("CF-1979-A.md");
+        fs::write(
+            &note_path,
+            "# Problem\n\n## 前置知识\n\n## 前置知识\n\n## 题解\n\n### 标准推导\n",
+        )
+        .expect("write ambiguous prerequisite sections");
+
+        assert_eq!(
+            acm_os_application::add_prerequisite_link(
+                &runtime,
+                &problem,
+                "Segment Tree".to_owned(),
+            )
+            .await,
+            Err(PersonalNotePatchError::TargetSectionAmbiguous)
+        );
+        let (status, resolved_at): (String, Option<String>) =
+            sqlx::query_as("SELECT operation_status, resolved_at_utc FROM critical_operations")
+                .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+                .await
+                .expect("abandoned operation");
+        assert_eq!(status, "abandoned");
+        assert!(resolved_at.is_some());
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+    }
+
+    #[tokio::test]
     async fn consistent_backup_contains_the_source_schema() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
@@ -11129,6 +15857,801 @@ mod tests {
         let mut partial_path = backup_path.as_os_str().to_os_string();
         partial_path.push(".partial");
         assert!(!PathBuf::from(partial_path).exists());
+    }
+
+    #[test]
+    fn backup_retention_preview_keeps_seven_daily_four_weekly_and_protects_extras() {
+        let item = |category: &str, modified_nanos: u128| DiscoveredBackup {
+            path: PathBuf::from(format!("{category}-{modified_nanos}.sqlite3")),
+            category: category.to_owned(),
+            size_bytes: 1,
+            modified_nanos,
+        };
+        let mut items = vec![item("manual", 100), item("pre-migration", 99)];
+        items.extend((1..=9).rev().map(|value| item("daily", value)));
+        items.extend((1..=6).rev().map(|value| item("weekly", value)));
+        let preview = backup_retention_preview(&items);
+        assert_eq!(preview[0], "protected");
+        assert_eq!(preview[1], "protected");
+        assert_eq!(&preview[2..9], &["keep"; 7]);
+        assert_eq!(&preview[9..11], &["prune_candidate"; 2]);
+        assert_eq!(&preview[11..15], &["keep"; 4]);
+        assert_eq!(&preview[15..17], &["prune_candidate"; 2]);
+    }
+
+    #[tokio::test]
+    async fn backup_inventory_lists_published_backup_and_ignores_partial() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let result = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("manual backup");
+        let partial = directory
+            .path()
+            .join("backups/manual/ignored.sqlite3.partial");
+        fs::write(&partial, b"partial").expect("partial marker");
+        let inventory = acm_os_application::backup_inventory(&runtime)
+            .await
+            .expect("backup inventory");
+        assert_eq!(inventory.daily_keep, 7);
+        assert_eq!(inventory.weekly_keep, 4);
+        assert_eq!(inventory.entries.len(), 1);
+        assert_eq!(inventory.entries[0].path, result.path);
+        assert_eq!(inventory.entries[0].category, "manual");
+        assert_eq!(inventory.entries[0].retention, "protected");
+        assert!(inventory.entries[0].integrity_verified);
+        assert!(!inventory.entries[0].path.ends_with(".partial"));
+    }
+
+    #[tokio::test]
+    async fn system_restore_candidate_preview_is_read_only_and_reports_scope() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let backup = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("manual backup");
+        let before = fs::read(&backup.path).expect("backup bytes before preview");
+        let inventory_before = acm_os_application::backup_inventory(&runtime)
+            .await
+            .expect("inventory before preview");
+
+        let preview =
+            acm_os_application::preview_system_restore_candidate(&runtime, backup.path.clone())
+                .await
+                .expect("restore candidate preview");
+
+        assert_eq!(preview.source_path, backup.path);
+        assert_eq!(preview.schema_version, supported_schema_version());
+        assert_eq!(preview.supported_schema_version, supported_schema_version());
+        assert!(!preview.migration_required);
+        assert!(preview.restores_system_facts);
+        assert!(!preview.overwrites_markdown);
+        assert_eq!(
+            fs::read(&backup.path).expect("backup bytes after preview"),
+            before
+        );
+        assert_eq!(
+            acm_os_application::backup_inventory(&runtime)
+                .await
+                .expect("inventory after preview"),
+            inventory_before
+        );
+    }
+
+    #[tokio::test]
+    async fn system_restore_candidate_preview_rejects_paths_outside_backup_area() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let backup = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("manual backup");
+        let outside = directory.path().join("outside.sqlite3");
+        fs::copy(&backup.path, &outside).expect("outside backup copy");
+
+        assert_eq!(
+            acm_os_application::preview_system_restore_candidate(
+                &runtime,
+                outside.to_string_lossy().into_owned(),
+            )
+            .await,
+            Err(acm_os_application::ManualBackupError::RestoreCandidateOutsideBackupArea)
+        );
+    }
+
+    #[tokio::test]
+    async fn system_restore_candidate_preview_rejects_partial_and_corrupt_files() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let manual = directory.path().join("backups/manual");
+        fs::create_dir_all(&manual).expect("manual backup directory");
+        let partial = manual.join("candidate.sqlite3.partial");
+        fs::write(&partial, b"partial").expect("partial candidate");
+        let corrupt = manual.join("corrupt.sqlite3");
+        fs::write(&corrupt, b"not sqlite").expect("corrupt candidate");
+
+        assert_eq!(
+            acm_os_application::preview_system_restore_candidate(
+                &runtime,
+                partial.to_string_lossy().into_owned(),
+            )
+            .await,
+            Err(acm_os_application::ManualBackupError::RestoreCandidateNotPublished)
+        );
+        assert_eq!(
+            acm_os_application::preview_system_restore_candidate(
+                &runtime,
+                corrupt.to_string_lossy().into_owned(),
+            )
+            .await,
+            Err(acm_os_application::ManualBackupError::IntegrityViolation)
+        );
+    }
+
+    #[tokio::test]
+    async fn system_restore_candidate_preview_rejects_future_schema() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let backup = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("manual backup");
+        let future_pool = connect_read_write(Path::new(&backup.path))
+            .await
+            .expect("future candidate database");
+        sqlx::query("UPDATE _sqlx_migrations SET version = ?1 WHERE version = ?2")
+            .bind(supported_schema_version() + 1)
+            .bind(supported_schema_version())
+            .execute(&future_pool)
+            .await
+            .expect("future schema marker");
+        future_pool.close().await;
+
+        assert_eq!(
+            acm_os_application::preview_system_restore_candidate(&runtime, backup.path).await,
+            Err(acm_os_application::ManualBackupError::RestoreCandidateSchemaUnsupported)
+        );
+    }
+
+    #[tokio::test]
+    async fn system_restore_candidate_preview_reports_migration_for_older_schema() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let backup = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("manual backup");
+        let older_pool = connect_read_write(Path::new(&backup.path))
+            .await
+            .expect("older candidate database");
+        sqlx::raw_sql(
+            "DROP TABLE knowledge_file_bindings;\
+             CREATE TABLE knowledge_file_bindings (\
+                 knowledge_node_id TEXT PRIMARY KEY REFERENCES knowledge_nodes(id) ON DELETE RESTRICT,\
+                 vault_relative_path TEXT NOT NULL UNIQUE CHECK (length(vault_relative_path) > 0),\
+                 windows_file_key TEXT,\
+                 content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),\
+                 location_state TEXT NOT NULL CHECK (\
+                     location_state IN ('ready', 'location_anomaly', 'confirmed_deleted')\
+                 ),\
+                 updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+             );\
+             UPDATE app_metadata SET schema_generation = 22 WHERE singleton = 1;\
+             DELETE FROM _sqlx_migrations WHERE version = 23;",
+        )
+        .execute(&older_pool)
+        .await
+        .expect("recreate schema 22 candidate");
+        older_pool.close().await;
+
+        let preview = acm_os_application::preview_system_restore_candidate(&runtime, backup.path)
+            .await
+            .expect("older restore candidate preview");
+        assert_eq!(preview.schema_version, 22);
+        assert_eq!(preview.supported_schema_version, 23);
+        assert!(preview.migration_required);
+        assert!(!preview.overwrites_markdown);
+    }
+
+    #[tokio::test]
+    async fn pre_restore_snapshot_captures_current_facts_before_any_restore() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        sqlx::query("INSERT INTO weekly_acm_budgets (weekday, budget_minutes) VALUES (1, 90)")
+            .execute(runtime._pool.as_ref().expect("current database"))
+            .await
+            .expect("new current fact after candidate");
+
+        let snapshot =
+            acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path.clone())
+                .await
+                .expect("pre-restore snapshot");
+
+        assert_eq!(snapshot.schema_version, supported_schema_version());
+        assert_eq!(snapshot.candidate.source_path, candidate.path);
+        assert!(Path::new(&snapshot.path).starts_with(directory.path().join("backups/pre-restore")));
+        let snapshot_pool = connect_read_only(Path::new(&snapshot.path))
+            .await
+            .expect("pre-restore database");
+        verify_integrity(&snapshot_pool)
+            .await
+            .expect("pre-restore snapshot integrity");
+        let snapshotted_budget: Option<i64> =
+            sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
+                .fetch_optional(&snapshot_pool)
+                .await
+                .expect("snapshotted current fact");
+        snapshot_pool.close().await;
+        assert_eq!(snapshotted_budget, Some(90));
+
+        let candidate_pool = connect_read_only(Path::new(&candidate.path))
+            .await
+            .expect("restore candidate database");
+        let candidate_budget: Option<i64> =
+            sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
+                .fetch_optional(&candidate_pool)
+                .await
+                .expect("candidate fact");
+        candidate_pool.close().await;
+        assert_eq!(candidate_budget, None);
+    }
+
+    #[tokio::test]
+    async fn prepare_restore_intent_publishes_staging_and_is_atomic() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+
+        let prepared = acm_os_application::prepare_restore_intent(&runtime, candidate.path.clone())
+            .await
+            .expect("prepared restore intent");
+        assert!(Path::new(&prepared.staging_path)
+            .starts_with(directory.path().join("backups/pre-restore")));
+        assert!(Path::new(&prepared.pre_restore_snapshot_path).exists());
+        assert!(directory
+            .path()
+            .join(DATABASE_RESTORE_INTENT_FILENAME)
+            .exists());
+        assert!(!directory
+            .path()
+            .join("backups/pre-restore/restore-intent.json.partial")
+            .exists());
+        let intent = read_restore_intent(directory.path())
+            .expect("read intent")
+            .expect("intent exists");
+        assert_eq!(intent.staging_path, prepared.staging_path);
+        assert_eq!(
+            intent.pre_restore_snapshot_path,
+            prepared.pre_restore_snapshot_path
+        );
+        let staging_pool = connect_read_only(Path::new(&prepared.staging_path))
+            .await
+            .expect("staging database");
+        verify_integrity(&staging_pool)
+            .await
+            .expect("staging integrity");
+        staging_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn prepare_restore_intent_refuses_overwrite_of_pending_request() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        fs::write(
+            directory.path().join(DATABASE_RESTORE_INTENT_FILENAME),
+            br#"{"staging_path":"pending","pre_restore_snapshot_path":"pending"}"#,
+        )
+        .expect("pending intent");
+        assert_eq!(
+            acm_os_application::prepare_restore_intent(
+                &runtime,
+                directory
+                    .path()
+                    .join("backups/manual/missing.sqlite3")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .await,
+            Err(acm_os_application::ManualBackupError::RestoreIntentPending)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_restore_candidate_never_creates_pre_restore_snapshot() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = directory.path().join("backups/manual/missing.sqlite3");
+
+        assert_eq!(
+            acm_os_application::create_pre_restore_snapshot(
+                &runtime,
+                missing.to_string_lossy().into_owned(),
+            )
+            .await,
+            Err(acm_os_application::ManualBackupError::RestoreCandidateUnavailable)
+        );
+        assert!(!directory.path().join("backups/pre-restore").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_pre_restore_snapshot_does_not_change_current_facts() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let blocked_directory = directory.path().join("backups/pre-restore");
+        fs::write(&blocked_directory, b"not a directory").expect("block snapshot directory");
+
+        assert_eq!(
+            acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path).await,
+            Err(acm_os_application::ManualBackupError::PreRestoreBackupFailed)
+        );
+        let current_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_metadata")
+            .fetch_one(runtime._pool.as_ref().expect("current database"))
+            .await
+            .expect("current database remains readable");
+        assert_eq!(current_count, 1);
+        assert_eq!(
+            fs::read(&blocked_directory).expect("blocking file remains"),
+            b"not a directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_database_swap_preserves_rollback_until_restore_is_committed() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let snapshot =
+            acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path.clone())
+                .await
+                .expect("pre-restore snapshot");
+        let staging = directory
+            .path()
+            .join("system-facts.restore-staging.sqlite3");
+        fs::copy(&candidate.path, &staging).expect("staging database");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(runtime._pool.as_ref().expect("current database"))
+            .await
+            .expect("checkpoint current database");
+        runtime
+            ._pool
+            .as_ref()
+            .expect("current database")
+            .close()
+            .await;
+        drop(runtime);
+
+        let swap = swap_verified_database_with_staging(
+            &database_path,
+            &staging,
+            Path::new(&snapshot.path),
+        )
+        .expect("verified database swap");
+        assert!(!staging.exists());
+        assert!(database_path.exists());
+        assert!(swap.rollback_path.exists());
+
+        let current = connect_read_only(&database_path)
+            .await
+            .expect("swapped current database");
+        verify_integrity(&current)
+            .await
+            .expect("swapped database integrity");
+        current.close().await;
+        let rollback = connect_read_only(&swap.rollback_path)
+            .await
+            .expect("rollback database");
+        verify_integrity(&rollback)
+            .await
+            .expect("rollback integrity");
+        rollback.close().await;
+    }
+
+    #[tokio::test]
+    async fn verified_database_swap_fails_closed_without_pre_restore_snapshot() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let staging = directory
+            .path()
+            .join("system-facts.restore-staging.sqlite3");
+        fs::copy(&candidate.path, &staging).expect("staging database");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        drop(runtime);
+
+        assert_eq!(
+            swap_verified_database_with_staging(
+                &database_path,
+                &staging,
+                &directory.path().join("backups/pre-restore/missing.sqlite3"),
+            ),
+            Err(DatabaseSwapError::PreRestoreSnapshotUnavailable)
+        );
+        assert!(database_path.exists());
+        assert!(staging.exists());
+        assert!(!database_path
+            .with_extension("sqlite3.restore-rollback")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_cleanup_requires_explicit_confirmation_and_verified_artifact() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let snapshot =
+            acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path.clone())
+                .await
+                .expect("pre-restore snapshot");
+        let staging = directory
+            .path()
+            .join("backups/pre-restore/restore-staging.sqlite3");
+        fs::copy(&candidate.path, &staging).expect("staging database");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        runtime
+            ._pool
+            .as_ref()
+            .expect("current database")
+            .close()
+            .await;
+        drop(runtime);
+        swap_verified_database_with_staging(&database_path, &staging, Path::new(&snapshot.path))
+            .expect("verified database swap");
+        let restarted = start_database(directory.path()).await;
+        let rollback = database_path.with_extension("sqlite3.restore-rollback");
+        assert!(rollback.exists());
+        let diagnostics = restarted.inspect_restore_diagnostics().await;
+        assert_eq!(
+            diagnostics.rollback_artifact_path.as_deref(),
+            Some(rollback.to_string_lossy().as_ref())
+        );
+        assert_eq!(diagnostics.rollback_integrity_verified, Some(true));
+        restarted
+            .confirm_restore_rollback_cleanup(rollback.to_string_lossy().as_ref())
+            .await
+            .expect("confirmed rollback cleanup");
+        assert!(!rollback.exists());
+    }
+
+    #[tokio::test]
+    async fn post_restore_rebuild_preview_is_read_only_and_reports_scope() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let preview = acm_os_application::preview_post_restore_rebuild(&runtime)
+            .await
+            .expect("post-restore rebuild preview");
+        assert_eq!(preview.problem_binding_count, 0);
+        assert_eq!(preview.knowledge_binding_count, 0);
+        assert_eq!(preview.derived_relation_count, 0);
+        assert!(preview.revalidates_bindings);
+        assert!(preview.rebuilds_derived_knowledge);
+        assert!(!preview.overwrites_markdown);
+    }
+
+    #[tokio::test]
+    async fn post_restore_problem_binding_validation_is_read_only() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let validation = acm_os_application::validate_post_restore_problem_bindings(&runtime)
+            .await
+            .expect("problem binding validation");
+        assert_eq!(validation.total_count, 0);
+        assert_eq!(validation.ready_count, 0);
+        assert!(validation.anomalies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_restore_knowledge_binding_validation_is_read_only() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let validation = acm_os_application::validate_post_restore_knowledge_bindings(&runtime)
+            .await
+            .expect("knowledge binding validation");
+        assert_eq!(validation.total_count, 0);
+        assert_eq!(validation.ready_count, 0);
+        assert_eq!(validation.confirmed_deleted_count, 0);
+        assert!(validation.anomalies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_restore_rebuild_preconditions_are_explicit_and_read_only() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let check = acm_os_application::check_post_restore_rebuild_preconditions(&runtime)
+            .await
+            .expect("rebuild preconditions");
+        assert!(check.eligible);
+        assert!(check.blockers.is_empty());
+        assert_eq!(check.problem_binding_anomaly_count, 0);
+        assert_eq!(check.knowledge_binding_anomaly_count, 0);
+    }
+
+    #[tokio::test]
+    async fn post_restore_rebuild_apply_requires_clean_preconditions() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let result = acm_os_application::apply_post_restore_rebuild(&runtime)
+            .await
+            .expect("derived rebuild apply");
+        assert_eq!(result.knowledge_node_count, 0);
+        assert_eq!(result.relation_count, 0);
+        assert_eq!(result.location_anomaly_count, 0);
+    }
+
+    #[tokio::test]
+    async fn system_health_snapshot_is_read_only_and_aggregates_recovery_state() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let health = runtime
+            .system_health_snapshot()
+            .await
+            .expect("system health");
+        assert_eq!(health.pending_critical_operation_count, 0);
+        assert_eq!(health.backup_file_count, 0);
+        assert!(!health.pending_restore_intent);
+        assert_eq!(health.rollback_integrity_verified, None);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_export_preview_is_private_and_creates_no_files() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let preview = acm_os_application::preview_diagnostic_export(&runtime)
+            .await
+            .expect("diagnostic export preview");
+        assert!(!preview.creates_files);
+        assert!(preview.sections.contains(&"restore_diagnostics".to_owned()));
+        assert!(preview
+            .privacy_exclusions
+            .contains(&"markdown_content".to_owned()));
+        assert!(!Path::new(&preview.output_directory).exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_runtime_can_publish_a_private_diagnostic_export_without_a_database_pool() {
+        let directory = TempDir::new().expect("temporary app data");
+        fs::write(
+            directory.path().join(DATABASE_FILENAME),
+            b"not a sqlite database",
+        )
+        .expect("corrupt database fixture");
+        let runtime = start_database(directory.path()).await;
+        assert!(matches!(
+            runtime.status(),
+            StartupGateStatus::RecoveryRequired { .. }
+        ));
+
+        let preview = acm_os_application::preview_diagnostic_export(&runtime)
+            .await
+            .expect("recovery diagnostic preview");
+        assert!(!preview.creates_files);
+        let export = acm_os_application::create_diagnostic_export(&runtime)
+            .await
+            .expect("recovery diagnostic export");
+        let path = Path::new(&export.path);
+        assert!(path.starts_with(directory.path().join("diagnostics")));
+        let json = fs::read_to_string(path).expect("published diagnostic JSON");
+        assert!(json.contains("acm-os-diagnostic-v1"));
+        assert!(json.contains("\"startupState\": \"recoveryRequired\""));
+        assert!(!json.contains(&directory.path().to_string_lossy().into_owned()));
+        assert!(!path.with_extension("json.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn weekly_backup_boundary_publishes_a_consistent_snapshot() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let backup = acm_os_application::create_weekly_backup(&runtime)
+            .await
+            .expect("weekly backup");
+        assert!(Path::new(&backup.path).starts_with(directory.path().join("backups/weekly")));
+        assert!(Path::new(&backup.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("weekly-"));
+        let pool = connect_read_only(Path::new(&backup.path))
+            .await
+            .expect("weekly snapshot");
+        verify_integrity(&pool).await.expect("weekly integrity");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn backup_retention_preview_is_read_only() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let preview = acm_os_application::preview_backup_retention(&runtime)
+            .await
+            .expect("retention preview");
+        assert_eq!(preview.daily_keep, 7);
+        assert_eq!(preview.weekly_keep, 4);
+        assert!(preview.protected_paths.is_empty());
+        assert!(preview.prune_candidate_paths.is_empty());
+        assert!(!directory.path().join("backups").exists());
+        let removed = acm_os_application::apply_backup_retention(&runtime, Vec::new())
+            .await
+            .expect("empty retention apply");
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_restore_intent_is_consumed_before_startup_opens_sqlite() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let snapshot =
+            acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path.clone())
+                .await
+                .expect("pre-restore snapshot");
+        let staging = directory
+            .path()
+            .join("backups/pre-restore/restore-staging.sqlite3");
+        fs::copy(&candidate.path, &staging).expect("staging database");
+        write_restore_intent(directory.path(), &staging, Path::new(&snapshot.path))
+            .expect("restore intent");
+        assert!(runtime.restore_diagnostics().pending_intent);
+        sqlx::query("INSERT INTO weekly_acm_budgets (weekday, budget_minutes) VALUES (1, 90)")
+            .execute(runtime._pool.as_ref().expect("current database"))
+            .await
+            .expect("current fact after candidate");
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(runtime._pool.as_ref().expect("current database"))
+            .await
+            .expect("checkpoint current database");
+        runtime
+            ._pool
+            .as_ref()
+            .expect("current database")
+            .close()
+            .await;
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 23 }
+        );
+        let restored_budget: Option<i64> =
+            sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
+                .fetch_optional(restarted._pool.as_ref().expect("restarted database"))
+                .await
+                .expect("restored facts");
+        assert_eq!(restored_budget, None);
+        assert!(!directory
+            .path()
+            .join(DATABASE_RESTORE_INTENT_FILENAME)
+            .exists());
+        assert!(directory
+            .path()
+            .join("system-facts.sqlite3.restore-rollback")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_pending_restore_intent_enters_recovery_and_remains_durable() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let candidate = acm_os_application::create_manual_backup(&runtime)
+            .await
+            .expect("restore candidate");
+        let snapshot = acm_os_application::create_pre_restore_snapshot(&runtime, candidate.path)
+            .await
+            .expect("pre-restore snapshot");
+        let staging = directory
+            .path()
+            .join("backups/pre-restore/invalid-staging.sqlite3");
+        fs::write(&staging, b"corrupt").expect("invalid staging");
+        write_restore_intent(directory.path(), &staging, Path::new(&snapshot.path))
+            .expect("restore intent");
+        runtime
+            ._pool
+            .as_ref()
+            .expect("current database")
+            .close()
+            .await;
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::RestoreFailed,
+            }
+        );
+        assert!(directory
+            .path()
+            .join(DATABASE_RESTORE_INTENT_FILENAME)
+            .exists());
+        assert!(directory.path().join(DATABASE_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn first_weekly_budget_mutation_creates_one_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let daily_directory = directory.path().join("backups/daily");
+        fs::create_dir_all(&daily_directory).expect("daily backup directory");
+        let today = crate::current_local_date().expect("current local date");
+        let partial = daily_directory.join(format!(
+            "daily-{}-ignored.sqlite3.partial",
+            today.to_iso_string()
+        ));
+        fs::write(&partial, b"incomplete backup").expect("partial backup marker");
+
+        let first = WeeklyAcmBudgetSchedule {
+            monday: Some(30),
+            tuesday: None,
+            wednesday: None,
+            thursday: None,
+            friday: None,
+            saturday: None,
+            sunday: None,
+        };
+        runtime
+            .save_weekly_acm_budget(&first)
+            .await
+            .expect("first mutation");
+
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        assert!(published[0]
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(
+                |name| name.starts_with(&format!("daily-{}-schema-23-", today.to_iso_string()))
+            ));
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_budget_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM weekly_acm_budgets")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up weekly budget count");
+        assert_eq!(backed_up_budget_count, 0);
+        backup_pool.close().await;
+
+        let second = WeeklyAcmBudgetSchedule {
+            monday: Some(45),
+            ..first
+        };
+        runtime
+            .save_weekly_acm_budget(&second)
+            .await
+            .expect("second mutation");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+        assert_eq!(
+            runtime
+                .load_weekly_acm_budget()
+                .await
+                .expect("live weekly budget"),
+            second
+        );
     }
 
     #[tokio::test]
@@ -11221,7 +16744,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 21), \
+                        CHECK (schema_generation < 24), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -11356,7 +16879,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 20 }
+            &StartupGateStatus::Ready { schema_version: 23 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -11390,7 +16913,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 20 }
+            &StartupGateStatus::Ready { schema_version: 23 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -11727,6 +17250,331 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_mastery_evidence_update_uses_pre_mutation_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = crate::current_local_date().expect("current local date");
+        let all_six = acm_os_domain::ProblemMasteryEvidence {
+            recalls_problem: true,
+            multiple_solutions_clear: true,
+            knowledge_understood: true,
+            implementation_fluent: true,
+            can_adapt_or_create: true,
+            transfer_solved_independently: true,
+        };
+
+        update_problem_mastery_evidence(&runtime, &problem, all_six, today)
+            .await
+            .expect("first mastery evidence update");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_evidence_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM problem_mastery_evidence")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up mastery evidence count");
+        assert_eq!(backed_up_evidence_count, 0);
+        backup_pool.close().await;
+
+        update_problem_mastery_evidence(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemMasteryEvidence {
+                transfer_solved_independently: false,
+                ..all_six
+            },
+            today,
+        )
+        .await
+        .expect("second mastery evidence update");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn missing_problem_mastery_update_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(9999).expect("contest"),
+            "Z",
+        )
+        .expect("problem");
+        let today = crate::current_local_date().expect("current local date");
+
+        assert_eq!(
+            update_problem_mastery_evidence(
+                &runtime,
+                &missing,
+                acm_os_domain::ProblemMasteryEvidence::default(),
+                today,
+            )
+            .await,
+            Err(ReviewAttemptError::ProblemNotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    #[tokio::test]
+    async fn first_contest_facts_completion_uses_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let mut draft = contest_draft();
+        draft.starts_at_utc = Some("2026-08-10T12:00:00Z".to_owned());
+        runtime.persist_manifest(&draft).await.expect("manifest");
+        for index in ["A", "B"] {
+            runtime
+                .persist_first_snapshot(&snapshot(index, "source", "<p>safe</p>"))
+                .await
+                .expect("snapshot");
+        }
+        let contest = draft.contest.clone();
+        let facts = [
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A")
+                    .expect("A"),
+                final_contest_result: ContestFinalResult::WrongAnswer,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+            },
+            ContestProblemFactInput {
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B")
+                    .expect("B"),
+                final_contest_result: ContestFinalResult::Unknown,
+                upsolve_decision: acm_os_application::ContestUpsolveDecision::Undecided,
+            },
+        ];
+
+        runtime
+            .complete_contest_facts(&contest, &facts)
+            .await
+            .expect("complete contest facts");
+
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_status: String = sqlx::query_scalar(
+            "SELECT facts_status FROM contests WHERE external_contest_key = 1979",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up contest facts status");
+        let backed_up_fact_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contest_problems WHERE final_contest_result IS NOT NULL",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up contest problem facts");
+        assert_eq!(backed_up_status, "pending");
+        assert_eq!(backed_up_fact_count, 0);
+        backup_pool.close().await;
+
+        let live_status: String = sqlx::query_scalar(
+            "SELECT facts_status FROM contests WHERE external_contest_key = 1979",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("live contest facts status");
+        assert_eq!(live_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn missing_contest_facts_completion_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = acm_os_domain::CodeforcesContestIdentity::new(9999).expect("contest");
+
+        assert_eq!(
+            runtime.complete_contest_facts(&missing, &[]).await,
+            Err(ContestFactsError::NotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    #[tokio::test]
+    async fn first_contest_delete_uses_pre_mutation_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.expect("manifest");
+
+        let preview = runtime
+            .delete_contest(&draft.contest)
+            .await
+            .expect("delete contest");
+        assert_eq!(preview.relationship_count, 2);
+
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_contests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contests")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("backed up contest count");
+        let backed_up_relationships: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems")
+                .fetch_one(&backup_pool)
+                .await
+                .expect("backed up contest relationship count");
+        assert_eq!(backed_up_contests, 1);
+        assert_eq!(backed_up_relationships, 2);
+        backup_pool.close().await;
+
+        let live_contests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contests")
+            .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+            .await
+            .expect("live contest count");
+        assert_eq!(live_contests, 0);
+    }
+
+    #[tokio::test]
+    async fn missing_contest_delete_does_not_create_daily_backup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let missing = acm_os_domain::CodeforcesContestIdentity::new(9999).expect("contest");
+
+        assert_eq!(
+            runtime.delete_contest(&missing).await,
+            Err(ContestManagementError::NotFound)
+        );
+        assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    #[tokio::test]
+    async fn first_problem_lifecycle_transition_uses_pre_mutation_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            today,
+        )
+        .await
+        .expect("join upsolve");
+
+        let daily_directory = directory.path().join("backups/daily");
+        let published = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_status: String = sqlx::query_scalar(
+            "SELECT pls.learning_status FROM problem_learning_states pls \
+             JOIN problems p ON p.id = pls.problem_id \
+             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(&backup_pool)
+        .await
+        .expect("backed up lifecycle status");
+        assert_eq!(backed_up_status, "unstarted");
+        backup_pool.close().await;
+
+        let live_status: String = sqlx::query_scalar(
+            "SELECT pls.learning_status FROM problem_learning_states pls \
+             JOIN problems p ON p.id = pls.problem_id \
+             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("live lifecycle status");
+        assert_eq!(live_status, "upsolve_pending");
+
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            today,
+        )
+        .await
+        .expect("start learning");
+        let published_after_second = files_under(&daily_directory)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_second, published);
+    }
+
+    #[tokio::test]
+    async fn first_review_attempt_creation_uses_pre_mutation_daily_backup() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        runtime
+            .persist_first_snapshot(&snapshot("A", "source", "<p>safe</p>"))
+            .await
+            .expect("statement snapshot");
+        let learned_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("learned date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, learned_on)
+                .await
+                .expect("learning transition");
+        }
+        fs::remove_dir_all(directory.path().join("backups/daily"))
+            .expect("remove lifecycle fixture backup");
+        let due = acm_os_domain::ReviewSchedulingEngine::first_cold_start_due(learned_on)
+            .expect("first due");
+
+        let attempt = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("create review attempt");
+        assert_eq!(
+            attempt.attempt_type,
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+        );
+
+        let published = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 1);
+        let backup_pool = connect_read_only(&published[0])
+            .await
+            .expect("daily backup database");
+        let backed_up_attempts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("backed up review attempts");
+        assert_eq!(backed_up_attempts, 0);
+        backup_pool.close().await;
+
+        let resumed = start_or_resume_review(&runtime, &problem, due)
+            .await
+            .expect("resume review attempt");
+        assert_eq!(resumed.attempt_id, attempt.attempt_id);
+        let published_after_resume = files_under(&directory.path().join("backups/daily"))
+            .into_iter()
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect::<Vec<_>>();
+        assert_eq!(published_after_resume, published);
+    }
+
+    #[tokio::test]
     async fn corrupted_workspace_relationship_requires_recovery() {
         let app_data = TempDir::new().expect("temporary app data");
         let vault = TempDir::new().expect("temporary vault");
@@ -11770,7 +17618,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 20 }
+            &StartupGateStatus::Ready { schema_version: 23 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;

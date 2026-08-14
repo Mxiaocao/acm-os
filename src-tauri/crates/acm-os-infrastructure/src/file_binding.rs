@@ -85,6 +85,25 @@ pub(crate) fn resolve_personal_note(
     }
 }
 
+pub(crate) fn resolve_relative_markdown(
+    active_vault: &str,
+    relative_path: &str,
+) -> Result<ResolvedNoteFile, ()> {
+    let vault = std::fs::canonicalize(active_vault).map_err(|_| ())?;
+    if !vault.is_dir() {
+        return Err(());
+    }
+    let relative = Path::new(relative_path);
+    if !is_safe_relative_path(relative) || !is_markdown(relative) {
+        return Err(());
+    }
+    let path = std::fs::canonicalize(vault.join(relative)).map_err(|_| ())?;
+    if !path.starts_with(&vault) || !path.is_file() || !is_markdown(&path) {
+        return Err(());
+    }
+    read_resolved_note(&vault, path, true)
+}
+
 pub(crate) fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
     let mut files = Vec::new();
     let mut pending = vec![vault.to_path_buf()];

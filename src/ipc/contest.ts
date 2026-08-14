@@ -126,6 +126,11 @@ export type PersonalNoteReadStateDto =
   | { state: "locationAnomaly"; lastKnownPath: string }
   | { state: "vaultUnavailable"; lastKnownPath: string };
 
+export interface PersonalNoteRelocationCandidateDto {
+  vaultRelativePath: string;
+  occupied: boolean;
+}
+
 export interface LocalStatementAssetDto {
   localRef: string;
   mediaType: string;
@@ -384,6 +389,34 @@ export function deletePersonalNote(contestId: number, index: string): Promise<Pr
 
 export function getPersonalNoteProjection(contestId: number, index: string): Promise<PersonalNoteReadStateDto> {
   return invoke<PersonalNoteReadStateDto>("personal_note_projection", { input: { contestId, index } });
+}
+
+export function getPersonalNoteRelocationCandidates(
+  contestId: number,
+  index: string,
+): Promise<PersonalNoteRelocationCandidateDto[]> {
+  return invoke<PersonalNoteRelocationCandidateDto[]>("personal_note_relocation_candidates", {
+    input: { contestId, index },
+  });
+}
+
+export function rebindPersonalNote(
+  contestId: number,
+  index: string,
+  vaultRelativePath: string,
+): Promise<PersonalNoteBindingDto> {
+  return invoke<PersonalNoteBindingDto>("rebind_personal_note", {
+    input: { contestId, index, vaultRelativePath },
+  });
+}
+
+export function confirmPersonalNoteDeleted(
+  contestId: number,
+  index: string,
+): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("confirm_personal_note_deleted", {
+    input: { contestId, index },
+  });
 }
 
 export function openPersonalNoteInObsidian(contestId: number, index: string): Promise<void> {

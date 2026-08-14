@@ -1654,6 +1654,83 @@ pub trait PersonalNoteReadPort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalNoteRelocationCandidate {
+    pub vault_relative_path: String,
+    pub occupied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalNoteBindingRepairError {
+    ProblemNotFound,
+    NotPersonal,
+    LocationAnomalyRequired,
+    VaultUnavailable,
+    CandidateUnavailable,
+    CandidateOccupied,
+    ReviewInProgress,
+    IntegrityViolation,
+    PersistenceUnavailable,
+}
+
+impl PersonalNoteBindingRepairError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ProblemNotFound => "problem_not_found",
+            Self::NotPersonal => "problem_not_personal",
+            Self::LocationAnomalyRequired => "note_location_anomaly_required",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::CandidateUnavailable => "note_relocation_candidate_unavailable",
+            Self::CandidateOccupied => "note_relocation_candidate_occupied",
+            Self::ReviewInProgress => "review_in_progress",
+            Self::IntegrityViolation => "note_delete_integrity_violation",
+            Self::PersistenceUnavailable => "note_persistence_unavailable",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait PersonalNoteBindingRepairPort {
+    async fn personal_note_relocation_candidates(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError>;
+
+    async fn rebind_personal_note(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        vault_relative_path: &str,
+    ) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError>;
+
+    async fn confirm_personal_note_deleted(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError>;
+}
+
+pub async fn personal_note_relocation_candidates<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError> {
+    port.personal_note_relocation_candidates(problem).await
+}
+
+pub async fn rebind_personal_note<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    vault_relative_path: impl AsRef<str>,
+) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError> {
+    port.rebind_personal_note(problem, vault_relative_path.as_ref())
+        .await
+}
+
+pub async fn confirm_personal_note_deleted<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError> {
+    port.confirm_personal_note_deleted(problem).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtraProblemLinkTarget(String);
 
 impl ExtraProblemLinkTarget {
@@ -2092,6 +2169,10 @@ pub enum StartupRecoveryReason {
     MigrationFailed,
     IntegrityCheckFailed,
     PreMigrationBackupFailed,
+    UnresolvedCriticalOperation,
+    RestoreIntentInvalid,
+    RestoreFailed,
+    RestoreIntentCleanupFailed,
 }
 
 impl StartupRecoveryReason {
@@ -2104,6 +2185,10 @@ impl StartupRecoveryReason {
             Self::MigrationFailed => "migration_failed",
             Self::IntegrityCheckFailed => "integrity_check_failed",
             Self::PreMigrationBackupFailed => "pre_migration_backup_failed",
+            Self::UnresolvedCriticalOperation => "unresolved_critical_operation",
+            Self::RestoreIntentInvalid => "restore_intent_invalid",
+            Self::RestoreFailed => "restore_failed",
+            Self::RestoreIntentCleanupFailed => "restore_intent_cleanup_failed",
         }
     }
 }
@@ -2341,6 +2426,308 @@ pub async fn configure_workspace<P: WorkspaceConfigurationPort>(
     Ok(configuration)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualBackupPreview {
+    pub schema_version: i64,
+    pub backup_directory: String,
+    pub filename_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualBackupResult {
+    pub path: String,
+    pub schema_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupInventoryEntry {
+    pub path: String,
+    pub category: String,
+    pub size_bytes: u64,
+    pub integrity_verified: bool,
+    pub retention: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupInventory {
+    pub entries: Vec<BackupInventoryEntry>,
+    pub daily_keep: u32,
+    pub weekly_keep: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemRestoreCandidatePreview {
+    pub source_path: String,
+    pub schema_version: i64,
+    pub supported_schema_version: i64,
+    pub migration_required: bool,
+    pub restores_system_facts: bool,
+    pub overwrites_markdown: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreRestoreSnapshotResult {
+    pub path: String,
+    pub schema_version: i64,
+    pub candidate: SystemRestoreCandidatePreview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreIntentPreparationResult {
+    pub staging_path: String,
+    pub pre_restore_snapshot_path: String,
+    pub candidate: SystemRestoreCandidatePreview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreRebuildPreview {
+    pub problem_binding_count: u64,
+    pub knowledge_binding_count: u64,
+    pub derived_relation_count: u64,
+    pub revalidates_bindings: bool,
+    pub rebuilds_derived_knowledge: bool,
+    pub overwrites_markdown: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreBindingAnomaly {
+    pub problem_id: i64,
+    pub vault_relative_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreProblemBindingValidation {
+    pub total_count: u64,
+    pub ready_count: u64,
+    pub anomalies: Vec<PostRestoreBindingAnomaly>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreKnowledgeBindingAnomaly {
+    pub knowledge_node_id: String,
+    pub vault_relative_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreKnowledgeBindingValidation {
+    pub total_count: u64,
+    pub ready_count: u64,
+    pub confirmed_deleted_count: u64,
+    pub anomalies: Vec<PostRestoreKnowledgeBindingAnomaly>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreRebuildPreconditionCheck {
+    pub eligible: bool,
+    pub blockers: Vec<String>,
+    pub problem_binding_anomaly_count: u64,
+    pub knowledge_binding_anomaly_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRestoreRebuildApplyResult {
+    pub knowledge_node_count: u64,
+    pub relation_count: u64,
+    pub location_anomaly_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticExportPreview {
+    pub output_directory: String,
+    pub sections: Vec<String>,
+    pub privacy_exclusions: Vec<String>,
+    pub creates_files: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticExportResult {
+    pub path: String,
+    pub sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupRetentionPreview {
+    pub protected_paths: Vec<String>,
+    pub prune_candidate_paths: Vec<String>,
+    pub daily_keep: u32,
+    pub weekly_keep: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualBackupError {
+    PersistenceUnavailable,
+    BackupFailed,
+    IntegrityViolation,
+    RestoreCandidateUnavailable,
+    RestoreCandidateOutsideBackupArea,
+    RestoreCandidateNotPublished,
+    RestoreCandidateSchemaUnsupported,
+    PreRestoreBackupFailed,
+    RestoreIntentPending,
+    RestoreIntentWriteFailed,
+    RestoreStagingFailed,
+}
+
+impl ManualBackupError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::PersistenceUnavailable => "persistence_unavailable",
+            Self::BackupFailed => "manual_backup_failed",
+            Self::IntegrityViolation => "integrity_violation",
+            Self::RestoreCandidateUnavailable => "restore_candidate_unavailable",
+            Self::RestoreCandidateOutsideBackupArea => "restore_candidate_outside_backup_area",
+            Self::RestoreCandidateNotPublished => "restore_candidate_not_published",
+            Self::RestoreCandidateSchemaUnsupported => "restore_candidate_schema_unsupported",
+            Self::PreRestoreBackupFailed => "pre_restore_backup_failed",
+            Self::RestoreIntentPending => "restore_intent_pending",
+            Self::RestoreIntentWriteFailed => "restore_intent_write_failed",
+            Self::RestoreStagingFailed => "restore_staging_failed",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ManualBackupPort {
+    async fn preview_manual_backup(&self) -> Result<ManualBackupPreview, ManualBackupError>;
+    async fn create_manual_backup(&self) -> Result<ManualBackupResult, ManualBackupError>;
+    async fn backup_inventory(&self) -> Result<BackupInventory, ManualBackupError>;
+    async fn preview_system_restore_candidate(
+        &self,
+        source_path: String,
+    ) -> Result<SystemRestoreCandidatePreview, ManualBackupError>;
+    async fn create_pre_restore_snapshot(
+        &self,
+        source_path: String,
+    ) -> Result<PreRestoreSnapshotResult, ManualBackupError>;
+    async fn prepare_restore_intent(
+        &self,
+        source_path: String,
+    ) -> Result<RestoreIntentPreparationResult, ManualBackupError>;
+    async fn preview_post_restore_rebuild(
+        &self,
+    ) -> Result<PostRestoreRebuildPreview, ManualBackupError>;
+    async fn validate_post_restore_problem_bindings(
+        &self,
+    ) -> Result<PostRestoreProblemBindingValidation, ManualBackupError>;
+    async fn validate_post_restore_knowledge_bindings(
+        &self,
+    ) -> Result<PostRestoreKnowledgeBindingValidation, ManualBackupError>;
+    async fn check_post_restore_rebuild_preconditions(
+        &self,
+    ) -> Result<PostRestoreRebuildPreconditionCheck, ManualBackupError>;
+    async fn apply_post_restore_rebuild(
+        &self,
+    ) -> Result<PostRestoreRebuildApplyResult, ManualBackupError>;
+    async fn preview_diagnostic_export(&self)
+        -> Result<DiagnosticExportPreview, ManualBackupError>;
+    async fn create_diagnostic_export(&self) -> Result<DiagnosticExportResult, ManualBackupError>;
+    async fn create_weekly_backup(&self) -> Result<ManualBackupResult, ManualBackupError>;
+    async fn preview_backup_retention(&self) -> Result<BackupRetentionPreview, ManualBackupError>;
+    async fn apply_backup_retention(&self, paths: Vec<String>) -> Result<u64, ManualBackupError>;
+}
+
+pub async fn preview_manual_backup<P: ManualBackupPort>(
+    port: &P,
+) -> Result<ManualBackupPreview, ManualBackupError> {
+    port.preview_manual_backup().await
+}
+
+pub async fn create_manual_backup<P: ManualBackupPort>(
+    port: &P,
+) -> Result<ManualBackupResult, ManualBackupError> {
+    port.create_manual_backup().await
+}
+
+pub async fn backup_inventory<P: ManualBackupPort>(
+    port: &P,
+) -> Result<BackupInventory, ManualBackupError> {
+    port.backup_inventory().await
+}
+
+pub async fn preview_system_restore_candidate<P: ManualBackupPort>(
+    port: &P,
+    source_path: String,
+) -> Result<SystemRestoreCandidatePreview, ManualBackupError> {
+    port.preview_system_restore_candidate(source_path).await
+}
+
+pub async fn create_pre_restore_snapshot<P: ManualBackupPort>(
+    port: &P,
+    source_path: String,
+) -> Result<PreRestoreSnapshotResult, ManualBackupError> {
+    port.create_pre_restore_snapshot(source_path).await
+}
+
+pub async fn prepare_restore_intent<P: ManualBackupPort>(
+    port: &P,
+    source_path: String,
+) -> Result<RestoreIntentPreparationResult, ManualBackupError> {
+    port.prepare_restore_intent(source_path).await
+}
+
+pub async fn preview_post_restore_rebuild<P: ManualBackupPort>(
+    port: &P,
+) -> Result<PostRestoreRebuildPreview, ManualBackupError> {
+    port.preview_post_restore_rebuild().await
+}
+
+pub async fn validate_post_restore_problem_bindings<P: ManualBackupPort>(
+    port: &P,
+) -> Result<PostRestoreProblemBindingValidation, ManualBackupError> {
+    port.validate_post_restore_problem_bindings().await
+}
+
+pub async fn validate_post_restore_knowledge_bindings<P: ManualBackupPort>(
+    port: &P,
+) -> Result<PostRestoreKnowledgeBindingValidation, ManualBackupError> {
+    port.validate_post_restore_knowledge_bindings().await
+}
+
+pub async fn check_post_restore_rebuild_preconditions<P: ManualBackupPort>(
+    port: &P,
+) -> Result<PostRestoreRebuildPreconditionCheck, ManualBackupError> {
+    port.check_post_restore_rebuild_preconditions().await
+}
+
+pub async fn apply_post_restore_rebuild<P: ManualBackupPort>(
+    port: &P,
+) -> Result<PostRestoreRebuildApplyResult, ManualBackupError> {
+    port.apply_post_restore_rebuild().await
+}
+
+pub async fn preview_diagnostic_export<P: ManualBackupPort>(
+    port: &P,
+) -> Result<DiagnosticExportPreview, ManualBackupError> {
+    port.preview_diagnostic_export().await
+}
+
+pub async fn create_diagnostic_export<P: ManualBackupPort>(
+    port: &P,
+) -> Result<DiagnosticExportResult, ManualBackupError> {
+    port.create_diagnostic_export().await
+}
+
+pub async fn create_weekly_backup<P: ManualBackupPort>(
+    port: &P,
+) -> Result<ManualBackupResult, ManualBackupError> {
+    port.create_weekly_backup().await
+}
+
+pub async fn preview_backup_retention<P: ManualBackupPort>(
+    port: &P,
+) -> Result<BackupRetentionPreview, ManualBackupError> {
+    port.preview_backup_retention().await
+}
+
+pub async fn apply_backup_retention<P: ManualBackupPort>(
+    port: &P,
+    paths: Vec<String>,
+) -> Result<u64, ManualBackupError> {
+    port.apply_backup_retention(paths).await
+}
+
 async fn resolve_required_directory<P: WorkspaceConfigurationPort>(
     port: &P,
     field: WorkspacePathField,
@@ -2394,6 +2781,14 @@ pub struct KnowledgeNodeProjection {
 pub struct KnowledgeIndexProjection {
     pub nodes: Vec<KnowledgeNodeProjection>,
     pub location_anomalies: Vec<KnowledgeNodeProjection>,
+    pub identity_conflicts: Vec<KnowledgeIdentityConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeIdentityConflict {
+    pub historical_knowledge_node_id: String,
+    pub display_name: String,
+    pub candidate_vault_relative_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2428,6 +2823,124 @@ pub async fn search_knowledge_index<P: KnowledgeIndexPort>(
     query: &str,
 ) -> Result<Vec<KnowledgeNodeProjection>, KnowledgeIndexError> {
     port.search_knowledge_index(query.trim()).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelocationCandidate {
+    pub vault_relative_path: String,
+    pub occupied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeBindingRepairError {
+    WorkspaceUnavailable,
+    VaultUnavailable,
+    KnowledgeNodeNotFound,
+    LocationAnomalyRequired,
+    CandidateUnavailable,
+    CandidateOccupied,
+    PersistenceUnavailable,
+    IntegrityViolation,
+    IdentityConflictRequired,
+}
+
+impl KnowledgeBindingRepairError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::WorkspaceUnavailable => "workspace_unavailable",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::KnowledgeNodeNotFound => "knowledge_node_not_found",
+            Self::LocationAnomalyRequired => "knowledge_location_anomaly_required",
+            Self::CandidateUnavailable => "knowledge_relocation_candidate_unavailable",
+            Self::CandidateOccupied => "knowledge_relocation_candidate_occupied",
+            Self::PersistenceUnavailable => "persistence_unavailable",
+            Self::IntegrityViolation => "integrity_violation",
+            Self::IdentityConflictRequired => "knowledge_identity_conflict_required",
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait KnowledgeBindingRepairPort {
+    async fn knowledge_relocation_candidates(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<Vec<KnowledgeRelocationCandidate>, KnowledgeBindingRepairError>;
+
+    async fn rebind_knowledge_node(
+        &self,
+        knowledge_node_id: &str,
+        vault_relative_path: &str,
+    ) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError>;
+
+    async fn confirm_knowledge_markdown_deleted(
+        &self,
+        knowledge_node_id: &str,
+    ) -> Result<(), KnowledgeBindingRepairError>;
+
+    async fn resolve_knowledge_identity_conflict(
+        &self,
+        historical_knowledge_node_id: &str,
+        candidate_vault_relative_path: &str,
+        restore_old_identity: bool,
+    ) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError>;
+}
+
+pub async fn knowledge_relocation_candidates<P: KnowledgeBindingRepairPort>(
+    port: &P,
+    knowledge_node_id: &str,
+) -> Result<Vec<KnowledgeRelocationCandidate>, KnowledgeBindingRepairError> {
+    let knowledge_node_id = knowledge_node_id.trim();
+    if knowledge_node_id.is_empty() {
+        return Err(KnowledgeBindingRepairError::IntegrityViolation);
+    }
+    port.knowledge_relocation_candidates(knowledge_node_id)
+        .await
+}
+
+pub async fn rebind_knowledge_node<P: KnowledgeBindingRepairPort>(
+    port: &P,
+    knowledge_node_id: &str,
+    vault_relative_path: impl AsRef<str>,
+) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError> {
+    let knowledge_node_id = knowledge_node_id.trim();
+    let vault_relative_path = vault_relative_path.as_ref().trim();
+    if knowledge_node_id.is_empty() || vault_relative_path.is_empty() {
+        return Err(KnowledgeBindingRepairError::IntegrityViolation);
+    }
+    port.rebind_knowledge_node(knowledge_node_id, vault_relative_path)
+        .await
+}
+
+pub async fn confirm_knowledge_markdown_deleted<P: KnowledgeBindingRepairPort>(
+    port: &P,
+    knowledge_node_id: &str,
+) -> Result<(), KnowledgeBindingRepairError> {
+    let knowledge_node_id = knowledge_node_id.trim();
+    if knowledge_node_id.is_empty() {
+        return Err(KnowledgeBindingRepairError::IntegrityViolation);
+    }
+    port.confirm_knowledge_markdown_deleted(knowledge_node_id)
+        .await
+}
+
+pub async fn resolve_knowledge_identity_conflict<P: KnowledgeBindingRepairPort>(
+    port: &P,
+    historical_knowledge_node_id: &str,
+    candidate_vault_relative_path: &str,
+    restore_old_identity: bool,
+) -> Result<KnowledgeNodeProjection, KnowledgeBindingRepairError> {
+    if historical_knowledge_node_id.trim().is_empty()
+        || candidate_vault_relative_path.trim().is_empty()
+    {
+        return Err(KnowledgeBindingRepairError::IntegrityViolation);
+    }
+    port.resolve_knowledge_identity_conflict(
+        historical_knowledge_node_id.trim(),
+        candidate_vault_relative_path.trim(),
+        restore_old_identity,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

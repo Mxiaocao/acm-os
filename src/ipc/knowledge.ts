@@ -14,6 +14,18 @@ export interface KnowledgeNodeDto {
 export interface KnowledgeIndexDto {
   nodes: KnowledgeNodeDto[];
   locationAnomalies: KnowledgeNodeDto[];
+  identityConflicts: KnowledgeIdentityConflictDto[];
+}
+
+export interface KnowledgeIdentityConflictDto {
+  historicalKnowledgeNodeId: string;
+  displayName: string;
+  candidateVaultRelativePath: string;
+}
+
+export interface KnowledgeRelocationCandidateDto {
+  vaultRelativePath: string;
+  occupied: boolean;
 }
 
 export interface KnowledgeUnderstandingDto {
@@ -53,6 +65,23 @@ export interface KnowledgeCandidateDto {
 
 export const loadKnowledgeIndex = (query = "") =>
   invoke<KnowledgeIndexDto>("knowledge_index", { input: { query } });
+
+export const loadKnowledgeRelocationCandidates = (knowledgeNodeId: string) =>
+  invoke<KnowledgeRelocationCandidateDto[]>("knowledge_relocation_candidates", { input: { knowledgeNodeId } });
+
+export const rebindKnowledgeNode = (knowledgeNodeId: string, vaultRelativePath: string) =>
+  invoke<KnowledgeNodeDto>("rebind_knowledge_node", { input: { knowledgeNodeId, vaultRelativePath } });
+
+export const confirmKnowledgeMarkdownDeleted = (knowledgeNodeId: string) =>
+  invoke<void>("confirm_knowledge_markdown_deleted", { input: { knowledgeNodeId } });
+
+export const resolveKnowledgeIdentityConflict = (
+  historicalKnowledgeNodeId: string,
+  candidateVaultRelativePath: string,
+  restoreOldIdentity: boolean,
+) => invoke<KnowledgeNodeDto>("resolve_knowledge_identity_conflict", {
+  input: { historicalKnowledgeNodeId, candidateVaultRelativePath, restoreOldIdentity },
+});
 
 export const loadKnowledgeDetail = (knowledgeNodeId: string) =>
   invoke<KnowledgeDetailDto>("knowledge_detail", { input: { knowledgeNodeId } });

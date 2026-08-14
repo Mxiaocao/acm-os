@@ -40,6 +40,70 @@ export function getWorkspaceStatus(): Promise<WorkspaceStatusDto> {
   return invoke<WorkspaceStatusDto>("workspace_status");
 }
 
+export interface ManualBackupPreviewDto {
+  schemaVersion: number;
+  backupDirectory: string;
+  filenamePrefix: string;
+}
+
+export interface ManualBackupResultDto {
+  path: string;
+  schemaVersion: number;
+}
+
+export interface BackupInventoryEntryDto {
+  path: string;
+  category: string;
+  sizeBytes: number;
+  integrityVerified: boolean;
+  retention: "protected" | "keep" | "prune_candidate";
+}
+
+export interface BackupInventoryDto {
+  entries: BackupInventoryEntryDto[];
+  dailyKeep: number;
+  weeklyKeep: number;
+}
+
+export interface SystemRestoreCandidatePreviewDto {
+  sourcePath: string;
+  schemaVersion: number;
+  supportedSchemaVersion: number;
+  migrationRequired: boolean;
+  restoresSystemFacts: true;
+  overwritesMarkdown: false;
+}
+
+export interface RestoreIntentPreparationDto {
+  stagingPath: string;
+  preRestoreSnapshotPath: string;
+  candidate: SystemRestoreCandidatePreviewDto;
+}
+
+export const previewManualBackup = () => invoke<ManualBackupPreviewDto>("preview_manual_backup");
+export const createManualBackup = () => invoke<ManualBackupResultDto>("create_manual_backup");
+export const createWeeklyBackup = () => invoke<ManualBackupResultDto>("create_weekly_backup");
+export interface BackupRetentionPreviewDto {
+  protectedPaths: string[];
+  pruneCandidatePaths: string[];
+  dailyKeep: number;
+  weeklyKeep: number;
+}
+export const previewBackupRetention = () =>
+  invoke<BackupRetentionPreviewDto>("preview_backup_retention");
+export const applyBackupRetention = (paths: string[]) =>
+  invoke<number>("apply_backup_retention", { input: { paths } });
+export const loadBackupInventory = () => invoke<BackupInventoryDto>("backup_inventory");
+export const previewSystemRestoreCandidate = (sourcePath: string) =>
+  invoke<SystemRestoreCandidatePreviewDto>("preview_system_restore_candidate", {
+    input: { sourcePath },
+  });
+export const prepareSystemRestore = (sourcePath: string) =>
+  invoke<RestoreIntentPreparationDto>("prepare_system_restore", {
+    input: { sourcePath },
+  });
+export const restartForPendingRestore = () => invoke<void>("restart_for_pending_restore");
+
 export function configureWorkspace(
   draft: WorkspaceConfigurationDraft,
 ): Promise<WorkspaceStatusDto> {

@@ -48,6 +48,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::foundation_status,
+            ipc::system_health_snapshot,
             ipc::startup_status,
             ipc::app_shell_status,
             ipc::contest_shelf,
@@ -85,8 +86,15 @@ pub fn run() {
             ipc::accept_today_extra_suggestion,
             ipc::delete_personal_note,
             ipc::personal_note_projection,
+            ipc::personal_note_relocation_candidates,
+            ipc::rebind_personal_note,
+            ipc::confirm_personal_note_deleted,
             ipc::open_personal_note_in_obsidian,
             ipc::knowledge_index,
+            ipc::knowledge_relocation_candidates,
+            ipc::rebind_knowledge_node,
+            ipc::confirm_knowledge_markdown_deleted,
+            ipc::resolve_knowledge_identity_conflict,
             ipc::knowledge_detail,
             ipc::confirm_knowledge_understanding,
             ipc::knowledge_reevaluation_suggestion,
@@ -97,6 +105,24 @@ pub fn run() {
             ipc::open_knowledge_in_obsidian,
             ipc::statement_assets,
             ipc::workspace_status,
+            ipc::preview_manual_backup,
+            ipc::create_manual_backup,
+            ipc::backup_inventory,
+            ipc::preview_system_restore_candidate,
+            ipc::prepare_system_restore,
+            ipc::restart_for_pending_restore,
+            ipc::restore_diagnostics,
+            ipc::confirm_restore_rollback_cleanup,
+            ipc::preview_post_restore_rebuild,
+            ipc::validate_post_restore_problem_bindings,
+            ipc::validate_post_restore_knowledge_bindings,
+            ipc::check_post_restore_rebuild_preconditions,
+            ipc::apply_post_restore_rebuild,
+            ipc::preview_diagnostic_export,
+            ipc::create_diagnostic_export,
+            ipc::create_weekly_backup,
+            ipc::preview_backup_retention,
+            ipc::apply_backup_retention,
             ipc::configure_workspace,
             #[cfg(feature = "desktop-e2e")]
             ipc::desktop_e2e_context,
@@ -105,7 +131,9 @@ pub fn run() {
             #[cfg(feature = "desktop-e2e")]
             ipc::desktop_e2e_log,
             #[cfg(feature = "desktop-e2e")]
-            ipc::desktop_e2e_finish
+            ipc::desktop_e2e_finish,
+            #[cfg(feature = "desktop-e2e")]
+            ipc::desktop_e2e_exit
         ])
         .run(tauri::generate_context!())
         .expect("error while running ACM-OS");

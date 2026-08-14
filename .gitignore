@@ -1,4 +1,6 @@
 node_modules/
+.pnpm-store/
+.desktop-e2e-*/
 dist/
 src-tauri/target/
 src-tauri/gen/

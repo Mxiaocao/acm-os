@@ -17,6 +17,41 @@ pub fn foundation_status() -> FoundationStatusDto {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SystemHealthSnapshotDto {
+    startup_state: &'static str,
+    schema_version: Option<i64>,
+    pending_critical_operation_count: u64,
+    backup_file_count: u64,
+    pending_restore_intent: bool,
+    rollback_integrity_verified: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn system_health_snapshot(
+    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<SystemHealthSnapshotDto, ()> {
+    let (startup_state, schema_version) = match startup.execute() {
+        acm_os_application::StartupGateStatus::Ready { schema_version } => {
+            ("ready", Some(*schema_version))
+        }
+        acm_os_application::StartupGateStatus::RecoveryRequired { .. } => {
+            ("recoveryRequired", None)
+        }
+    };
+    let health = database.system_health_snapshot().await.map_err(|_| ())?;
+    Ok(SystemHealthSnapshotDto {
+        startup_state,
+        schema_version,
+        pending_critical_operation_count: health.pending_critical_operation_count,
+        backup_file_count: health.backup_file_count,
+        pending_restore_intent: health.pending_restore_intent,
+        rollback_integrity_verified: health.rollback_integrity_verified,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContestShelfItemDto {
     contest_id: u64,
     title: String,
@@ -149,6 +184,14 @@ pub struct LightweightProblemDetailInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RebindPersonalNoteInput {
+    contest_id: u64,
+    index: String,
+    vault_relative_path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeNodeInput {
     knowledge_node_id: String,
 }
@@ -226,6 +269,37 @@ pub struct KnowledgeNodeDto {
 pub struct KnowledgeIndexDto {
     nodes: Vec<KnowledgeNodeDto>,
     location_anomalies: Vec<KnowledgeNodeDto>,
+    identity_conflicts: Vec<KnowledgeIdentityConflictDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeIdentityConflictDto {
+    historical_knowledge_node_id: String,
+    display_name: String,
+    candidate_vault_relative_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeRelocationCandidateDto {
+    vault_relative_path: String,
+    occupied: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebindKnowledgeNodeInput {
+    knowledge_node_id: String,
+    vault_relative_path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveKnowledgeIdentityConflictInput {
+    historical_knowledge_node_id: String,
+    candidate_vault_relative_path: String,
+    restore_old_identity: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -437,6 +511,12 @@ pub fn desktop_e2e_finish(input: DesktopE2eResultInput) -> Result<(), &'static s
         .ok_or("desktop_e2e_unavailable")?;
     std::fs::write(root.join("desktop-e2e-result.txt"), input.result)
         .map_err(|_| "desktop_e2e_write_failed")
+}
+
+#[cfg(feature = "desktop-e2e")]
+#[tauri::command]
+pub fn desktop_e2e_exit() {
+    std::process::exit(0);
 }
 
 #[cfg(feature = "desktop-e2e")]
@@ -688,6 +768,13 @@ pub struct UpdateProblemMasteryEvidenceInput {
 #[serde(rename_all = "camelCase")]
 pub struct PersonalNoteBindingDto {
     vault_relative_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalNoteRelocationCandidateDto {
+    vault_relative_path: String,
+    occupied: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1520,6 +1607,59 @@ pub async fn personal_note_projection(
 }
 
 #[tauri::command]
+pub async fn personal_note_relocation_candidates(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::personal_note_relocation_candidates(&*database, &problem)
+        .await
+        .map(|candidates| {
+            candidates
+                .into_iter()
+                .map(|candidate| PersonalNoteRelocationCandidateDto {
+                    vault_relative_path: candidate.vault_relative_path,
+                    occupied: candidate.occupied,
+                })
+                .collect()
+        })
+        .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn rebind_personal_note(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: RebindPersonalNoteInput,
+) -> Result<PersonalNoteBindingDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::rebind_personal_note(&*database, &problem, input.vault_relative_path)
+        .await
+        .map(personal_note_binding_dto)
+        .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn confirm_personal_note_deleted(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: LightweightProblemDetailInput,
+) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
+        .map_err(|_| "invalid_problem_identity")?;
+    acm_os_application::confirm_personal_note_deleted(&*database, &problem)
+        .await
+        .map(problem_lifecycle_state_dto)
+        .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
 pub async fn open_personal_note_in_obsidian(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     app: tauri::AppHandle,
@@ -1603,7 +1743,76 @@ pub async fn knowledge_index(
             .into_iter()
             .map(knowledge_node_dto)
             .collect(),
+        identity_conflicts: projection
+            .identity_conflicts
+            .into_iter()
+            .map(|item| KnowledgeIdentityConflictDto {
+                historical_knowledge_node_id: item.historical_knowledge_node_id,
+                display_name: item.display_name,
+                candidate_vault_relative_path: item.candidate_vault_relative_path,
+            })
+            .collect(),
     })
+}
+
+#[tauri::command]
+pub async fn knowledge_relocation_candidates(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeNodeInput,
+) -> Result<Vec<KnowledgeRelocationCandidateDto>, &'static str> {
+    acm_os_application::knowledge_relocation_candidates(&*database, &input.knowledge_node_id)
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| KnowledgeRelocationCandidateDto {
+                    vault_relative_path: item.vault_relative_path,
+                    occupied: item.occupied,
+                })
+                .collect()
+        })
+        .map_err(acm_os_application::KnowledgeBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn rebind_knowledge_node(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: RebindKnowledgeNodeInput,
+) -> Result<KnowledgeNodeDto, &'static str> {
+    acm_os_application::rebind_knowledge_node(
+        &*database,
+        &input.knowledge_node_id,
+        input.vault_relative_path,
+    )
+    .await
+    .map(knowledge_node_dto)
+    .map_err(acm_os_application::KnowledgeBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn confirm_knowledge_markdown_deleted(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: KnowledgeNodeInput,
+) -> Result<(), &'static str> {
+    acm_os_application::confirm_knowledge_markdown_deleted(&*database, &input.knowledge_node_id)
+        .await
+        .map_err(acm_os_application::KnowledgeBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn resolve_knowledge_identity_conflict(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ResolveKnowledgeIdentityConflictInput,
+) -> Result<KnowledgeNodeDto, &'static str> {
+    acm_os_application::resolve_knowledge_identity_conflict(
+        &*database,
+        &input.historical_knowledge_node_id,
+        &input.candidate_vault_relative_path,
+        input.restore_old_identity,
+    )
+    .await
+    .map(knowledge_node_dto)
+    .map_err(acm_os_application::KnowledgeBindingRepairError::code)
 }
 
 #[tauri::command]
@@ -3097,6 +3306,476 @@ pub async fn workspace_status(
         .map_err(workspace_error_dto)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualBackupPreviewDto {
+    schema_version: i64,
+    backup_directory: String,
+    filename_prefix: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualBackupResultDto {
+    path: String,
+    schema_version: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInventoryEntryDto {
+    path: String,
+    category: String,
+    size_bytes: u64,
+    integrity_verified: bool,
+    retention: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInventoryDto {
+    entries: Vec<BackupInventoryEntryDto>,
+    daily_keep: u32,
+    weekly_keep: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRestoreCandidatePreviewDto {
+    source_path: String,
+    schema_version: i64,
+    supported_schema_version: i64,
+    migration_required: bool,
+    restores_system_facts: bool,
+    overwrites_markdown: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRestoreCandidateInput {
+    source_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreIntentPreparationDto {
+    staging_path: String,
+    pre_restore_snapshot_path: String,
+    candidate: SystemRestoreCandidatePreviewDto,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDiagnosticsDto {
+    pending_intent: bool,
+    rollback_artifact_path: Option<String>,
+    rollback_integrity_verified: Option<bool>,
+    startup_state: &'static str,
+    current_schema_version: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreRebuildPreviewDto {
+    problem_binding_count: u64,
+    knowledge_binding_count: u64,
+    derived_relation_count: u64,
+    revalidates_bindings: bool,
+    rebuilds_derived_knowledge: bool,
+    overwrites_markdown: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreBindingAnomalyDto {
+    problem_id: i64,
+    vault_relative_path: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreProblemBindingValidationDto {
+    total_count: u64,
+    ready_count: u64,
+    anomalies: Vec<PostRestoreBindingAnomalyDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreKnowledgeBindingValidationDto {
+    total_count: u64,
+    ready_count: u64,
+    confirmed_deleted_count: u64,
+    anomalies: Vec<PostRestoreKnowledgeBindingAnomalyDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreKnowledgeBindingAnomalyDto {
+    knowledge_node_id: String,
+    vault_relative_path: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreRebuildPreconditionCheckDto {
+    eligible: bool,
+    blockers: Vec<String>,
+    problem_binding_anomaly_count: u64,
+    knowledge_binding_anomaly_count: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRestoreRebuildApplyResultDto {
+    knowledge_node_count: u64,
+    relation_count: u64,
+    location_anomaly_count: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticExportPreviewDto {
+    output_directory: String,
+    sections: Vec<String>,
+    privacy_exclusions: Vec<String>,
+    creates_files: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticExportResultDto {
+    path: String,
+    sections: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn preview_manual_backup(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<ManualBackupPreviewDto, &'static str> {
+    acm_os_application::preview_manual_backup(database.inner())
+        .await
+        .map(|value| ManualBackupPreviewDto {
+            schema_version: value.schema_version,
+            backup_directory: value.backup_directory,
+            filename_prefix: value.filename_prefix,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn create_manual_backup(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<ManualBackupResultDto, &'static str> {
+    acm_os_application::create_manual_backup(database.inner())
+        .await
+        .map(|value| ManualBackupResultDto {
+            path: value.path,
+            schema_version: value.schema_version,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn backup_inventory(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<BackupInventoryDto, &'static str> {
+    acm_os_application::backup_inventory(database.inner())
+        .await
+        .map(|value| BackupInventoryDto {
+            entries: value
+                .entries
+                .into_iter()
+                .map(|entry| BackupInventoryEntryDto {
+                    path: entry.path,
+                    category: entry.category,
+                    size_bytes: entry.size_bytes,
+                    integrity_verified: entry.integrity_verified,
+                    retention: entry.retention,
+                })
+                .collect(),
+            daily_keep: value.daily_keep,
+            weekly_keep: value.weekly_keep,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn preview_system_restore_candidate(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: SystemRestoreCandidateInput,
+) -> Result<SystemRestoreCandidatePreviewDto, &'static str> {
+    acm_os_application::preview_system_restore_candidate(database.inner(), input.source_path)
+        .await
+        .map(|value| SystemRestoreCandidatePreviewDto {
+            source_path: value.source_path,
+            schema_version: value.schema_version,
+            supported_schema_version: value.supported_schema_version,
+            migration_required: value.migration_required,
+            restores_system_facts: value.restores_system_facts,
+            overwrites_markdown: value.overwrites_markdown,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn prepare_system_restore(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: SystemRestoreCandidateInput,
+) -> Result<RestoreIntentPreparationDto, &'static str> {
+    acm_os_application::prepare_restore_intent(database.inner(), input.source_path)
+        .await
+        .map(|value| RestoreIntentPreparationDto {
+            staging_path: value.staging_path,
+            pre_restore_snapshot_path: value.pre_restore_snapshot_path,
+            candidate: SystemRestoreCandidatePreviewDto {
+                source_path: value.candidate.source_path,
+                schema_version: value.candidate.schema_version,
+                supported_schema_version: value.candidate.supported_schema_version,
+                migration_required: value.candidate.migration_required,
+                restores_system_facts: value.candidate.restores_system_facts,
+                overwrites_markdown: value.candidate.overwrites_markdown,
+            },
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub fn restart_for_pending_restore(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<(), &'static str> {
+    if !database.has_pending_restore_intent() {
+        return Err("restore_intent_missing");
+    }
+    app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_diagnostics(
+    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<RestoreDiagnosticsDto, ()> {
+    let (startup_state, current_schema_version) = match startup.execute() {
+        acm_os_application::StartupGateStatus::Ready { schema_version } => {
+            ("ready", Some(*schema_version))
+        }
+        acm_os_application::StartupGateStatus::RecoveryRequired { .. } => {
+            ("recoveryRequired", None)
+        }
+    };
+    let diagnostics = database.inspect_restore_diagnostics().await;
+    Ok(RestoreDiagnosticsDto {
+        pending_intent: diagnostics.pending_intent,
+        rollback_artifact_path: diagnostics.rollback_artifact_path,
+        rollback_integrity_verified: diagnostics.rollback_integrity_verified,
+        startup_state,
+        current_schema_version,
+    })
+}
+
+#[tauri::command]
+pub async fn confirm_restore_rollback_cleanup(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    rollback_artifact_path: String,
+) -> Result<(), &'static str> {
+    database
+        .confirm_restore_rollback_cleanup(&rollback_artifact_path)
+        .await
+        .map_err(|error| match error {
+            acm_os_infrastructure::RestoreRollbackCleanupError::Unavailable => {
+                "restore_rollback_unavailable"
+            }
+            acm_os_infrastructure::RestoreRollbackCleanupError::PendingIntent => {
+                "restore_intent_pending"
+            }
+            acm_os_infrastructure::RestoreRollbackCleanupError::InvalidPath => {
+                "restore_rollback_invalid_path"
+            }
+            acm_os_infrastructure::RestoreRollbackCleanupError::IntegrityFailed => {
+                "restore_rollback_integrity_failed"
+            }
+            acm_os_infrastructure::RestoreRollbackCleanupError::DeleteFailed => {
+                "restore_rollback_delete_failed"
+            }
+        })
+}
+
+#[tauri::command]
+pub async fn preview_post_restore_rebuild(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<PostRestoreRebuildPreviewDto, &'static str> {
+    acm_os_application::preview_post_restore_rebuild(database.inner())
+        .await
+        .map(|value| PostRestoreRebuildPreviewDto {
+            problem_binding_count: value.problem_binding_count,
+            knowledge_binding_count: value.knowledge_binding_count,
+            derived_relation_count: value.derived_relation_count,
+            revalidates_bindings: value.revalidates_bindings,
+            rebuilds_derived_knowledge: value.rebuilds_derived_knowledge,
+            overwrites_markdown: value.overwrites_markdown,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn validate_post_restore_problem_bindings(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<PostRestoreProblemBindingValidationDto, &'static str> {
+    acm_os_application::validate_post_restore_problem_bindings(database.inner())
+        .await
+        .map(|value| PostRestoreProblemBindingValidationDto {
+            total_count: value.total_count,
+            ready_count: value.ready_count,
+            anomalies: value
+                .anomalies
+                .into_iter()
+                .map(|item| PostRestoreBindingAnomalyDto {
+                    problem_id: item.problem_id,
+                    vault_relative_path: item.vault_relative_path,
+                    reason: item.reason,
+                })
+                .collect(),
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn validate_post_restore_knowledge_bindings(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<PostRestoreKnowledgeBindingValidationDto, &'static str> {
+    acm_os_application::validate_post_restore_knowledge_bindings(database.inner())
+        .await
+        .map(|value| PostRestoreKnowledgeBindingValidationDto {
+            total_count: value.total_count,
+            ready_count: value.ready_count,
+            confirmed_deleted_count: value.confirmed_deleted_count,
+            anomalies: value
+                .anomalies
+                .into_iter()
+                .map(|item| PostRestoreKnowledgeBindingAnomalyDto {
+                    knowledge_node_id: item.knowledge_node_id,
+                    vault_relative_path: item.vault_relative_path,
+                    reason: item.reason,
+                })
+                .collect(),
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn check_post_restore_rebuild_preconditions(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<PostRestoreRebuildPreconditionCheckDto, &'static str> {
+    acm_os_application::check_post_restore_rebuild_preconditions(database.inner())
+        .await
+        .map(|value| PostRestoreRebuildPreconditionCheckDto {
+            eligible: value.eligible,
+            blockers: value.blockers,
+            problem_binding_anomaly_count: value.problem_binding_anomaly_count,
+            knowledge_binding_anomaly_count: value.knowledge_binding_anomaly_count,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn apply_post_restore_rebuild(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<PostRestoreRebuildApplyResultDto, &'static str> {
+    acm_os_application::apply_post_restore_rebuild(database.inner())
+        .await
+        .map(|value| PostRestoreRebuildApplyResultDto {
+            knowledge_node_count: value.knowledge_node_count,
+            relation_count: value.relation_count,
+            location_anomaly_count: value.location_anomaly_count,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn preview_diagnostic_export(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<DiagnosticExportPreviewDto, &'static str> {
+    acm_os_application::preview_diagnostic_export(database.inner())
+        .await
+        .map(|value| DiagnosticExportPreviewDto {
+            output_directory: value.output_directory,
+            sections: value.sections,
+            privacy_exclusions: value.privacy_exclusions,
+            creates_files: value.creates_files,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn create_diagnostic_export(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<DiagnosticExportResultDto, &'static str> {
+    acm_os_application::create_diagnostic_export(database.inner())
+        .await
+        .map(|value| DiagnosticExportResultDto {
+            path: value.path,
+            sections: value.sections,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[tauri::command]
+pub async fn create_weekly_backup(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<ManualBackupResultDto, &'static str> {
+    acm_os_application::create_weekly_backup(database.inner())
+        .await
+        .map(|value| ManualBackupResultDto {
+            path: value.path,
+            schema_version: value.schema_version,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRetentionPreviewDto {
+    protected_paths: Vec<String>,
+    prune_candidate_paths: Vec<String>,
+    daily_keep: u32,
+    weekly_keep: u32,
+}
+
+#[tauri::command]
+pub async fn preview_backup_retention(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<BackupRetentionPreviewDto, &'static str> {
+    acm_os_application::preview_backup_retention(database.inner())
+        .await
+        .map(|value| BackupRetentionPreviewDto {
+            protected_paths: value.protected_paths,
+            prune_candidate_paths: value.prune_candidate_paths,
+            daily_keep: value.daily_keep,
+            weekly_keep: value.weekly_keep,
+        })
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRetentionApplyInput {
+    paths: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn apply_backup_retention(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: BackupRetentionApplyInput,
+) -> Result<u64, &'static str> {
+    acm_os_application::apply_backup_retention(database.inner(), input.paths)
+        .await
+        .map_err(acm_os_application::ManualBackupError::code)
+}
+
 #[tauri::command]
 pub async fn configure_workspace(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
@@ -3170,8 +3849,9 @@ mod tests {
         parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
         startup_status_dto, workspace_error_dto, workspace_status_dto, CompleteReviewInput,
-        LightweightProblemDetailDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
-        StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
+        LightweightProblemDetailDto, PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto,
+        ReviewFailureReasonInput, StatementReadStateDto, TodayExtraSuggestionsPreviewDto,
+        TodayReplanPreviewDto,
     };
 
     #[test]
@@ -3246,6 +3926,23 @@ mod tests {
                 "state": "recoveryRequired",
                 "schemaVersion": null,
                 "recoveryReason": "migration_failed",
+                "supportedSchemaVersion": null,
+                "foundSchemaVersion": null
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_unresolved_critical_operation_startup_contract() {
+        let dto = startup_status_dto(&StartupGateStatus::RecoveryRequired {
+            reason: StartupRecoveryReason::UnresolvedCriticalOperation,
+        });
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize critical operation recovery status"),
+            json!({
+                "state": "recoveryRequired",
+                "schemaVersion": null,
+                "recoveryReason": "unresolved_critical_operation",
                 "supportedSchemaVersion": null,
                 "foundSchemaVersion": null
             })
@@ -3572,6 +4269,21 @@ mod tests {
                     "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42 }],
                     "warnings": [{ "code": "duplicate_known_section", "name": "题解", "count": 2 }]
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_personal_note_relocation_candidate_contract() {
+        let dto = PersonalNoteRelocationCandidateDto {
+            vault_relative_path: "Recovered/manual.md".to_owned(),
+            occupied: false,
+        };
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize relocation candidate"),
+            json!({
+                "vaultRelativePath": "Recovered/manual.md",
+                "occupied": false
             })
         );
     }

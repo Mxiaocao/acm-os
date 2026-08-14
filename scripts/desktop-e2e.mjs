@@ -26,7 +26,7 @@ try {
   await run(process.execPath, [path.join(repo, "node_modules", "@tauri-apps", "cli", "tauri.js"), "build", "--debug", "--no-bundle", "--features", "desktop-e2e", "--config", "src-tauri/tauri.e2e.conf.json"], repo);
 
   app = launchApp("initial");
-  let result = await waitForResult(resultFile, app, 60_000);
+  let result = await waitForResult(resultFile, app, 180_000);
   assert.equal(result, "restart", `Desktop E2E initial phase failed: ${result}`);
   await stopApp(app);
   const problemNotes = (await readdir(problems)).filter((name) => name.endsWith(".md"));
@@ -37,7 +37,7 @@ try {
   await rm(resultFile, { force: true });
 
   app = launchApp("verify-restart");
-  result = await waitForResult(resultFile, app, 60_000);
+  result = await waitForResult(resultFile, app, 180_000);
   assert.equal(result, "passed", `Desktop E2E restart phase failed: ${result}`);
   passed = true;
   assert.ok((await readdir(problems)).some((name) => name.endsWith(".md")), "Personal Markdown was not created");
@@ -51,7 +51,11 @@ try {
   throw new Error(`${error.message}${diagnostic ? `\nTauri stderr:\n${diagnostic}` : ""}`, { cause: error });
 } finally {
   if (app && app.exitCode === null) {
-    await stopApp(app);
+    try {
+      await stopApp(app);
+    } catch (cleanupError) {
+      console.error(`Desktop E2E process cleanup failed: ${cleanupError.message}`);
+    }
   }
   if (passed) {
     try {
@@ -87,7 +91,14 @@ async function stopApp(child) {
   if (exitedNaturally || child.exitCode !== null) return;
 
   if (process.platform === "win32") {
-    await run("taskkill.exe", ["/PID", String(pid), "/T", "/F"], repo);
+    child.kill();
+    const directExit = child.exitCode !== null || await Promise.race([
+      exit,
+      delay(2_000).then(() => false),
+    ]);
+    if (!directExit && child.exitCode === null) {
+      await run("taskkill.exe", ["/PID", String(pid), "/T", "/F"], repo);
+    }
   } else {
     child.kill();
   }

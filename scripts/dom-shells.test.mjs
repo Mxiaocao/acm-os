@@ -519,6 +519,100 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
   }
 });
 
+test("Location Anomaly lists possible Markdown locations and explicitly rebinds an unoccupied file", {
+  concurrency: false,
+}, async () => {
+  let rebound = false;
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: personalUnstartedLifecycle,
+    };
+    if (command === "personal_note_projection") return rebound ? {
+      state: "ready", vaultRelativePath: "Recovered/manual.md", relocated: false,
+      projection: { contentDigest: "post", knownSections: [], solutionRoutes: [], warnings: [] },
+    } : { state: "locationAnomaly", lastKnownPath: "Problems/CF-1979-A.md" };
+    if (command === "knowledge_candidates") return [];
+    if (command === "personal_note_relocation_candidates") return [
+      { vaultRelativePath: "Problems/CF-1979-B.md", occupied: true },
+      { vaultRelativePath: "Recovered/manual.md", occupied: false },
+    ];
+    if (command === "rebind_personal_note") {
+      rebound = true;
+      return { vaultRelativePath: args.input.vaultRelativePath };
+    }
+    if (command === "plugin:event|listen") return 1;
+    if (command === "plugin:event|unlisten") return null;
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Note location needs attention/);
+    const find = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Find possible locations");
+    await act(async () => find.click()); await settle();
+    const occupied = [...view.document.querySelectorAll("li")]
+      .find((item) => item.textContent.includes("CF-1979-B.md"));
+    assert.ok(occupied.querySelector("button").disabled);
+    const candidate = [...view.document.querySelectorAll("li")]
+      .find((item) => item.textContent.includes("Recovered/manual.md"));
+    await act(async () => candidate.querySelector("button").click()); await settle();
+    assert.doesNotMatch(view.document.body.textContent, /Note location needs attention/);
+    assert.match(view.document.body.textContent, /Recovered\/manual.md/);
+    const rebindCall = calls.find(([command]) => command === "rebind_personal_note");
+    assert.equal(rebindCall[1].input.vaultRelativePath, "Recovered/manual.md");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Location Anomaly confirms a missing file only through an explicit consequence preview", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail") return {
+      contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+      statement: { state: "pending" }, identityType: "personal",
+      personalNote: { vaultRelativePath: "Problems/CF-1979-A.md" },
+      lifecycle: personalUnstartedLifecycle,
+    };
+    if (command === "personal_note_projection") return { state: "locationAnomaly", lastKnownPath: "Problems/CF-1979-A.md" };
+    if (command === "knowledge_candidates") return [];
+    if (command === "confirm_personal_note_deleted") return lightweightLifecycle;
+    if (command === "plugin:event|listen") return 1;
+    if (command === "plugin:event|unlisten") return null;
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/1979/A");
+  try {
+    await settle();
+    const preview = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Confirm file was deleted…");
+    await act(async () => preview.click()); await settle();
+    assert.match(view.document.body.textContent, /does not delete any file/);
+    assert.equal(calls.some(([command]) => command === "confirm_personal_note_deleted"), false);
+    const confirm = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Confirm deleted");
+    await act(async () => confirm.click()); await settle();
+    assert.match(view.document.body.textContent, /Lightweight Problem/);
+    assert.doesNotMatch(view.document.body.textContent, /Note location needs attention/);
+    assert.equal(calls.filter(([command]) => command === "confirm_personal_note_deleted").length, 1);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("StrictMode keeps the ready Personal Markdown projection and exposes the Obsidian editor entry", {
   concurrency: false,
 }, async () => {
@@ -1419,7 +1513,7 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
   const view = await renderApp((command, args) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
-    if (command === "knowledge_index") { calls.push([command, args]); return { nodes: [node], locationAnomalies: [] }; }
+    if (command === "knowledge_index") { calls.push([command, args]); return { nodes: [node], locationAnomalies: [], identityConflicts: [] }; }
     if (command === "knowledge_detail") { calls.push([command, args]); return { node, understanding, incoming: [], outgoing: [], relatedProblems: [{ problemId: "problem-1", contestId: 1, problemIndex: "A", title: "Theatre Square" }] }; }
     if (command === "knowledge_reevaluation_suggestion") { calls.push([command, args]); return { knowledgeNodeId: node.knowledgeNodeId, shouldSuggest: true, qualifyingProblemCount: 3 }; }
     if (command === "confirm_knowledge_understanding") {
@@ -1452,5 +1546,164 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
     assert.equal(calls.at(-1)[0], "confirm_knowledge_understanding");
     assert.equal(calls.at(-1)[1].input.level, "basic");
     assert.match(view.document.body.textContent, /Historical highest: 基本理解/);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge location anomaly requires explicit candidate selection before rebind", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const anomaly = {
+    knowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+    displayName: "Old Segment Tree",
+    vaultRelativePath: "Knowledge/Old Segment Tree.md",
+    contentDigest: "a".repeat(64),
+    locationState: "locationAnomaly",
+  };
+  let repaired = false;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") {
+      calls.push([command, args]);
+      return repaired ? { nodes: [{ ...anomaly, vaultRelativePath: "Archive/Segment Tree.md", locationState: "ready" }], locationAnomalies: [] } : { nodes: [], locationAnomalies: [anomaly] };
+    }
+    if (command === "knowledge_relocation_candidates") {
+      calls.push([command, args]);
+      return [
+        { vaultRelativePath: "Knowledge/Occupied.md", occupied: true },
+        { vaultRelativePath: "Archive/Segment Tree.md", occupied: false },
+      ];
+    }
+    if (command === "rebind_knowledge_node") {
+      calls.push([command, args]);
+      repaired = true;
+      return { ...anomaly, vaultRelativePath: args.input.vaultRelativePath, locationState: "ready" };
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    assert.match(view.document.body.textContent, /Old Segment Tree/);
+    assert.equal(calls.filter(([name]) => name === "knowledge_relocation_candidates").length, 0);
+    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Find possible locations");
+    await act(async () => find.click()); await settle();
+    assert.equal(calls.at(-1)[0], "knowledge_relocation_candidates");
+    assert.equal(calls.at(-1)[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
+    const occupied = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Use this Markdown" && button.parentElement.textContent.includes("Occupied.md"));
+    assert.equal(occupied.disabled, true);
+    assert.match(view.document.body.textContent, /Already bound to another Primary Object/);
+    const use = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Use this Markdown" && button.parentElement.textContent.includes("Archive/Segment Tree.md"));
+    await act(async () => use.click()); await settle();
+    const rebind = calls.find(([name]) => name === "rebind_knowledge_node");
+    assert.equal(rebind[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
+    assert.equal(rebind[1].input.vaultRelativePath, "Archive/Segment Tree.md");
+    assert.doesNotMatch(view.document.body.textContent, /location anomaly and require recovery/);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge deletion confirmation previews consequences before mutating", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const anomaly = {
+    knowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+    displayName: "Deleted Knowledge",
+    vaultRelativePath: "Knowledge/Deleted Knowledge.md",
+    contentDigest: "a".repeat(64),
+    locationState: "locationAnomaly",
+  };
+  let deleted = false;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") {
+      calls.push([command, args]);
+      return deleted ? { nodes: [], locationAnomalies: [], identityConflicts: [] } : { nodes: [], locationAnomalies: [anomaly], identityConflicts: [] };
+    }
+    if (command === "knowledge_relocation_candidates") return [];
+    if (command === "confirm_knowledge_markdown_deleted") { calls.push([command, args]); deleted = true; return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm file was deleted…");
+    await act(async () => preview.click()); await settle();
+    assert.match(view.document.body.textContent, /This does not delete any file/);
+    assert.equal(calls.some(([name]) => name === "confirm_knowledge_markdown_deleted"), false);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm deleted");
+    await act(async () => confirm.click()); await settle();
+    assert.equal(calls.find(([name]) => name === "confirm_knowledge_markdown_deleted")[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
+    assert.doesNotMatch(view.document.body.textContent, /location anomaly and require recovery/);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge same-name rebuild requires explicit identity choice", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const conflict = {
+    historicalKnowledgeNodeId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
+    displayName: "Segment Tree",
+    candidateVaultRelativePath: "Knowledge/Segment Tree.md",
+  };
+  const node = {
+    knowledgeNodeId: conflict.historicalKnowledgeNodeId,
+    displayName: conflict.displayName,
+    vaultRelativePath: conflict.candidateVaultRelativePath,
+    contentDigest: "a".repeat(64),
+    locationState: "ready",
+  };
+  let resolved = false;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") {
+      calls.push([command, args]);
+      return resolved ? { nodes: [{ ...node, vaultRelativePath: conflict.candidateVaultRelativePath }], locationAnomalies: [], identityConflicts: [] } : { nodes: [], locationAnomalies: [], identityConflicts: [conflict] };
+    }
+    if (command === "resolve_knowledge_identity_conflict") { calls.push([command, args]); resolved = true; return { ...node, vaultRelativePath: conflict.candidateVaultRelativePath }; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    assert.match(view.document.body.textContent, /Identity was not chosen automatically/);
+    assert.match(view.document.body.textContent, /Restore old Knowledge Node/);
+    assert.match(view.document.body.textContent, /Create new Knowledge Node/);
+    const restore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Restore old Knowledge Node");
+    await act(async () => restore.click()); await settle();
+    const call = calls.find(([name]) => name === "resolve_knowledge_identity_conflict");
+    assert.equal(call[1].input.historicalKnowledgeNodeId, conflict.historicalKnowledgeNodeId);
+    assert.equal(call[1].input.candidateVaultRelativePath, conflict.candidateVaultRelativePath);
+    assert.equal(call[1].input.restoreOldIdentity, true);
+    assert.doesNotMatch(view.document.body.textContent, /Identity was not chosen automatically/);
+  } finally { await view.cleanup(); }
+});
+
+test("Settings previews manual backup before creating it", { concurrency: false }, async () => {
+  const calls = [];
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "preview_manual_backup") { calls.push(command); return { schemaVersion: 23, backupDirectory: "backups/manual", filenamePrefix: "manual-schema-23-" }; }
+    if (command === "create_manual_backup") { calls.push(command); return { path: "backups/manual/manual-schema-23-1.sqlite3", schemaVersion: 23 }; }
+    if (command === "backup_inventory") { calls.push(command); return { dailyKeep: 7, weeklyKeep: 4, entries: [{ path: "backups/manual/manual-schema-23-1.sqlite3", category: "manual", sizeBytes: 4096, integrityVerified: true, retention: "protected" }] }; }
+    if (command === "weekly_acm_budget") return { monday: null, tuesday: null, wednesday: null, thursday: null, friday: null, saturday: null, sunday: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/settings");
+  try {
+    const preview = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "Preview manual backup");
+    await act(async () => preview.click()); await settle();
+    assert.equal(calls[0], "preview_manual_backup");
+    assert.match(view.document.body.textContent, /Schema 23/);
+    assert.equal(calls.includes("create_manual_backup"), false);
+    const create = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "Create backup");
+    await act(async () => create.click()); await settle();
+    const createIndex = calls.indexOf("create_manual_backup");
+    const inventoryIndex = calls.lastIndexOf("backup_inventory");
+    assert.ok(createIndex >= 0);
+    assert.ok(inventoryIndex > createIndex);
+    assert.match(view.document.body.textContent, /Backup created/);
+    assert.match(view.document.body.textContent, /keep 7 daily and 4 weekly/);
+    assert.match(view.document.body.textContent, /integrity verified/);
+    assert.match(view.document.body.textContent, /protected/);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => /delete|prune/i.test(button.textContent)), false);
   } finally { await view.cleanup(); }
 });

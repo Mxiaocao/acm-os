@@ -280,6 +280,31 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
 .knowledge-candidates li span { color: var(--ink-muted); }
 
 .detail-list li { display: flex; align-items: center; gap: 12px; }
+.backup-inventory {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.backup-inventory li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.backup-inventory code {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.backup-inventory span {
+  color: var(--ink-muted);
+  text-align: right;
+}
 .list-link {
   display: grid;
   min-width: 0;
@@ -425,6 +450,8 @@ code { padding: 2px 5px; border-radius: 4px; background: #eee7e9; font-size: 0.9
   .detail-list { grid-template-columns: 1fr; gap: 5px; }
   .today-toolbar form, .today-suggestions li { align-items: stretch; flex-direction: column; }
   .detail-list dd { margin-bottom: 10px; }
+  .backup-inventory li { grid-template-columns: 1fr; }
+  .backup-inventory span { text-align: left; }
   .contest-facts-list li { grid-template-columns: 1fr; align-items: stretch; }
   .contest-facts-list li > button { justify-self: start; }
 }

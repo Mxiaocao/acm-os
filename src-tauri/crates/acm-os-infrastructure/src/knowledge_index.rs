@@ -174,23 +174,12 @@ pub(crate) async fn replace_index(
 
     // Files outside the discovery root can only relocate an existing node. They never create one.
     for (node_id, binding) in unmatched.iter() {
-        let matches = relocation_candidates
-            .iter()
-            .filter(|candidate| deterministic_match(binding, candidate))
-            .collect::<Vec<_>>();
-        let binding_matches_for_candidate = matches.first().map_or(0, |candidate| {
-            unmatched
-                .values()
-                .filter(|other| deterministic_match(other, candidate))
-                .count()
-        });
-        if matches.len() == 1
-            && binding_matches_for_candidate == 1
-            && !claimed_paths.contains(&matches[0].relative_path)
+        if let Some(candidate) =
+            unique_relocation_match(binding, &unmatched, &relocation_candidates, &claimed_paths)
         {
             claimed_nodes.insert(node_id.clone());
-            claimed_paths.insert(matches[0].relative_path.clone());
-            resolved.push((node_id.clone(), clone_file(matches[0])));
+            claimed_paths.insert(candidate.relative_path.clone());
+            resolved.push((node_id.clone(), clone_file(candidate)));
         }
     }
 
@@ -203,10 +192,13 @@ pub(crate) async fn replace_index(
         .iter()
         .map(|(node_id, _)| node_id.clone())
         .collect::<HashSet<_>>();
-    sqlx::query("UPDATE knowledge_file_bindings SET location_state = 'location_anomaly'")
-        .execute(&mut **transaction)
-        .await
-        .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
+    sqlx::query(
+        "UPDATE knowledge_file_bindings SET location_state = 'location_anomaly' \
+         WHERE location_state IN ('ready', 'location_anomaly')",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
     for (node_id, _) in &resolved {
         if unmatched.contains_key(node_id) {
             sqlx::query(
@@ -287,6 +279,7 @@ pub(crate) async fn replace_index(
     Ok(KnowledgeIndexProjection {
         nodes,
         location_anomalies: anomalies,
+        identity_conflicts: Vec::new(),
     })
 }
 
@@ -326,8 +319,37 @@ fn match_unique_binding(
     None
 }
 
-fn deterministic_match(binding: &StoredKnowledgeBinding, file: &ResolvedNoteFile) -> bool {
-    file_key_match(binding, file) || digest_match(binding, file)
+fn unique_relocation_match<'a>(
+    binding: &StoredKnowledgeBinding,
+    stored: &HashMap<String, StoredKnowledgeBinding>,
+    candidates: &'a [ResolvedNoteFile],
+    claimed_paths: &HashSet<String>,
+) -> Option<&'a ResolvedNoteFile> {
+    for matcher in [
+        exact_path_match as fn(&StoredKnowledgeBinding, &ResolvedNoteFile) -> bool,
+        file_key_match,
+        digest_match,
+    ] {
+        let matches = candidates
+            .iter()
+            .filter(|candidate| !claimed_paths.contains(&candidate.relative_path))
+            .filter(|candidate| matcher(binding, candidate))
+            .collect::<Vec<_>>();
+        if matches.len() == 1
+            && stored
+                .values()
+                .filter(|other| matcher(other, matches[0]))
+                .count()
+                == 1
+        {
+            return matches.into_iter().next();
+        }
+    }
+    None
+}
+
+fn exact_path_match(binding: &StoredKnowledgeBinding, file: &ResolvedNoteFile) -> bool {
+    binding.relative_path == file.relative_path
 }
 
 fn file_key_match(binding: &StoredKnowledgeBinding, file: &ResolvedNoteFile) -> bool {
