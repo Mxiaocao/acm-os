@@ -249,6 +249,40 @@ Audit decision: initial/progressive Contest `persist_manifest` is a bootstrap ac
 Latest completed restore Slice: `preview_system_restore_candidate`. It canonicalizes candidates into App Private Data `backups`, accepts only published `.sqlite3` files from known backup categories, opens read-only, verifies integrity/schema, rejects future schema, reports migration for older schema, and explicitly states that System Facts restore will not overwrite Markdown. It does not create a pre-restore backup or execute restore. Evidence: focused `5/5`, Infrastructure `168 passed / 0 failed / 2 ignored`, Rust workspace/check/fmt, Startup `6/6`, DOM `35/35`, Boundary `5/5`, TypeScript and Vite build passed. The next Slice must remain separate and should begin with the pre-restore backup boundary before any database replacement.
 Latest completed restore Slice: `create_pre_restore_snapshot`. It revalidates the candidate, creates and verifies a SQLite-consistent snapshot of the current live System Facts under `backups/pre-restore`, publishes only after integrity verification, and fails with `pre_restore_backup_failed` without changing the current database. It does not replace the database, migrate, rebuild projections, write Markdown, or expose IPC/UI. Evidence: focused `3/3`, Infrastructure `171 passed / 0 failed / 2 ignored`, Rust workspace/check/fmt passed. The next Slice must keep controlled database replacement and rollback separate from migration and post-restore rebuild.
 Latest completed restore Slice: `swap_verified_database_with_staging`. It requires verified current/staging/pre-restore files, refuses current SQLite WAL/SHM busy state, moves the current database to a retained rollback path, then publishes staging. It fails closed before any rename when the pre-restore snapshot is missing or inputs are invalid. The primitive is not yet wired to Tauri runtime restart/IPC and does not perform migration, post-restore validation, derived rebuild, Markdown work, or rollback commit/cleanup. Evidence: focused `2/2`, Infrastructure `173 passed / 0 failed / 2 ignored`, Rust workspace/check/fmt passed. The next Slice must wire runtime connection shutdown/restart and failure rollback only.
+
+M9 is now active by explicit user direction. Latest completed M9 Slice: `native_control_focus_indicator_coverage`.
+The shared `:focus-visible` rule now covers native buttons, links, text inputs, textareas, and selects.
+Added `scripts/accessibility-css.test.mjs` and the `test:accessibility` package script.
+Evidence: accessibility `1 passed / 0 failed`; DOM shells `35 passed / 0 failed`; startup shells
+`6 passed / 0 failed`; boundaries `5 passed / boundary check passed`; Vite/TypeScript build passed;
+`git diff --check` passed. This slice is limited to accessibility focus visibility and does not enter M10.
+
+Latest completed M9-A Slice: `reduced_motion_preference`. `src/app/app.css` now honors
+`prefers-reduced-motion: reduce` by disabling non-essential animation/transition duration and using
+immediate scrolling. Evidence: accessibility `2 passed / 0 failed`; DOM shells `35 passed / 0 failed`;
+Vite/TypeScript build passed; `git diff --check` passed. No business behavior changed and M10 was not touched.
+
+M9-A is now complete as a consolidated stage. It includes native focus indicators, reduced-motion
+handling, keyboard-equivalent Today reorder, Today replan dialog focus/Tab/Escape behavior and
+focus return, async Today mutation announcements, Review help dialog description semantics and
+hidden-content isolation, plus narrow-viewport fallbacks for 200% zoom/core keyboard use.
+Final evidence: accessibility `3 passed / 0 failed`; DOM shells `35 passed / 0 failed`; startup shells
+`6 passed / 0 failed`; boundaries `5 passed / boundary check passed`; Vite/TypeScript build passed;
+`git diff --check` passed. M9-B/M9-C/M9-D and M10 remain untouched.
+
+M9-B is now complete as a consolidated stage. Tauri production and E2E configs use restrictive CSP
+policies instead of `csp: null`; statement rendering rejects non-HTTPS links after trimming and keeps
+unsafe schemes inert. Evidence: accessibility `4 passed / 0 failed`; DOM shells `35 passed / 0 failed`;
+startup shells `6 passed / 0 failed`; boundaries `5 passed / boundary check passed`; Vite/TypeScript
+build passed; `cargo check --workspace` passed; rustfmt passed; `git diff --check` passed. M9-C/M9-D
+and M10 remain untouched.
+
+M9-C is now complete as a consolidated stage. Added the deterministic Reference Dataset benchmark
+harness `scripts/performance-benchmark.ts` and `benchmark:performance`. It covers the frozen
+2,000/1,000/300/10,000/1,000/20,000 dataset sizes and enforces DESIGN P95 budgets for startup
+projection, Today open, Knowledge search, Markdown parsing, relation projection, and local
+navigation. Latest run passed all six budgets: 2.84ms, 0.23ms, 0.92ms, 0.38ms, 1.58ms, and 0.58ms
+respectively. M9-D and M10 remain untouched.
 → focused tests
 → infrastructure tests
 → workspace Rust tests
@@ -275,3 +309,29 @@ Latest completed restore Slice: `swap_verified_database_with_staging`. It requir
 ```
 
 建议在仓库外另存一份本提示。只有文档被有意 commit 并 push 后，远端 Git 才能承担恢复作用。
+
+M9-D is complete. Visual consistency hardening added shared danger/button-row/error/status
+styles, normalized loading/empty/panel/modal surfaces, and narrow-viewport action stacking.
+Added `scripts/visual-consistency.test.mjs` with `test:visual-consistency`.
+
+M9 Final Gate evidence: visual consistency `6/6`; accessibility `4/4`; DOM `35/35`; startup
+`6/6`; boundaries `5/5`; TypeScript/Vite build passed; performance benchmark passed all six
+P95 budgets; Rust workspace `188 passed / 0 failed / 2 ignored`; cargo check and rustfmt passed;
+`git diff --check` passed. M9-A through M9-D are complete. M10 has not been entered.
+
+Remaining limitation: the performance result is a deterministic Node reference-data benchmark,
+not a release Tauri cold-start/RAM measurement. Human visual acceptance on target desktop and
+narrow/zoomed layouts is the only remaining optional confirmation.
+
+M9 manual acceptance was completed in the real Tauri desktop window and marked qualified by the
+user. Accepted surfaces include Today, Today replan, Knowledge, Contest shelf/detail/Facts/AI form,
+delete consequence preview, and Problem Detail. Acceptance found and fixed three presentation
+defects: oversized route-heading focus rings, two-column CSS leaking into item lists, and weak
+Codeforces statement hierarchy. The statement hierarchy fix has automated coverage but its second
+manual recheck was explicitly skipped by the user.
+
+All current M9 changes were committed on `main` with subject `build: complete M9 hardening` after
+explicit user authorization and a successful cached diff check. On recovery, do not trust a stale
+hash copied from prose: rerun branch, HEAD, status, log, remote, and `git diff --check`, then report
+the actual repository state. Do not push or tag without separate explicit authorization. Do not
+enter M10 automatically.

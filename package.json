@@ -8,6 +8,9 @@
     "build": "tsc && vite build",
     "test:shells": "node --test scripts/startup-shells.test.mjs",
     "test:dom-shells": "node --test scripts/dom-shells.test.mjs",
+    "test:accessibility": "node --test scripts/accessibility-css.test.mjs",
+    "test:visual-consistency": "node --test scripts/visual-consistency.test.mjs",
+    "benchmark:performance": "node --experimental-strip-types scripts/performance-benchmark.ts",
     "test:desktop-e2e": "node scripts/desktop-e2e.mjs",
     "tauri": "tauri",
     "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs"

@@ -581,3 +581,174 @@ Next slice: explicit, user-confirmed retention apply with exact preview paths an
 Added `apply_backup_retention`. It recomputes the current retention preview, requires the submitted path set to exactly match current prune candidates, restricts deletion to regular `.sqlite3` files under daily/weekly backup roots, and rejects mismatches without mutation.
 
 Evidence: focused retention test passed; `cargo check --workspace`, rustfmt, and `git diff --check` pass.
+
+## 30. M9 Slice — Native Control Focus Indicator Coverage
+
+M9 has now started with one minimal accessibility hardening slice. The shared `:focus-visible`
+indicator now covers native `button`, link, text input, `textarea`, and `select` controls, preserving
+the frozen visible-focus contract without adding product capability.
+
+Changed files:
+
+- `src/app/app.css`
+- `scripts/accessibility-css.test.mjs`
+- `package.json`
+
+Verification evidence:
+
+- `npm.cmd run test:accessibility`: 1 passed / 0 failed
+- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
+- `npm.cmd run test:shells`: 6 passed / 0 failed
+- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
+- `npm.cmd run build`: passed
+- `git diff --check`: passed
+
+This slice does not enter M10 and does not add new product behavior. Remaining M9 scope includes
+keyboard flow, focus management, 200% zoom, reduced motion, contrast, async announcements,
+Review accessibility-tree isolation, security hardening, performance checks, and responsive/visual
+consistency.
+
+## 31. M9-A Slice — Reduced Motion Preference
+
+Added a `prefers-reduced-motion: reduce` media rule that disables non-essential animation and
+transition duration and restores immediate scrolling for users who request reduced motion.
+No business behavior or product capability changed.
+
+Changed files:
+
+- `src/app/app.css`
+- `scripts/accessibility-css.test.mjs`
+
+Verification evidence:
+
+- `npm.cmd run test:accessibility`: 2 passed / 0 failed
+- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
+- `npm.cmd run build`: passed
+- `git diff --check`: passed
+
+## 32. M9-A Complete — Accessibility Core Flow Hardening
+
+M9-A is complete as one consolidated stage. It now covers:
+
+- native-control visible focus indicators;
+- `prefers-reduced-motion` handling;
+- keyboard-equivalent Today reorder, including existing Alt+Arrow and move buttons;
+- Today replan dialog focus entry, Tab containment, Escape close, and focus return;
+- async Today mutation announcements for reorder, completion, replan, and suggestion acceptance;
+- Review help dialog description semantics and existing hidden-content isolation;
+- narrow-viewport fallbacks used by 200% zoom/core keyboard layouts.
+
+Final M9-A evidence:
+
+- `npm.cmd run test:accessibility`: 3 passed / 0 failed
+- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
+- `npm.cmd run test:shells`: 6 passed / 0 failed
+- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
+- `npm.cmd run build`: passed
+- `git diff --check`: passed
+
+M9-A does not add product capability and does not enter M9-B security, M9-C performance, M9-D
+visual consistency, or M10.
+
+## 33. M9-B Complete — Security and Data Boundary Hardening
+
+M9-B is complete as one consolidated stage. Tauri production and E2E configurations now use a
+restrictive CSP instead of `csp: null`, including self-only scripts, no objects, no framing, bounded
+IPC/dev connections, and explicit local asset/blob/data image and font sources. Statement rendering
+continues to use an allowlist and now trims link values before rejecting every non-HTTPS scheme;
+unsafe `javascript:`, `data:`, and similar links resolve to inert `#` targets.
+
+Verification evidence:
+
+- `npm.cmd run test:accessibility`: 4 passed / 0 failed, including CSP policy assertions
+- `npm.cmd run test:dom-shells`: 35 passed / 0 failed, including unsafe-link rendering coverage
+- `npm.cmd run test:shells`: 6 passed / 0 failed
+- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
+- `npm.cmd run build`: passed
+- `cargo check --workspace`: passed
+- `cargo test --workspace`: 188 passed / 0 failed / 2 ignored
+- `cargo fmt --all -- --check`: passed
+- `git diff --check`: passed
+
+M9-B does not enter M9-C performance, M9-D visual consistency, or M10.
+
+## 34. M9-C Complete — Reference Dataset Performance Gate
+
+M9-C is complete as one consolidated stage. Added `scripts/performance-benchmark.ts` and the
+`benchmark:performance` package script. The harness uses the frozen Reference Dataset sizes:
+2,000 Problems, 1,000 Personal Markdown documents, 300 Contests, 10,000 Review Attempts, 1,000
+Knowledge Nodes, and 20,000 WikiLinks/Relations. It measures startup projection, Today open,
+Knowledge search, Markdown section parsing, relation projection, and local route navigation using
+P95 budgets inherited from DESIGN.
+
+Latest benchmark evidence:
+
+- startup projection: P95 2.84ms / budget 2500ms
+- Today open: P95 0.23ms / budget 300ms
+- Knowledge search: P95 0.92ms / budget 150ms
+- Markdown parse: P95 0.38ms / budget 500ms
+- relation projection: P95 1.58ms / budget 300ms
+- local navigation: P95 0.58ms / budget 300ms
+
+All benchmark cases passed their budgets. Additional verification: accessibility `4/4`, DOM
+shells `35/35`, startup shells `6/6`, boundaries `5/5`, Vite/TypeScript build passed, Rust
+workspace tests `188 passed / 0 failed / 2 ignored`, rustfmt passed, and `git diff --check` passed.
+M9-D and M10 remain untouched.
+
+## 35. M9-D Complete - Visual and Responsive Consistency
+
+M9-D is complete as one consolidated stage. Shared visual tokens now cover primary, secondary,
+and danger actions; button rows and action rows have consistent spacing and responsive stacking;
+error and status messages have explicit readable surfaces; loading and empty states share panel
+geometry; Today success/unavailable states have distinct surfaces; and modal/panel spacing is
+normalized. Narrow layouts at 760px and 560px keep actions and fact forms usable without
+horizontal overflow.
+
+Added `scripts/visual-consistency.test.mjs` and the `test:visual-consistency` package script.
+The static gate checks the shared class vocabulary, critical action contrast, and narrow-viewport
+fallbacks.
+
+Final M9 evidence:
+
+- `npm.cmd run test:visual-consistency`: 6 passed / 0 failed
+- `npm.cmd run test:accessibility`: 4 passed / 0 failed
+- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
+- `npm.cmd run test:shells`: 6 passed / 0 failed
+- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
+- `npm.cmd run build`: passed
+- `npm.cmd run benchmark:performance`: all six P95 budgets passed
+- `cargo check --workspace`: passed
+- `cargo test --workspace`: 188 passed / 0 failed / 2 ignored
+- `cargo fmt --all -- --check`: passed
+- `git diff --check`: passed
+
+M9-A, M9-B, M9-C, and M9-D are complete. M9 did not modify frozen SPEC/DESIGN/PLAN and did not
+enter M10. The performance harness is a deterministic Node reference-data benchmark, not a
+release Tauri cold-start/RAM measurement. A final human visual pass remains useful for real-device
+rendering, but no automated gate is currently failing.
+
+## 36. M9 Manual Acceptance and Commit Handoff
+
+Manual acceptance was run in the real Tauri desktop window, not the browser-only Vite shell.
+Accepted surfaces: Today initial budget and empty plan, Today replan dialog, Knowledge empty/search
+layout, Contest shelf and detail, Contest Facts rows, AI Analysis form, delete consequence preview,
+and Problem Detail. Keyboard requirements for the Today dialog were included in the acceptance
+steps. The user marked the M9 result qualified.
+
+Three visual defects found during acceptance were fixed without changing business behavior:
+
+- programmatically focused route headings now use a content-sized focus ring;
+- semantic definition lists retain their two-column layout while item lists use full width;
+- sanitized Codeforces statement metadata and sections have readable hierarchy and a narrow-screen
+  fallback.
+
+The statement hierarchy fix is covered by automation, but its second manual visual recheck was
+explicitly skipped by the user. Latest visual consistency evidence is `6 passed / 0 failed`;
+TypeScript/Vite build and `git diff --check` passed after the fixes.
+
+Commit status at handoff: all current M9 changes, including these maintained handoff documents,
+were committed on `main` with subject `build: complete M9 hardening`. The commit was created only
+after explicit user authorization and a successful `git diff --cached --check`. The next window
+must still rerun branch, HEAD, status, log, remote, and `git diff --check` instead of trusting this
+snapshot. Do not push or tag without separate explicit authorization, and do not enter M10
+automatically.

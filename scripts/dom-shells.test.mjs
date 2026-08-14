@@ -656,7 +656,7 @@ test("Problem statement renders Codeforces LaTeX locally while preserving code b
       sourceUrl: "https://codeforces.com/contest/2256/problem/A",
       statement: {
         state: "ready",
-        sanitizedHtml: "<div class=\"problem-statement\"><p>For $$$a^2+b^2=c^2$$$.</p><p>$$$\\frac{1}{2}$$$</p><pre>$$$keep_raw$$$</pre></div>",
+        sanitizedHtml: "<div class=\"problem-statement\"><p>For $$$a^2+b^2=c^2$$$.</p><p>$$$\\frac{1}{2}$$$</p><p><a href=\"javascript:alert(1)\">unsafe</a><a href=\"https://codeforces.com\">safe</a></p><pre>$$$keep_raw$$$</pre></div>",
       },
       identityType: "lightweight", personalNote: null, lifecycle: lightweightLifecycle,
     };
@@ -669,6 +669,9 @@ test("Problem statement renders Codeforces LaTeX locally while preserving code b
     assert.ok(view.document.querySelector(".statement-view .katex-display"));
     assert.match(view.document.querySelector(".statement-view pre")?.textContent ?? "", /\$\$\$keep_raw\$\$\$/);
     assert.doesNotMatch(view.document.querySelector(".statement-view p")?.textContent ?? "", /\$\$\$/);
+    const links = [...view.document.querySelectorAll(".statement-view a")];
+    assert.equal(links[0]?.getAttribute("href"), "#");
+    assert.equal(links[1]?.getAttribute("href"), "https://codeforces.com");
   } finally {
     await view.cleanup();
   }
@@ -1280,8 +1283,15 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     await act(async () => preview.click()); await settle();
     assert.match(view.document.body.textContent, /Apply this replan/);
     const apply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Apply replan");
-    await act(async () => apply.click()); await settle();
+    assert.equal(view.document.activeElement, apply, "replan dialog focuses its primary action");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    assert.equal(view.document.querySelector('[role="dialog"]'), null, "Escape closes the replan dialog");
+    assert.equal(view.document.activeElement, preview, "closing the replan returns focus to its trigger");
+    await act(async () => preview.click()); await settle();
+    const reopenedApply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Apply replan");
+    await act(async () => reopenedApply.click()); await settle();
     assert.ok(calls.some(([name]) => name === "apply_today_replan"));
+    assert.ok([...view.document.querySelectorAll(".sr-only")].some((node) => /Today replan applied/.test(node.textContent ?? "")));
   } finally {
     await view.cleanup();
   }

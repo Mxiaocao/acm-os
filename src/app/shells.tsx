@@ -620,7 +620,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
         </>
       )}
       {helpOpen ? (
-        <aside aria-labelledby="review-help-title" aria-modal="true" className="review-help-drawer" ref={helpDrawerRef} role="dialog">
+        <aside aria-describedby="review-help-description" aria-labelledby="review-help-title" aria-modal="true" className="review-help-drawer" ref={helpDrawerRef} role="dialog">
           <div className="review-help-drawer__header">
             <div>
               <p className="eyebrow">Evidence before reveal</p>
@@ -628,7 +628,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
             </div>
             <button className="secondary-action" onClick={closeHelpDrawer} type="button">Close</button>
           </div>
-          <p>Opening this drawer records nothing. A successful Reveal creates an irreversible usage event before content appears.</p>
+          <p id="review-help-description">Opening this drawer records nothing. A successful Reveal creates an irreversible usage event before content appears.</p>
           {helpError ? <p role="alert">{helpError}</p> : null}
           {!helpDrawer && !helpError ? <p aria-busy="true">Checking current Markdown…</p> : null}
           <ol className="review-help-levels">
@@ -1025,11 +1025,15 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
   const [budgetDraft, setBudgetDraft] = useState("60");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
   const [busyEntry, setBusyEntry] = useState<string | null>(null);
   const [replan, setReplan] = useState<TodayReplanPreviewDto | null>(null);
   const [suggestions, setSuggestions] = useState<TodayExtraSuggestionsPreviewDto | null>(null);
   const draggedEntryIdRef = useRef<string | null>(null);
   const pointerTargetEntryIdRef = useRef<string | null>(null);
+  const replanDialogRef = useRef<HTMLDivElement>(null);
+  const replanApplyRef = useRef<HTMLButtonElement>(null);
+  const replanTriggerRef = useRef<HTMLButtonElement>(null);
 
   const refreshSuggestions = useCallback(async (next: TodaySnapshotDto) => {
     if (next.entries.length > 0 && next.entries.every((entry) => entry.status === "completed")) {
@@ -1053,8 +1057,11 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
 
   useEffect(() => { void load(false); }, []);
 
-  const commitSnapshot = async (next: TodaySnapshotDto) => {
+  const commitSnapshot = async (next: TodaySnapshotDto, nextAnnouncement?: string) => {
+    const closingReplan = replan !== null;
     setSnapshot(next); setBudgetDraft(String(next.budgetMinutes)); setReplan(null); setError(null);
+    setAnnouncement(nextAnnouncement ?? null);
+    if (closingReplan) queueMicrotask(() => replanTriggerRef.current?.focus());
     await refreshSuggestions(next);
   };
 
@@ -1064,7 +1071,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
     if (target < 0 || target >= snapshot.entries.length) return;
     const ids = snapshot.entries.map((entry) => entry.entryId);
     [ids[index], ids[target]] = [ids[target], ids[index]];
-    try { await commitSnapshot(await reorderToday(snapshot.planId, ids)); }
+    try { await commitSnapshot(await reorderToday(snapshot.planId, ids), "Today order updated."); }
     catch (cause) { setError(todayErrorMessage(cause)); }
   };
 
@@ -1081,7 +1088,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
     const [moved] = ids.splice(from, 1);
     ids.splice(target, 0, moved);
     draggedEntryIdRef.current = null;
-    try { await commitSnapshot(await reorderToday(snapshot.planId, ids)); }
+    try { await commitSnapshot(await reorderToday(snapshot.planId, ids), "Today order updated."); }
     catch (cause) { setError(todayErrorMessage(cause)); }
   };
 
@@ -1130,7 +1137,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
   const done = async (entry: TodayEntryDto) => {
     if (!snapshot || busyEntry) return;
     setBusyEntry(entry.entryId);
-    try { await commitSnapshot(await completeTodayEntry(snapshot.planId, entry.entryId)); }
+    try { await commitSnapshot(await completeTodayEntry(snapshot.planId, entry.entryId), `${entry.problemTitle} marked done for today.`); }
     catch (cause) { setError(todayErrorMessage(cause)); }
     finally { setBusyEntry(null); }
   };
@@ -1148,20 +1155,52 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
 
   const applyBudget = async () => {
     if (!replan) return;
-    try { await commitSnapshot(await applyTodayReplan(replan)); }
+    try { await commitSnapshot(await applyTodayReplan(replan), "Today replan applied."); }
     catch (cause) { setError(todayErrorMessage(cause)); }
   };
 
   const acceptSuggestion = async (problemId: string) => {
     if (!suggestions) return;
     setBusyEntry(problemId);
-    try { await commitSnapshot(await acceptTodayExtraSuggestion(suggestions, problemId)); }
+    try { await commitSnapshot(await acceptTodayExtraSuggestion(suggestions, problemId), "Added the suggestion to Today."); }
     catch (cause) { setError(todayErrorMessage(cause)); }
     finally { setBusyEntry(null); }
   };
 
+  useEffect(() => {
+    if (!replan) return;
+    const dialog = replanDialogRef.current;
+    replanApplyRef.current?.focus();
+    if (!dialog) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setReplan(null);
+        queueMicrotask(() => replanTriggerRef.current?.focus());
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      )];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [replan]);
+
   return <>
     <PageHeader eyebrow="Daily execution" headingRef={headingRef} title="Today" />
+    <p aria-atomic="true" aria-live="polite" className="sr-only">{announcement}</p>
     {loading ? <p aria-live="polite">Loading today plan...</p> : null}
     {error ? <p aria-live="assertive" className="error-message">{error}</p> : null}
     {!loading && needsBudget ? <section className="empty-state"><h2>Set today&apos;s budget</h2><p>No weekly default is set for this weekday. Enter any non-negative whole number of minutes; tasks still use complete 30 or 60 minute planning blocks.</p><form className="today-budget-start" noValidate onSubmit={(event) => { event.preventDefault(); const value = Number(initialBudgetDraft); if (initialBudgetDraft.trim() === "" || !Number.isInteger(value) || value < 0) { setError("Daily budget must be a non-negative whole number of minutes."); return; } void load(true); }}><label>Minutes<input min="0" onInput={(event) => setInitialBudgetDraft(event.currentTarget.value)} required type="number" value={initialBudgetDraft} /></label><button className="primary-action" type="submit">Create Today plan</button></form></section> : null}
@@ -1169,7 +1208,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
     {snapshot ? <>
       <section className="today-toolbar" aria-label="Today plan summary">
         <dl><div><dt>Date</dt><dd>{snapshot.localDate}</dd></div><div><dt>Planned</dt><dd>{snapshot.plannedMinutes} min</dd></div><div><dt>Budget</dt><dd>{snapshot.budgetMinutes} min</dd></div><div><dt>Over</dt><dd>{snapshot.overBudgetMinutes} min</dd></div></dl>
-        <form noValidate onSubmit={previewBudget}><label>Today override<input aria-label="Daily budget in minutes" min="0" onInput={(event) => setBudgetDraft(event.currentTarget.value)} required type="number" value={budgetDraft} /></label><button className="secondary-action" type="submit">Preview replan</button></form>
+        <form noValidate onSubmit={previewBudget}><label>Today override<input aria-label="Daily budget in minutes" min="0" onInput={(event) => setBudgetDraft(event.currentTarget.value)} required type="number" value={budgetDraft} /></label><button className="secondary-action" ref={replanTriggerRef} type="submit">Preview replan</button></form>
       </section>
       {snapshot.entries.length === 0 ? <section className="empty-state"><h2>No tasks fit this budget</h2><p>Only complete 30 or 60 minute tasks are scheduled.</p></section> :
         <ol className="today-list">{snapshot.entries.map((entry, index) => <li className={`today-entry today-entry--${entry.status}`} data-entry-id={entry.entryId} key={entry.entryId} onKeyDown={(event) => { if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); void move(index, -1); } if (event.altKey && event.key === "ArrowDown") { event.preventDefault(); void move(index, 1); } }} tabIndex={0}>
@@ -1179,7 +1218,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
         </li>)}</ol>}
       {suggestions && suggestions.suggestions.length > 0 ? <section className="today-suggestions"><h2>Extra suggestions</h2><p>{suggestions.remainingBudgetMinutes} minutes remain. Nothing is added without your action.</p><ul>{suggestions.suggestions.map((item) => <li key={item.problemId}><span><strong>{item.problemTitle}</strong><small>CF {item.contestId}{item.problemIndex} · {todayReasonLabel(item.reason)} · {item.planningCostMinutes} min</small></span><button className="secondary-action" disabled={busyEntry === item.problemId} onClick={() => void acceptSuggestion(item.problemId)} type="button">Add to Today</button></li>)}</ul></section> : null}
     </> : null}
-    {replan ? <div className="modal-backdrop"><div aria-labelledby="today-replan-title" aria-modal="true" role="dialog"><h2 id="today-replan-title">Apply this replan?</h2><p>Budget {replan.expectedSnapshot.budgetMinutes} → {replan.proposedBudgetMinutes} minutes. This is a one-day override; the weekly default and next week&apos;s same weekday remain unchanged. Planned work becomes {replan.proposedPlannedMinutes} minutes across {replan.entries.length} entries. Completed, in-progress, and manual entries stay protected.</p><div className="button-row"><button className="primary-action" onClick={() => void applyBudget()} type="button">Apply replan</button><button className="secondary-action" onClick={() => { setBudgetDraft(String(snapshot?.budgetMinutes ?? Number(initialBudgetDraft))); setReplan(null); }} type="button">Cancel</button></div></div></div> : null}
+    {replan ? <div className="modal-backdrop"><div aria-describedby="today-replan-description" aria-labelledby="today-replan-title" aria-modal="true" ref={replanDialogRef} role="dialog"><h2 id="today-replan-title">Apply this replan?</h2><p id="today-replan-description">Budget {replan.expectedSnapshot.budgetMinutes} → {replan.proposedBudgetMinutes} minutes. This is a one-day override; the weekly default and next week&apos;s same weekday remain unchanged. Planned work becomes {replan.proposedPlannedMinutes} minutes across {replan.entries.length} entries. Completed, in-progress, and manual entries stay protected.</p><div className="button-row"><button className="primary-action" onClick={() => void applyBudget()} ref={replanApplyRef} type="button">Apply replan</button><button className="secondary-action" onClick={() => { setBudgetDraft(String(snapshot?.budgetMinutes ?? Number(initialBudgetDraft))); setReplan(null); queueMicrotask(() => replanTriggerRef.current?.focus()); }} type="button">Cancel</button></div></div></div> : null}
   </>;
 }
 
@@ -2034,7 +2073,7 @@ function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string,
       element.src = localUrl;
     }
     if (element instanceof HTMLAnchorElement) {
-      const href = element.getAttribute("href") ?? "";
+      const href = element.getAttribute("href")?.trim() ?? "";
       if (href !== "#" && !/^https:\/\//i.test(href)) element.setAttribute("href", "#");
       element.target = "_blank";
       element.rel = "noreferrer noopener";
