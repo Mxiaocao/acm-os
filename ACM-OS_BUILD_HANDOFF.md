@@ -1,74 +1,16 @@
-# ACM-OS BUILD Handoff — M8 Active
+# ACM-OS BUILD Handoff — M10 Release Candidate
 
 Updated: 2026-08-14 (Asia/Shanghai)
 
-本文档用于下一个 Codex BUILD 窗口恢复上下文。它不替代 Git、冻结文档或实际命令输出。
+本文档是后续 BUILD 窗口的正式交接文件。它不替代 Git、冻结文档、实际产物或命令输出；恢复时必须先核对真实仓库状态。
 
-## 0. M8 live checkpoint
-
-当前阶段严格为：
-
-```text
-M8 — Recovery / Backup / Diagnostics / Failure Hardening
-```
-
-M0–M7 已完成，不得重复；不得进入 M9/M10。M8 当前约完成三分之二，仍按一个最小、独立、可验证 Slice 的节奏推进。
-
-已闭环的 M8 基础包括：Critical Operation durable journal/startup gate、Safe Patch crash matrix、Problem/Knowledge Location Anomaly 显式修复、Knowledge 同名重建身份选择、手动一致性备份、备份 inventory/retention preview，以及自动 Daily Snapshot 基础。
-
-Daily Snapshot 已接入以下 mutation：
-
-1. `save_weekly_acm_budget`
-2. `confirm_knowledge_understanding`
-3. `register_knowledge_candidate`
-4. `set_knowledge_candidate_disposition`
-5. `save_contest_ai_analysis`
-6. `set_contest_archived`
-7. `correct_contest_problem_facts`
-8. `update_problem_mastery_evidence`
-9. `complete_contest_facts`
-10. `delete_contest`
-11. `commit_problem_lifecycle_decision`
-12. `create_or_resume_review_attempt`
-13. `reveal_review_help`
-14. `commit_review_completion`
-15. `void_review_attempt`
-16. `prepare_personal_note_deletion`
-17. `commit_personal_note_binding`
-18. `confirm_personal_note_deleted`
-
-Latest completed M8 Slice: `confirm_personal_note_deleted`.
-It verifies the binding is missing, validates current DB/lifecycle/review state before backup, reuses or creates the current-day SQLite-consistent pre-mutation snapshot, then performs the downgrade and deletion inside the transaction. The backup retains `identity_type = personal` and the existing file binding; unrelated candidate Markdown remains untouched.
-
-Latest implementation Slice: `knowledge_rebuild_with_existing_bindings_uses_a_daily_backup_boundary`. Knowledge index rebuild now creates or reuses the current-day SQLite-consistent backup before mutating existing bindings/index state; initial empty-index creation remains backup-free. Infrastructure verification is `163 passed / 0 failed / 2 ignored`.
-
-The next completed repair boundary is `confirm_knowledge_markdown_deleted`: an anomaly-to-confirmed-deleted transition now creates or reuses the pre-mutation Daily Snapshot before changing binding state. The same Infrastructure gate remains `163 passed / 0 failed / 2 ignored`.
-
-The latest repair Slice is Personal Note `rebind_personal_note`: candidate occupancy is rejected before backup, then the existing anomaly binding is backed up before rebind commit. Focused and Infrastructure tests pass; M8 remains active.
-The latest repair Slice is now Knowledge `rebind_knowledge_node`: candidate occupancy is rejected before backup, then the anomaly binding is backed up before rebind commit. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest repair Slice is now `resolve_knowledge_identity_conflict`: candidate occupancy is rejected before backup, then the confirmed-deleted identity transition is backed up before commit. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest diagnostic-state Slice is `update_binding_state`: location-anomaly transitions now use a pre-mutation Daily Snapshot; external-source-unavailable diagnostics remain non-destructive and do not create a backup. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `reorder_today_snapshot`: invalid permutations are rejected before backup; a valid complete same-plan reorder creates or reuses the pre-mutation Daily Snapshot and is revalidated in the write transaction. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `complete_today_entry`: invalid or review-owned entries are rejected before backup, already-completed entries are idempotent and backup-free, and a real learning-entry completion is snapshotted then revalidated in the transaction. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `apply_today_replan`: stale or semantically tampered previews are rejected before backup; a valid replan creates or reuses the pre-mutation Daily Snapshot and is fully revalidated inside the write transaction. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `add_manual_today_entry`: stale or illegal acceptance is rejected in a no-transaction preflight; a valid acceptance is snapshotted, then the complete snapshot and candidate contract are revalidated inside the write transaction. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `create_or_load_today_snapshot`: an existing date is loaded idempotently without backup; first creation of a date creates or reuses the pre-mutation Daily Snapshot, while the unique-date transaction still resolves concurrent creators safely. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-The latest Today Slice is `reconcile_today_snapshot`: a read-only preflight detects only real reconciliation changes (Review state, binding availability, carry-ins, positions, or plan summaries); unchanged loads remain backup-free, while real derived writes create or reuse the pre-mutation Daily Snapshot before the original transaction. Infrastructure remains `163 passed / 0 failed / 2 ignored`.
-Audit decision: initial/progressive Contest `persist_manifest` remains a bootstrap acquisition path, not a Daily Snapshot mutation. A trial backup boundary was reverted after it polluted five established business-mutation precondition tests; the restored gate is `163 passed / 0 failed / 2 ignored`. Re-import drift remains rejected and first snapshots remain immutable.
-
-最新闭环 Slice 是 `commit_personal_note_binding`：首次 lightweight → personal binding commit 先在备份前验证 Problem 状态，已有 Personal binding 直接幂等返回且不重复备份；合法创建在数据库 binding/identity 写入前生成或复用当天 pre-mutation SQLite-consistent snapshot。测试确认快照中 identity 仍为 lightweight、file binding 数为 0，第二次幂等创建复用同一快照；测试夹具会隔离 setup-only 创建快照，避免污染业务 mutation 断言。
-
-最新自动化证据：Infrastructure `162 passed / 0 failed / 2 ignored`；Startup `6/6`；DOM `35/35`；Boundary `5/5`；Rust workspace/check/fmt、TypeScript、Vite build、Desktop E2E、`git diff --check` 全部通过。两项 ignored 仍是 release-only 联网 Codeforces smoke。
-
-下一步不得直接铺开 restore/diagnostics。继续盘点剩余文件/数据库写入口及其 Critical Operation、recovery copy、Daily Snapshot 覆盖；本轮已确认 Knowledge derived rebuild 的边界，后续只从仍未覆盖的写入口中选择一个最小 Slice。
-
-## 1. 权威顺序
+## 0. 权威顺序与保护边界
 
 ```text
 SPEC > DESIGN > PLAN > IMPLEMENTATION
 ```
 
-开始修改前必须完整读取：
+开始任何后续工作前，完整读取：
 
 1. `ACM-OS_SPEC_v1.md`
 2. `ACM-OS_DESIGN_v1.md`
@@ -76,679 +18,175 @@ SPEC > DESIGN > PLAN > IMPLEMENTATION
 4. `ACM-OS_BUILD_HANDOFF.md`
 5. `ACM-OS_RECOVERY_PROMPT.md`
 
-BUILD 期间不得修改 SPEC、DESIGN、PLAN，除非用户明确授权。若实现与冻结文档真实冲突，报告 `SPEC-CONFLICT` 并停止扩展。
+冻结的 SPEC、DESIGN、PLAN 未被 M10 修改，未经用户明确授权不得修改。不得执行 reset、clean、覆盖式 checkout；不得丢弃未提交修改或未知文件；未经明确授权不得 commit、amend、tag 或 push。
 
-## 2. 仓库 checkpoint
+## 1. 当前里程碑状态
 
-恢复时应重新运行命令核对，以下值只是本次交接时的事实：
+- M0–M9：完成，不得重复。
+- M9 人工验收：用户已判定合格。
+- M10-0：完成，RC 范围、冻结合同和阻塞门禁已核对。
+- M10-A：完成，自动化 RC 门禁已通过。
+- M10-B：完成，Windows Release 产物、真实桌面 E2E 和隔离 Release 性能证据已建立。
+- M10-C：完成，真实 Codeforces 联网 smoke 与本机 Obsidian 协议分派已验证。
+- M10-D：完成，RC 证据与正式恢复交接已收口。
 
-```text
-Repository:  E:\项目开发\acm-os
-Branch:      main
-HEAD:        60fe56b11bd3d541768ffa96aeca9596e4bb05e6
-Subject:     feat: complete M7 contest workflow
-origin/main: 61726681f26e13a03f5f601643a9d18188faf9e8
-Ahead:       5 commits
-```
+随后人工验收发现 Release 安装版 Review 中的 `Open original OJ` 裸 `target="_blank"` 在 WebView2
+中无响应，已补为 HTTPS-only Tauri opener IPC，并增加错误反馈与 DOM 回归覆盖。修复后的 Release/MSI
+已重新构建并升级安装；用户确认安装版现在可以打开原 OJ。
 
-`main` 领先 `origin/main` 的 5 个提交不是异常分叉，而是尚未 push 的连续本地 checkpoint：
-
-```text
-22caa0e build: complete M3 learning lifecycle
-e9dd877 build: complete M4 review lifecycle
-5d3afe6 build: complete M5 daily planning
-55a728c build: complete M6 knowledge system
-60fe56b feat: complete M7 contest workflow
-```
-
-远端仍停在 M2 文档 checkpoint。没有执行 push，也没有为 M3–M7 创建 tag。不得在没有用户明确授权时 push 或补 tag。
-
-## 3. 已完成里程碑
+M10 的自动化工程准备已经闭环，但冻结 PLAN/DESIGN 要求的真实 15-step Blocking E2E 尚需用户人工执行。因此当前状态是：
 
 ```text
-M0  Executable Foundation + Workspace Ready Gate       COMPLETE
-M1  Real Contest Import → Lightweight Problems        COMPLETE
-M2  Personal Markdown → External Obsidian Fresh Read  COMPLETE
-M3  Upsolve Lifecycle → First Review Schedule         COMPLETE
-M4  Review Focus → Evidence → Judgement               COMPLETE
-M5  Today Planner → Stable Daily Execution            COMPLETE
-M6  Knowledge Integration → Obsidian Relationships    COMPLETE
-M7  Complete Contest Workflow + Manual Contest        COMPLETE
-
-NEXT: M8 Recovery / Backup / Diagnostics / Failure Hardening
+Release Candidate ready for final human Blocking E2E
+Technical MVP Accepted: NOT YET
 ```
 
-不得重复实现 M0–M7。只有实际证据发现回归时，才允许做范围最小的回归修复并重新验证。
+不得在人工 Blocking E2E 全部 PASS 前宣称 `Technical MVP Accepted`，也不得自行创建建议 tag `acm-os-mvp-rc1`。
 
-## 4. M7 交付内容
+## 2. 恢复时必须核对的 Git 快照
 
-M7 commit `60fe56b` 实现：
+以下只记录本窗口观测值，不得当作恢复后的事实：
 
-- Contest Facts Snapshot；
-- Unknown / Not Attempted 等比赛结果语义；
-- 比赛结束时 upsolve decision；
-- Contest Result 与实时 Learning Status 分离；
-- 完成 Facts 后通过 Correction Event 原子纠错，并保留不可变历史；
-- Post-Contest AI Analysis raw text、只读 preview、complete/partial/failed parse status；
-- 保存时由 Rust 重新解析 raw text，前端不能伪造 projection；
-- Manual Codeforces Contest / Problem / Statement fallback；
-- Manual statement HTML escaping 与 first-snapshot no-overwrite；
-- Contest archive / restore 独立状态；
-- 删除前 consequence preview；
-- Contest 删除事务清理 Contest、Facts、Analysis、Correction Events 和关系；
-- 正式、Personal、有学习/Review/Today/Knowledge/纠错历史或其他引用的 Problem 保留；
-- 仅清理完全无引用、无历史的纯 Lightweight Problem；
-- schema generation 16–20；
-- Contest 页面专用响应式 Facts 布局和 AI Analysis 表单布局。
+- Repository: `E:\项目开发\acm-os`
+- Branch: `main`
+- HEAD: `97f57e589e4b019278d91fe321ca8fa543a6faf8`
+- Subject: `build: complete M9 hardening`
+- `origin/main`: `d739ea5 Add M8 recovery handoff`
+- M10 修改尚未提交、未打 tag、未 push。
 
-M7 没有进入 M8、M9 或 M10。
-
-## 5. M7 验证证据
-
-提交前最终验证：
+本次交接完成后的预期未提交文件为：
 
 ```text
-Infrastructure Rust:          117 passed, 0 failed, 2 ignored
-Workspace Rust:               passed
-cargo check --workspace:      passed
-cargo fmt --all -- --check:   passed
-DOM/UI:                       29 passed
-Boundary tests:               5 passed
-Architecture checker:         passed
-TypeScript:                    passed
-Vite production build:        passed
-Desktop E2E:                  passed
-git diff --cached --check:    passed
-Manual GUI acceptance:        accepted by user
+ M ACM-OS_BUILD_HANDOFF.md
+ M ACM-OS_RECOVERY_PROMPT.md
+ M package.json
+ M scripts/desktop-e2e.mjs
+ M src-tauri/tauri.conf.json
+?? scripts/release-desktop-benchmark.mjs
+?? acm-os.exe
+?? Uninstall ACM-OS.lnk
 ```
 
-两项 ignored test 是发布阶段才运行的真实 Codeforces 网络 smoke tests。
+`acm-os.exe` 与 `Uninstall ACM-OS.lnk` 是本机 MSI 安装器在仓库根目录生成的未知文件；它们已保留但不纳入本次提交，不得用 `git clean` 删除。
 
-人工验收覆盖：
+恢复时必须重新运行 `git status --short`、branch、HEAD、log、remote、diff 和 tag 核对；若实际状态不同，以实际状态为准并先报告差异。
 
-- Manual Contest / Problem / Statement；
-- statement 中 `<` 作为普通文本显示；
-- Facts Snapshot 与实时 Learning Status 分离；
-- Correction Event 与 no-change rejection；
-- AI Analysis COMPLETE/FAILED、preview 不保存、failed raw text 保留；
-- archive / restore；
-- delete preview；
-- 纯 Lightweight Problem 删除；
-- Contest 页面响应式布局。
+## 3. M10 实现变更
 
-人工验收期间发现 Contest Facts 行和 AI textarea 布局混乱，已修复并由用户复验通过。
+### Release 桌面基准
 
-安全删除另有精确自动化证据：
+新增 `scripts/release-desktop-benchmark.mjs` 与 `npm run benchmark:release-desktop`。它启动真实 Release Tauri 可执行文件，使用隔离的应用数据、测试时钟和 WebView2 用户目录，采集 Today 可交互启动时间与进程树稳态 RAM，并执行 7 次样本的 P95 预算判断。
 
-- Personal / 历史 Problem 保留；
-- Knowledge link Problem 保留；
-- Correction history Lightweight Problem 保留；
-- 无引用、无历史 Lightweight Problem 清理。
+该证据是隔离环境中的真实 Release 进程测量；它不同于 M9 的确定性 Node Reference Dataset benchmark，也不等同于任意用户机器上的首次安装冷启动。
 
-已知非阻塞告警：Vite 主 chunk 约 534–535 kB，超过默认 500 kB warning threshold。该项属于后续质量/性能阶段，不应在 M8 首个 Slice 中顺手扩展。
+### Desktop E2E 稳定性
 
-## 6. 当前工作树注意事项
+`scripts/desktop-e2e.mjs` 为每轮使用隔离的 WebView2 用户目录，并在 Windows 上可靠清理完整进程树，避免 WebView2 状态和残留子进程污染后续测试。
 
-M7 产品代码已经提交到 `60fe56b`。
+### Release packaging
 
-本次交接更新后预期仍有未提交文档/配置修改：
+`src-tauri/tauri.conf.json` 显式指定 `icons/icon.ico`，Windows MSI bundling 已成功完成。
+
+### 真实联网门禁
+
+新增 `npm run test:release-network`。它串行运行两项 ignored Codeforces 测试，避免公共服务并发请求造成不必要波动：
+
+1. 大 standings 有界元数据与真实 2256C 题面/资源。
+2. Contest 1 真实导入与幂等重试。
+
+公共 Codeforces 是外部依赖；曾有一次并行总门禁遇到瞬时 `Unavailable`，随后正式单线程门禁与完整 workspace 均通过。恢复时若失败，必须区分产品回归与外部服务波动，不得静默忽略。
+
+## 4. Release 产物证据
+
+Windows Release EXE：
 
 ```text
-M  .gitignore
-M  ACM-OS_BUILD_HANDOFF.md
-M  ACM-OS_RECOVERY_PROMPT.md
+src-tauri\target\release\acm-os.exe
+size: 22,816,256 bytes
+SHA-256: 217038E100144B6C37D829BEA8E3F1F8083CD314107B1B4E49C856417D0385DA
 ```
 
-这些文件不是 `60fe56b` 的一部分。恢复时必须以实际 `git status` 为准，不得丢弃。
-
-旧的 `.desktop-e2e-*` 临时目录和仓库内 `.pnpm-store/` 已删除，并已将以下模式加入 `.gitignore`：
+Windows MSI：
 
 ```text
-.desktop-e2e-*/
-.pnpm-store/
+src-tauri\target\release\bundle\msi\ACM-OS_0.1.0_x64_en-US.msi
+size: 8,499,200 bytes
+SHA-256: 0B38AE6BC96E2224B91531CEC752DE43C7306444EB9033C01E3605FF37BB8F5B
 ```
 
-不得使用 `git clean` 清理未知文件。
+这些哈希只对应本窗口生成的产物。任何重建都必须重新计算并报告新哈希。
 
-## 7. 下一阶段：M8
+## 5. M10 自动化证据
 
-冻结 PLAN 定义：
+- Release Desktop E2E：PASS。
+- Release 桌面隔离基准，7 次：
+  - Today 可交互启动 P95 `1705.27 ms`，预算 `<= 2500 ms`。
+  - 进程树稳态 RAM P95 `373.09 MiB`，预算 `<= 500 MiB`。
+- `npm run test:release-network`：2 项真实 Codeforces smoke PASS。
+- 完整 Rust workspace（含 ignored 联网项）：`261 passed / 0 failed / 0 ignored`。
+- Infrastructure：`190 passed`。
+- `npm run check:boundaries`：`5 passed`，boundary check passed。
+- `npm run build`：PASS。
+- `cargo check --workspace`：PASS。
+- `cargo fmt --all -- --check`：PASS。
+- `git diff --check`：PASS。
+
+OJ opener 修复后的追加证据：
+
+- `npm run test:dom-shells`：`35 passed / 0 failed`。
+- `cargo check --workspace`：PASS。
+- `cargo fmt --all -- --check`：PASS。
+- `npm run build`：PASS。
+- Release/MSI bundling：PASS，WiX/NSIS 均生成。
+
+本机 Obsidian 证据：
 
 ```text
-M8 — Recovery / Backup / Diagnostics / Failure Hardening
+D:\software\Obsidian\Obsidian.exe
+version: 1.12.7
+obsidian://open protocol dispatch: PASS
+handler: "D:\software\Obsidian\Obsidian.exe" "%1"
 ```
 
-Outcome：
+协议分派 PASS 只证明 Windows 能把 `obsidian://open` 交给 Obsidian；最终仍需人工确认 ACM-OS 打开的 Personal Note/Knowledge 是正确 Markdown 文件。
 
-> 异常情况下保护已知事实，不猜、不静默损坏。
+## 6. 已知非阻塞 warning
 
-冻结范围：
+- Vite 生产构建报告单个 chunk 约 `545.51 kB`；当前构建通过，未超过冻结功能或性能门禁，但后续可作为优化项。
+- Tauri 对 identifier `dev.acmos.app` 以 `.app` 结尾给出跨平台提示；Windows RC packaging 不受阻塞。若未来调整 identifier，必须按迁移和兼容性变更处理，不能在 RC 收口中顺手修改。
 
-- Health；
-- Location Anomaly repair；
-- binding recovery；
-- parse/concurrency UX；
-- Critical Operation recovery；
-- crash check；
-- backup / retention / restore；
-- derived rebuild；
-- logs；
-- diagnostic export preview；
-- external-open failure；
-- adapter health；
-- 完整 Recovery Shell。
+## 7. 最终人工 Blocking E2E
 
-DoD：
+冻结 DESIGN 第 17 节与 PLAN 第 9.7/10 节要求 Release Candidate 至少真实完成一次 15-step Blocking E2E：
+
+1. 导入真实受支持的公开 Contest。
+2. 全部题目成为 lightweight Problems。
+3. 选择一题并创建 Personal Markdown。
+4. 加入 upsolve 并开始学习。
+5. 在 Obsidian 外部编辑 Markdown。
+6. ACM-OS 读取最新内容。
+7. 标记题目已理解。
+8. 跨日期并冷启动到 due Review。
+9. 进入 Review，旧知识保持隐藏。
+10. 打开原 OJ 并进行真实提交。
+11. 确认 Review facts。
+12. 系统自动判断真会/半会/未通过。
+13. 转入长期复习或 relearn。
+14. 已完成 Attempt 历史保持不变。
+15. 后续 Today Plan 再次召回该题。
+
+不得用 mock、`final_ac=true`、仅协议分派或仅联网单测替代这条真实链。另需人工执行 MSI 安装、从安装版启动和卸载检查。
+
+本次用户明确跳过了真实 OJ 提交及后续 Review facts/生命周期闭环，也未继续执行卸载验收。已完成的人工证据包括安装、启动、真实 Contest 导入、Personal Markdown、Obsidian 外部编辑、Fresh Read、补题、开始学习、补懂、重启持久化、Review 隔离和修复后的 OJ 打开；因此只能记录为：
 
 ```text
-fault injection / backup restore / ambiguous relocation / crash matrix 全部有证据
+M10 engineering gates: COMPLETE
+Manual RC acceptance: QUALIFIED WITH EXPLICITLY SKIPPED BLOCKING STEPS
+Technical MVP Accepted: NOT CLAIMED
 ```
 
-计划 checkpoint：
+## 8. 下一步边界
 
-```text
-acm-os-m8-recovery
-```
+下一步只能是用户主导的最终人工 Blocking E2E 与 MSI 验收，或用户明确指定的问题修复。若人工验收发现缺陷：先记录复现步骤和证据，只修阻塞 RC 的问题，完整回归后更新本文件与 `ACM-OS_RECOVERY_PROMPT.md`。
 
-M8 的目标不是增加普通日常产品能力，而是确保异常、崩溃、迁移、文件移动、外部依赖失败和恢复操作中：
-
-- 已知事实不丢失；
-- 不确定状态不猜测；
-- 不静默覆盖或修复；
-- 用户能看见发生了什么、什么未受影响、下一步能做什么；
-- 恢复操作具有可验证证据。
-
-## 8. 下一个窗口必须先做什么
-
-下一个窗口第一阶段只做恢复核对，不修改任何文件：
-
-1. 运行 `ACM-OS_RECOVERY_PROMPT.md` 中的命令；
-2. 完整读取五份权威/交接文档；
-3. 核对 branch、HEAD、origin、ahead commits、tags、staged/unstaged/untracked；
-4. 确认 M7 checkpoint 和验证边界；
-5. 明确当前阶段只能是 M8。
-
-恢复核对完成后，先做 M8 planning：
-
-1. 从 SPEC / DESIGN / PLAN 提取 M8 的权威合同和 DoD；
-2. 盘点现有 Recovery、backup、startup gate、Safe Patch recovery copy、binding relocation、health 和 diagnostics 能力；
-3. 区分“已存在的基础能力”和“M8 真正缺口”；
-4. 将 M8 切成独立可验证的 Slices；
-5. 选择第一个最小 Slice，明确其包含和不包含的范围；
-6. 得到清楚计划后才开始实现第一个 Slice。
-
-不得：
-
-- 重做 M0–M7；
-- 一次性大规模实现整个 M8；
-- 在首个 Slice 中混入后续 M8 能力；
-- 进入 M9 accessibility/security/performance hardening；
-- 进入 M10 release；
-- 未经授权 commit、tag 或 push。
-
-## 9. 每个 M8 Slice 的执行门禁
-
-```text
-implementation / fix
-→ focused tests
-→ infrastructure tests
-→ workspace Rust tests
-→ cargo check --workspace
-→ cargo fmt --all -- --check
-→ Startup / DOM / boundary（按 change surface）
-→ TypeScript
-→ Vite production build
-→ Desktop E2E（按 change surface）
-→ git diff --check
-→ 完整 diff review
-→ git status
-```
-
-当前 Slice 失败时不得叠加下一个 Slice。
-
-每次报告必须区分：
-
-- 已由实际命令证明的事实；
-- 仍缺少的证据；
-- 本次修改文件；
-- 剩余 M8 Slices；
-- 未提交、未暂存、未知文件；
-- 是否触及 M9/M10（正常应为否）。
-
-## 10. 最新闭环 M8 Slice — System Restore Candidate Preview
-
-本 Slice 只建立真实 Restore 之前的只读候选预检，不执行恢复：
-
-- 输入一个备份路径；
-- canonical path 必须位于 App Private Data 的 `backups` 下；
-- 只接受 `manual` / `pre-migration` / `pre-restore` / `daily` / `weekly` 目录中的已发布 `.sqlite3` 普通文件；
-- 使用 read-only SQLite connection；
-- 校验 SQLite integrity、foreign keys、migration ledger 与对应 schema contract；
-- future schema 明确拒绝；
-- older schema 返回 `migration_required = true`；
-- preview 明确说明只恢复 System Facts，Markdown 不会被覆盖。
-
-明确未包含：
-
-- pre-restore backup；
-- 替换当前数据库；
-- 执行 migration；
-- restore 后 binding validation / Fresh Read / derived rebuild / anomaly report；
-- Recovery Shell 的恢复确认 UI。
-
-2026-08-14 自动化证据：
-
-- focused restore candidate tests：`5 passed / 0 failed`；
-- Infrastructure：`168 passed / 0 failed / 2 ignored`；
-- Rust workspace：通过；
-- `cargo check --workspace`：通过；
-- `cargo fmt --all -- --check`：通过；
-- Startup：`6/6`；
-- DOM：`35/35`；
-- Boundary：`5/5` + boundary script passed；
-- TypeScript：通过；
-- Vite production build：通过。
-
-两项 ignored 仍是 release-only Codeforces 网络 smoke。Desktop E2E 未运行：本 Slice 未加入 UI 操作流，真实 Tauri command registration 已由 Rust workspace 编译覆盖。
-
-下一 Slice 仍必须保持最小边界。建议从真实 System Restore 的第一段开始：在任何数据库替换前创建并验证 `pre-restore` 一致性快照；不得同时铺开数据库替换、迁移、post-restore rebuild 与完整 Recovery Shell。
-
-## 11. 最新闭环 M8 Slice — Pre-restore Snapshot Boundary
-
-真实 restore 的第一段基础边界已完成，但仍未执行数据库替换：
-
-- 先重新验证 restore candidate；
-- candidate 无效时不创建 pre-restore 文件；
-- 从当前 live System Facts 创建 SQLite-consistent snapshot；
-- 快照先写 `.partial`，通过 integrity / foreign-key 校验后才发布到 `backups/pre-restore`；
-- 快照失败返回独立 `pre_restore_backup_failed`，当前数据库保持可读且不进入后续 restore；
-- 返回值同时保留 candidate preview 与 current schema，供后续 restore 编排使用。
-
-明确未包含：当前数据库替换、旧 schema migration、restore 后 integrity/binding/Fresh Read/derived rebuild、Markdown 写入、IPC/UI。
-
-2026-08-14 自动化证据：
-
-- focused pre-restore tests：`3 passed / 0 failed`；
-- Infrastructure：`171 passed / 0 failed / 2 ignored`；
-- Rust workspace tests：通过；
-- `cargo check --workspace`：通过；
-- `cargo fmt --all -- --check`：通过。
-
-本 Slice 没有新增 IPC、TypeScript 或 UI change surface，因此未重复运行 DOM/Vite/Desktop E2E。下一 Slice 应只处理候选数据库的受控替换与失败回滚边界；migration 和 post-restore rebuild 仍需继续拆分。
-
-## 12. 最新闭环 M8 Slice — Verified Database Swap Primitive
-
-已建立受控数据库文件交换原语，供后续 restore 编排使用：
-
-- 调用前必须已有 verified staging database 和 pre-restore snapshot；
-- 检查 current/staging/snapshot 都是普通文件；
-- 检查 current SQLite WAL/SHM sidecar，不在数据库仍 busy 时交换；
-- current database 先移动为 rollback 文件，再发布 staging；
-- rollback 文件保留到后续 restore commit，不能在本 Slice 擅自删除；
-- 缺少 pre-restore snapshot、busy 数据库、staging/current 无效或已有 rollback 时 fail closed。
-
-该原语尚未接入 Tauri State/IPC 在线运行时，因此没有声称完成完整 restore。明确未包含：运行时连接重建、migration、restore 后 validation、binding/Fresh Read/derived rebuild、rollback commit/cleanup、Markdown 与 UI。
-
-2026-08-14 自动化证据：
-
-- focused swap tests：`2 passed / 0 failed`；
-- Infrastructure：`173 passed / 0 failed / 2 ignored`；
-- Rust workspace tests：通过；
-- `cargo check --workspace`：通过；
-- `cargo fmt --all -- --check`：通过。
-
-下一 Slice 只能把该原语接入关闭 SQLite 连接、受控重启和失败回滚的运行时编排，仍不得同时加入 migration 或 post-restore rebuild。
-
-## 13. 最新闭环 M8 Slice — Durable Restore Intent Preparation
-
-本 Slice 完成了真实 restore 编排的持久化准备边界：
-
-- Application `ManualBackupPort` 新增 `prepare_restore_intent` 正式 contract；
-- 先只读预检 candidate，再创建并校验 `pre-restore` 当前数据库快照；
-- candidate 复制到 `backups/pre-restore` 下的 `.partial` staging，完成 integrity 校验后原子发布；
-- 通过 `restore-intent.json` 原子 rename 持久化 staging 与 pre-restore snapshot 路径；
-- 已有 pending intent 拒绝覆盖，写入失败返回显式错误并清理 staging；
-- 下一次 startup 在打开 SQLite pool 前消费 intent，失败时保留 intent 并进入 Recovery。
-
-验证证据：`prepare_restore_intent` focused 2/2；Infrastructure `175 passed / 0 failed / 2 ignored`；workspace check 与 rustfmt 通过。
-
-明确未包含：IPC/UI、自动重启、migration、post-restore rebuild、Markdown/binding 修复、rollback artifact 清理策略。
-
-下一 Slice 只能处理受控 restart/restore 编排的外部入口，继续保持 migration 与 post-restore rebuild 分离。
-
-## 14. 最新闭环 M8 Slice — Controlled Restore Preparation IPC
-
-已将 durable restore preparation 接入 Tauri IPC：`prepare_system_restore` 接收已选择的 backup candidate，返回 staging、pre-restore snapshot 与 candidate preview 的 camelCase DTO。该入口只创建持久化 intent，不在当前不可变 `DatabaseRuntime` 中替换 pool，也不隐式执行重启；下一次启动仍由 startup gate 消费 intent。
-
-验证证据：workspace `177 passed / 0 failed / 2 ignored`；`cargo check --workspace` 与 rustfmt 通过。前端构建未能在当前环境执行，因为 node runtime 不在 PATH。
-
-明确未包含：UI 操作面板、进程重启 API、migration、post-restore rebuild、rollback 清理与 Markdown/binding 修复。
-
-下一 Slice 只能实现显式、可确认的 restart handoff/恢复后状态回报，不得扩展到 migration 或 derived rebuild。
-
-## 15. 最新闭环 M8 Slice — Explicit Restore Restart Handoff
-
-已完成显式重启 handoff：Tauri `restart_for_pending_restore` 仅在 `restore-intent.json` 存在且为普通文件时调用 `AppHandle::request_restart()`；无 pending intent 时返回 `restore_intent_missing`。该命令不自行替换数据库，恢复仍由下一次 startup gate 在 SQLite pool 打开前消费。
-
-验证证据：Tauri library tests `23 passed / 0 failed`；`cargo check --workspace`、rustfmt、`git diff --check` 通过。
-
-明确未包含：重启后的 UI 状态回报、migration、post-restore rebuild、rollback 清理、Markdown/binding 修复。
-
-下一 Slice 只能补充 startup 后 restore outcome 的只读诊断投影，继续禁止扩展到 migration 或 derived rebuild。
-
-## 16. 最新闭环 M8 Slice — Read-only Restore Outcome Diagnostics
-
-已新增 `restore_diagnostics` 只读 IPC：返回 `pendingIntent`、`rollbackArtifactPath` 与 startup state。该诊断只观察 durable intent、当前数据库对应的 rollback artifact 和既有 startup gate 状态，不删除文件、不改变 pool、不执行恢复动作。
-
-验证证据：restore intent focused `2 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace`、rustfmt、`git diff --check` 通过。
-
-明确未包含：rollback 提交/清理、migration、post-restore rebuild、Markdown/binding 修复、完整 Recovery UI。
-
-下一 Slice 只能处理 rollback artifact 的显式用户确认清理，并必须保持失败可恢复。
-
-## 17. 最新闭环 M8 Slice — Explicit Rollback Artifact Cleanup
-
-已新增 `confirm_restore_rollback_cleanup` 显式清理入口：
-
-- 必须传入与当前 app data 精确匹配的 rollback artifact 路径；
-- pending restore intent 存在时拒绝清理；
-- rollback 文件必须是普通文件且通过 read-only integrity 校验；
-- 仅在全部条件满足后删除 rollback artifact；
-- 所有失败均返回明确错误，不自动猜测或强制删除。
-
-验证证据：rollback cleanup focused `1 passed / 0 failed`；`cargo check --workspace`、rustfmt 通过。
-
-明确未包含：自动 retention 清理、migration、post-restore rebuild、Markdown/binding 修复、Recovery UI。
-
-下一 Slice 只能处理 restore 后 schema/integrity outcome 的只读投影。
-
-## 18. 最新闭环 M8 Slice — Post-restore Schema / Integrity Projection
-
-`restore_diagnostics` 现已同时投影：startup state、当前 schema version、pending intent、rollback artifact path 与 rollback read-only integrity 结果。rollback 不存在时 integrity 为 `null`；存在但无法打开或校验失败时为 `false`。
-
-该 Slice 仅执行只读检查，不运行 migration、不清理 artifact、不修改 System Facts。
-
-验证证据：rollback diagnostics focused `1 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 只能处理 post-restore derived-state rebuild 的 preview/plan，不得直接执行 rebuild 或修改 Markdown。
-
-## 19. 最新闭环 M8 Slice — Post-restore Rebuild Preview
-
-已新增 `preview_post_restore_rebuild` 只读 contract 与 IPC，报告：problem binding 数量、knowledge binding 数量、现有 derived relation 数量，以及后续 apply 将重新验证 binding、重建 derived Knowledge、绝不覆盖 Markdown 的范围声明。
-
-该 preview 不写数据库、不扫描或修改 Markdown、不执行 rebuild。
-
-验证证据：focused `1 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 只能执行 post-restore binding validation 的第一段，并必须把 anomaly 作为显式结果保留；不得同时执行 derived rebuild。
-
-## 20. 最新闭环 M8 Slice — Post-restore Problem Binding Validation
-
-新增 `validate_post_restore_problem_bindings` 只读 contract 与 IPC：逐条重新解析 Problem file binding，统计 ready 数量，并将 `location_anomaly`、`vault_unavailable`、`invalid_binding` 作为显式 anomaly 返回。
-
-该 Slice 不更新 binding state、不写 Markdown、不执行 Knowledge binding 验证或 derived rebuild。
-
-验证证据：focused `1 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 只能处理 post-restore Knowledge binding validation。
-
-## 21. 最新闭环 M8 Slice — Post-restore Knowledge Binding Validation
-
-新增 `validate_post_restore_knowledge_bindings` 只读 contract 与 IPC：重新发现 Knowledge Markdown，按冻结路径/identity digest 规则验证现有 Knowledge bindings，并返回 ready 数量、`confirmed_deleted` 数量及显式 `location_anomaly` 列表。
-
-该 Slice 不更新 binding state、不执行 derived rebuild、不写 Markdown。
-
-验证证据：focused `1 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 只能实现 derived Knowledge rebuild 的显式 apply 前置条件检查，仍不得自动执行 rebuild。
-
-## 22. 最新闭环 M8 Slice — Derived Rebuild Preconditions
-
-新增 `check_post_restore_rebuild_preconditions` 只读 contract 与 IPC，聚合检查：pending restore intent、startup recovery 状态、Problem binding anomalies、Knowledge binding anomalies。只有所有 blocker 为空时才返回 `eligible: true`。
-
-该 Slice 只做前置条件判断，不执行 derived rebuild、不写数据库、不修改 Markdown。
-
-验证证据：focused `1 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 仍需保持显式用户确认，再实现 derived Knowledge rebuild apply；不得自动执行。
-
-## 23. 最新闭环 M8 Slice — Explicit Derived Rebuild Apply
-
-新增 `apply_post_restore_rebuild` 显式 IPC。每次 apply 前重新运行全部前置条件；存在 pending intent、startup recovery 或任一 binding anomaly 时拒绝执行。通过后调用既有 Knowledge index rebuild，并返回 node、relation 与 anomaly 数量。
-
-该 apply 不写 Markdown；既有 rebuild mutation 继续使用 Daily Snapshot 边界。
-
-验证证据：focused `1 passed / 0 failed`；Tauri library `23 passed / 0 failed`；`cargo check --workspace` 与 rustfmt 通过。
-
-下一 Slice 应盘点 M8 最终 DoD 与剩余 diagnostics/UI 缺口，不得直接进入 M9。
-
-## 24. M8 Final DoD Audit — Remaining Gaps
-
-对照冻结 PLAN M8 范围与 DoD，已闭环：Critical Operation/crash matrix、Location Anomaly repair、binding recovery、Safe Patch failure handling、consistent manual/daily/pre-migration/pre-restore backup、restore/startup swap、post-restore validation/rebuild、rollback diagnostics/cleanup。
-
-仍未闭环：
-
-- Weekly Snapshot 的真实生成边界；
-- 7 Daily + 4 Weekly retention 的显式 apply（当前只有 preview）；
-- 聚合 System Health / adapter health；
-- logs 与 diagnostic export preview；
-- parse/concurrency 与 external-open failure 的统一 Recovery UX；
-- 完整 Recovery Shell；
-- M8 fault-injection、backup/restore、ambiguous relocation、crash matrix 的最终集中证据。
-
-因此 M8 尚未完成，禁止进入 M9。下一 Slice 选择只读 System Health 聚合，不同时加入 export、retention 或 UI。
--
-## 25. Latest M8 Slice - Read-only System Health Aggregation
-
-Added `system_health_snapshot` read-only IPC aggregating startup/schema state, pending or needs-recovery Critical Operations, published backup count, pending restore intent, and rollback integrity.
-
-This slice performs no repair, cleanup, export, retention mutation, or UI transition.
-
-Evidence: focused `1 passed / 0 failed`; `cargo check --workspace`; rustfmt; `git diff --check`.
-
-Next slice: diagnostic export preview only. Retention mutation and Recovery UI remain out of scope.
-
-## 26. Latest M8 Slice - Diagnostic Export Preview
-
-Added `preview_diagnostic_export` read-only contract and IPC. It declares the output directory, diagnostic sections, and privacy exclusions while guaranteeing `createsFiles: false`.
-
-The preview excludes Markdown/statement content, credentials, and absolute workspace paths. It creates no directory or export artifact.
-
-Evidence: focused `1 passed / 0 failed`; Tauri library `23 passed / 0 failed`; workspace check and formatting pass.
-
-Next slice: Weekly Snapshot generation boundary only. Retention apply and Recovery UI remain separate.
-
-## 27. Latest M8 Slice - Weekly Snapshot Boundary
-
-Added explicit `create_weekly_backup` contract and IPC. It creates a SQLite-consistent snapshot under `backups/weekly` with a published `weekly-` filename and integrity verification before publication.
-
-Retention pruning, schedule automation, and Recovery UI remain out of scope.
-
-Evidence: focused `1 passed / 0 failed`; Tauri library `23 passed / 0 failed`; workspace check and formatting pass.
-
-Next slice: weekly/daily retention apply preview and policy checks only.
-
-## 28. Latest M8 Slice - Backup Retention Preview
-
-Added `preview_backup_retention` read-only contract and IPC. It returns protected and prune-candidate paths under the frozen `7 Daily + 4 Weekly` policy without deleting files or even creating a backup directory.
-
-Evidence: focused `1 passed / 0 failed`; Tauri library `23 passed / 0 failed`; workspace check and formatting pass.
-
-Next slice: explicit, user-confirmed retention apply with exact preview paths and no broad deletion.
-
-## 29. Latest M8 Slice - Explicit Retention Apply
-
-Added `apply_backup_retention`. It recomputes the current retention preview, requires the submitted path set to exactly match current prune candidates, restricts deletion to regular `.sqlite3` files under daily/weekly backup roots, and rejects mismatches without mutation.
-
-Evidence: focused retention test passed; `cargo check --workspace`, rustfmt, and `git diff --check` pass.
-
-## 30. M9 Slice — Native Control Focus Indicator Coverage
-
-M9 has now started with one minimal accessibility hardening slice. The shared `:focus-visible`
-indicator now covers native `button`, link, text input, `textarea`, and `select` controls, preserving
-the frozen visible-focus contract without adding product capability.
-
-Changed files:
-
-- `src/app/app.css`
-- `scripts/accessibility-css.test.mjs`
-- `package.json`
-
-Verification evidence:
-
-- `npm.cmd run test:accessibility`: 1 passed / 0 failed
-- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
-- `npm.cmd run test:shells`: 6 passed / 0 failed
-- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
-- `npm.cmd run build`: passed
-- `git diff --check`: passed
-
-This slice does not enter M10 and does not add new product behavior. Remaining M9 scope includes
-keyboard flow, focus management, 200% zoom, reduced motion, contrast, async announcements,
-Review accessibility-tree isolation, security hardening, performance checks, and responsive/visual
-consistency.
-
-## 31. M9-A Slice — Reduced Motion Preference
-
-Added a `prefers-reduced-motion: reduce` media rule that disables non-essential animation and
-transition duration and restores immediate scrolling for users who request reduced motion.
-No business behavior or product capability changed.
-
-Changed files:
-
-- `src/app/app.css`
-- `scripts/accessibility-css.test.mjs`
-
-Verification evidence:
-
-- `npm.cmd run test:accessibility`: 2 passed / 0 failed
-- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
-- `npm.cmd run build`: passed
-- `git diff --check`: passed
-
-## 32. M9-A Complete — Accessibility Core Flow Hardening
-
-M9-A is complete as one consolidated stage. It now covers:
-
-- native-control visible focus indicators;
-- `prefers-reduced-motion` handling;
-- keyboard-equivalent Today reorder, including existing Alt+Arrow and move buttons;
-- Today replan dialog focus entry, Tab containment, Escape close, and focus return;
-- async Today mutation announcements for reorder, completion, replan, and suggestion acceptance;
-- Review help dialog description semantics and existing hidden-content isolation;
-- narrow-viewport fallbacks used by 200% zoom/core keyboard layouts.
-
-Final M9-A evidence:
-
-- `npm.cmd run test:accessibility`: 3 passed / 0 failed
-- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
-- `npm.cmd run test:shells`: 6 passed / 0 failed
-- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
-- `npm.cmd run build`: passed
-- `git diff --check`: passed
-
-M9-A does not add product capability and does not enter M9-B security, M9-C performance, M9-D
-visual consistency, or M10.
-
-## 33. M9-B Complete — Security and Data Boundary Hardening
-
-M9-B is complete as one consolidated stage. Tauri production and E2E configurations now use a
-restrictive CSP instead of `csp: null`, including self-only scripts, no objects, no framing, bounded
-IPC/dev connections, and explicit local asset/blob/data image and font sources. Statement rendering
-continues to use an allowlist and now trims link values before rejecting every non-HTTPS scheme;
-unsafe `javascript:`, `data:`, and similar links resolve to inert `#` targets.
-
-Verification evidence:
-
-- `npm.cmd run test:accessibility`: 4 passed / 0 failed, including CSP policy assertions
-- `npm.cmd run test:dom-shells`: 35 passed / 0 failed, including unsafe-link rendering coverage
-- `npm.cmd run test:shells`: 6 passed / 0 failed
-- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
-- `npm.cmd run build`: passed
-- `cargo check --workspace`: passed
-- `cargo test --workspace`: 188 passed / 0 failed / 2 ignored
-- `cargo fmt --all -- --check`: passed
-- `git diff --check`: passed
-
-M9-B does not enter M9-C performance, M9-D visual consistency, or M10.
-
-## 34. M9-C Complete — Reference Dataset Performance Gate
-
-M9-C is complete as one consolidated stage. Added `scripts/performance-benchmark.ts` and the
-`benchmark:performance` package script. The harness uses the frozen Reference Dataset sizes:
-2,000 Problems, 1,000 Personal Markdown documents, 300 Contests, 10,000 Review Attempts, 1,000
-Knowledge Nodes, and 20,000 WikiLinks/Relations. It measures startup projection, Today open,
-Knowledge search, Markdown section parsing, relation projection, and local route navigation using
-P95 budgets inherited from DESIGN.
-
-Latest benchmark evidence:
-
-- startup projection: P95 2.84ms / budget 2500ms
-- Today open: P95 0.23ms / budget 300ms
-- Knowledge search: P95 0.92ms / budget 150ms
-- Markdown parse: P95 0.38ms / budget 500ms
-- relation projection: P95 1.58ms / budget 300ms
-- local navigation: P95 0.58ms / budget 300ms
-
-All benchmark cases passed their budgets. Additional verification: accessibility `4/4`, DOM
-shells `35/35`, startup shells `6/6`, boundaries `5/5`, Vite/TypeScript build passed, Rust
-workspace tests `188 passed / 0 failed / 2 ignored`, rustfmt passed, and `git diff --check` passed.
-M9-D and M10 remain untouched.
-
-## 35. M9-D Complete - Visual and Responsive Consistency
-
-M9-D is complete as one consolidated stage. Shared visual tokens now cover primary, secondary,
-and danger actions; button rows and action rows have consistent spacing and responsive stacking;
-error and status messages have explicit readable surfaces; loading and empty states share panel
-geometry; Today success/unavailable states have distinct surfaces; and modal/panel spacing is
-normalized. Narrow layouts at 760px and 560px keep actions and fact forms usable without
-horizontal overflow.
-
-Added `scripts/visual-consistency.test.mjs` and the `test:visual-consistency` package script.
-The static gate checks the shared class vocabulary, critical action contrast, and narrow-viewport
-fallbacks.
-
-Final M9 evidence:
-
-- `npm.cmd run test:visual-consistency`: 6 passed / 0 failed
-- `npm.cmd run test:accessibility`: 4 passed / 0 failed
-- `npm.cmd run test:dom-shells`: 35 passed / 0 failed
-- `npm.cmd run test:shells`: 6 passed / 0 failed
-- `npm.cmd run check:boundaries`: 5 passed / boundary check passed
-- `npm.cmd run build`: passed
-- `npm.cmd run benchmark:performance`: all six P95 budgets passed
-- `cargo check --workspace`: passed
-- `cargo test --workspace`: 188 passed / 0 failed / 2 ignored
-- `cargo fmt --all -- --check`: passed
-- `git diff --check`: passed
-
-M9-A, M9-B, M9-C, and M9-D are complete. M9 did not modify frozen SPEC/DESIGN/PLAN and did not
-enter M10. The performance harness is a deterministic Node reference-data benchmark, not a
-release Tauri cold-start/RAM measurement. A final human visual pass remains useful for real-device
-rendering, but no automated gate is currently failing.
-
-## 36. M9 Manual Acceptance and Commit Handoff
-
-Manual acceptance was run in the real Tauri desktop window, not the browser-only Vite shell.
-Accepted surfaces: Today initial budget and empty plan, Today replan dialog, Knowledge empty/search
-layout, Contest shelf and detail, Contest Facts rows, AI Analysis form, delete consequence preview,
-and Problem Detail. Keyboard requirements for the Today dialog were included in the acceptance
-steps. The user marked the M9 result qualified.
-
-Three visual defects found during acceptance were fixed without changing business behavior:
-
-- programmatically focused route headings now use a content-sized focus ring;
-- semantic definition lists retain their two-column layout while item lists use full width;
-- sanitized Codeforces statement metadata and sections have readable hierarchy and a narrow-screen
-  fallback.
-
-The statement hierarchy fix is covered by automation, but its second manual visual recheck was
-explicitly skipped by the user. Latest visual consistency evidence is `6 passed / 0 failed`;
-TypeScript/Vite build and `git diff --check` passed after the fixes.
-
-Commit status at handoff: all current M9 changes, including these maintained handoff documents,
-were committed on `main` with subject `build: complete M9 hardening`. The commit was created only
-after explicit user authorization and a successful `git diff --cached --check`. The next window
-must still rerun branch, HEAD, status, log, remote, and `git diff --check` instead of trusting this
-snapshot. Do not push or tag without separate explicit authorization, and do not enter M10
-automatically.
+在人工门禁通过前，不进入新功能里程碑，不 tag，不 push，不宣称 Technical MVP Accepted。

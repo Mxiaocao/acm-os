@@ -11,6 +11,8 @@
     "test:accessibility": "node --test scripts/accessibility-css.test.mjs",
     "test:visual-consistency": "node --test scripts/visual-consistency.test.mjs",
     "benchmark:performance": "node --experimental-strip-types scripts/performance-benchmark.ts",
+    "benchmark:release-desktop": "node scripts/release-desktop-benchmark.mjs",
+    "test:release-network": "cargo test --manifest-path src-tauri/Cargo.toml -p acm-os-infrastructure real_codeforces_ -- --ignored --test-threads=1",
     "test:desktop-e2e": "node scripts/desktop-e2e.mjs",
     "tauri": "tauri",
     "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs"

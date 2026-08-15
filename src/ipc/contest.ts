@@ -423,6 +423,10 @@ export function openPersonalNoteInObsidian(contestId: number, index: string): Pr
   return invoke<void>("open_personal_note_in_obsidian", { input: { contestId, index } });
 }
 
+export function openOriginalOj(url: string): Promise<void> {
+  return invoke<void>("open_original_oj", { input: { url } });
+}
+
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {
   return invoke<LocalStatementAssetDto[]>("statement_assets", { input: { contestId, index } });
 }

@@ -1694,6 +1694,28 @@ pub async fn open_personal_note_in_obsidian(
         .map_err(|_| "obsidian_open_failed")
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct OpenOriginalOjInput {
+    pub url: String,
+}
+
+#[tauri::command]
+pub fn open_original_oj(
+    app: tauri::AppHandle,
+    input: OpenOriginalOjInput,
+) -> Result<(), &'static str> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let url = url::Url::parse(input.url.trim()).map_err(|_| "unsafe_external_url")?;
+    let host = url.host_str().ok_or("unsafe_external_url")?;
+    if url.scheme() != "https" || !matches!(host, "codeforces.com" | "www.codeforces.com") {
+        return Err("unsafe_external_url");
+    }
+    app.opener()
+        .open_url(url.as_str(), None::<&str>)
+        .map_err(|_| "external_open_failed")
+}
+
 #[tauri::command]
 pub async fn open_knowledge_in_obsidian(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,

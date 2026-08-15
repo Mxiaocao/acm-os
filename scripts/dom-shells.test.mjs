@@ -744,6 +744,7 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
   let startCalls = 0;
   let focusCalls = 0;
   let drawerCalls = 0;
+  const openOjCalls = [];
   const revealCalls = [];
   const completeCalls = [];
   const waitingLifecycle = {
@@ -792,6 +793,10 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
         statementSanitizedHtml: "<div class=\"problem-statement\"><p>SAFE STATEMENT</p></div>",
         statementAssets: [],
       };
+    }
+    if (command === "open_original_oj") {
+      openOjCalls.push(args.input.url);
+      return undefined;
     }
     if (command === "review_help_drawer") {
       drawerCalls += 1;
@@ -861,6 +866,11 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     assert.match(view.document.body.textContent, /Open original OJ/);
     assert.doesNotMatch(view.document.body.textContent, /SECRET SOLUTION/);
     assert.doesNotMatch(view.document.body.textContent, /Obsidian/);
+    const originalOj = [...view.document.querySelectorAll("a")]
+      .find((link) => link.textContent === "Open original OJ");
+    await act(async () => originalOj.click());
+    await settle();
+    assert.deepEqual(openOjCalls, ["https://codeforces.com/contest/1979/problem/A"]);
     const openHelp = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "Open controlled help");
     await act(async () => openHelp.click());

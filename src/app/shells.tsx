@@ -56,6 +56,7 @@ import {
   previewDeleteContest,
   deleteContest,
   openPersonalNoteInObsidian,
+  openOriginalOj,
   rebindPersonalNote,
   revealReviewHelp,
   startOrResumeReview,
@@ -375,6 +376,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
   const [terminalHistory, setTerminalHistory] = useState<ReviewHistoryItemDto | null>(null);
   const [completion, setCompletion] = useState<CompleteReviewInputDto>(() => emptyReviewCompletion(attemptId));
   const [completionError, setCompletionError] = useState<string | null>(null);
+  const [ojOpenError, setOjOpenError] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
   const [voidOpen, setVoidOpen] = useState(false);
   const [voidReason, setVoidReason] = useState("");
@@ -474,6 +476,17 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
       .catch(() => setHelpError("Help availability could not be read. No help usage was recorded."));
   }
 
+  function openOriginalOjFromReview(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (!focus) return;
+    setOjOpenError(null);
+    openOriginalOj(focus.sourceUrl).catch((error: unknown) => {
+      setOjOpenError(String(error).includes("unsafe_external_url")
+        ? "The original OJ link was rejected because it is not an HTTPS Codeforces URL."
+        : "The original OJ could not be opened. The Review Attempt remains unchanged.");
+    });
+  }
+
   function closeHelpDrawer() {
     setHelpOpen(false);
     setPendingHelp(null);
@@ -569,7 +582,8 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
               {reviewAttemptTypeLabel(focus.attempt.attemptType)} · scheduled {focus.attempt.scheduledDueLocalDate}
               {focus.attempt.startedEarly ? " · started early" : ""}
             </p>
-            <a href={focus.sourceUrl} rel="noreferrer" target="_blank">Open original OJ</a>
+            <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">Open original OJ</a>
+            {ojOpenError ? <p role="alert">{ojOpenError}</p> : null}
             <button className="secondary-action" onClick={openHelpDrawer} ref={helpButtonRef} type="button">Open controlled help</button>
             <p className="safe-note">Old notes, hints, solutions, Contest history, and Review history are not loaded into this Focus view.</p>
           </section>

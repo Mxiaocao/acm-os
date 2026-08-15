@@ -76,6 +76,7 @@ function launchApp(phase) {
       ACM_OS_E2E_ROOT: appData,
       ACM_OS_E2E_DATE_FILE: dateFile,
       ACM_OS_E2E_PHASE: phase,
+      WEBVIEW2_USER_DATA_FOLDER: path.join(appData, "webview2"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -91,14 +92,7 @@ async function stopApp(child) {
   if (exitedNaturally || child.exitCode !== null) return;
 
   if (process.platform === "win32") {
-    child.kill();
-    const directExit = child.exitCode !== null || await Promise.race([
-      exit,
-      delay(2_000).then(() => false),
-    ]);
-    if (!directExit && child.exitCode === null) {
-      await run("taskkill.exe", ["/PID", String(pid), "/T", "/F"], repo);
-    }
+    await runAllowFailure("taskkill.exe", ["/PID", String(pid), "/T", "/F"], repo);
   } else {
     child.kill();
   }
@@ -123,6 +117,13 @@ async function run(command, args, cwd) {
   });
 }
 
+async function runAllowFailure(command, args, cwd) {
+  await new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, stdio: "ignore" });
+    child.on("error", () => resolve());
+    child.on("exit", () => resolve());
+  });
+}
 async function waitForResult(file, processHandle, timeout) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {

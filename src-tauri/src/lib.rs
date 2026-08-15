@@ -90,6 +90,7 @@ pub fn run() {
             ipc::rebind_personal_note,
             ipc::confirm_personal_note_deleted,
             ipc::open_personal_note_in_obsidian,
+            ipc::open_original_oj,
             ipc::knowledge_index,
             ipc::knowledge_relocation_candidates,
             ipc::rebind_knowledge_node,
