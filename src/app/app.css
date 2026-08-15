@@ -41,6 +41,7 @@ html { min-width: 320px; min-height: 100%; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 
 button, input, textarea, select { font: inherit; }
+input, textarea, select { color-scheme: light; }
 
 button {
   border: 1px solid var(--line-strong);
@@ -298,7 +299,12 @@ ul.detail-list li {
 
 .app-sidebar .system-caption { margin: 16px 11px 0; }
 
-.normal-content { width: min(100%, 1080px); padding: 64px clamp(32px, 6vw, 84px); }
+.normal-content {
+  width: 100%;
+  max-width: 1280px;
+  justify-self: center;
+  padding: 64px clamp(32px, 5vw, 72px);
+}
 
 .page-header { margin-bottom: 34px; }
 
@@ -316,7 +322,121 @@ ul.detail-list li {
 
 .empty-state { max-width: 650px; box-shadow: none; }
 
-.content-panel { max-width: 820px; }
+.content-panel { width: 100%; max-width: none; }
+
+.contest-import-form,
+.manual-import-panel {
+  width: 100%;
+  max-width: none;
+}
+
+.contest-import-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 26px 28px;
+}
+
+.contest-import-form label,
+.manual-import-form label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ink-muted);
+  font-size: .84rem;
+  font-weight: 720;
+}
+
+.contest-import-form input,
+.manual-import-form input,
+.manual-import-form textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: #292326;
+  box-shadow: inset 0 1px 2px rgb(59 38 46 / 5%);
+}
+
+.contest-import-form input::placeholder,
+.manual-import-form input::placeholder,
+.manual-import-form textarea::placeholder { color: #918489; }
+
+.contest-import-form .system-caption { grid-column: 1 / -1; margin: 2px 0 0; }
+
+.manual-import-panel {
+  padding: 0;
+  overflow: clip;
+}
+
+.manual-import-panel > summary {
+  padding: 22px 28px;
+  color: #30272a;
+  font-size: 1rem;
+  font-weight: 760;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.manual-import-panel[open] > summary {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+
+.manual-import-form {
+  display: grid;
+  grid-template-columns: minmax(120px, .55fr) minmax(220px, 1.45fr) minmax(170px, .8fr);
+  gap: 18px;
+  padding: 26px 28px 28px;
+}
+
+.manual-import-form > p,
+.manual-import-form > fieldset,
+.manual-import-form > .action-row { grid-column: 1 / -1; }
+
+.manual-import-form > p {
+  margin-bottom: 2px;
+  color: var(--ink-muted);
+  font-size: .95rem;
+}
+
+.manual-problem-card {
+  display: grid;
+  grid-template-columns: minmax(90px, .4fr) minmax(220px, 1fr) minmax(260px, 1.25fr);
+  gap: 16px;
+  min-width: 0;
+  margin: 4px 0 0;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.manual-problem-card legend {
+  padding: 0 8px;
+  color: var(--accent);
+  font-size: .84rem;
+  font-weight: 800;
+}
+
+.manual-problem-card > label:last-child { grid-column: 1 / -1; }
+
+.manual-problem-card textarea {
+  min-height: 190px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.manual-import-form > .action-row {
+  justify-content: flex-end;
+  margin-top: 2px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
 
 .today-toolbar { display: grid; gap: 18px; padding-block: 18px; border-block: 1px solid var(--line); }
 .today-toolbar dl { display: flex; flex-wrap: wrap; gap: 12px 28px; margin: 0; }
@@ -462,8 +582,37 @@ ul.detail-list li {
 }
 .contest-analysis .action-row { margin-top: 12px; }
 .contest-analysis pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.statement-view { max-width: 960px; overflow: auto; }
+.statement-view { width: 100%; max-width: none; overflow: auto; }
+.review-stage.statement-view {
+  place-content: initial;
+  min-height: 0;
+  text-align: left;
+}
 .statement-view .problem-statement { line-height: 1.65; }
+.statement-view .problem-statement {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+.statement-view .problem-statement p,
+.statement-view .problem-statement li,
+.statement-view .problem-statement .section-title,
+.statement-view .problem-statement .header {
+  text-align: justify;
+  text-justify: inter-ideograph;
+}
+.statement-view .problem-statement .title,
+.statement-view .problem-statement .section-title,
+.statement-view .problem-statement li,
+.statement-view .problem-statement .header,
+.statement-view .problem-statement .property-title {
+  text-align: left;
+}
+.statement-view .problem-statement ul,
+.statement-view .problem-statement ol {
+  padding-left: 28px;
+  text-align: left;
+}
 .statement-view .problem-statement .header {
   margin-bottom: 24px;
   padding-bottom: 16px;
@@ -516,6 +665,11 @@ ul.detail-list li {
 }
 
 .review-stage p { max-width: 64ch; color: var(--ink-muted); }
+.review-stage.statement-view p,
+.review-stage.statement-view li {
+  width: 100%;
+  max-width: none;
+}
 
 .review-help-drawer {
   position: fixed;
@@ -560,6 +714,9 @@ ul.detail-list li {
 .content-panel > :last-child,
 .empty-state > :last-child { margin-bottom: 0; }
 
+.statement-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.statement-heading-row h2 { margin: 0; }
+
 @media (max-width: 760px) {
   .normal-shell { grid-template-columns: 1fr; }
   .app-sidebar { position: static; height: auto; padding: 18px; }
@@ -590,6 +747,12 @@ ul.detail-list li {
   .backup-inventory span { text-align: left; }
   .contest-facts-list li { grid-template-columns: 1fr; align-items: stretch; }
   .contest-facts-list li > button { justify-self: start; }
+  .contest-import-form { grid-template-columns: 1fr; }
+  .manual-import-form { grid-template-columns: 1fr; padding: 22px 18px 24px; }
+  .manual-import-panel > summary { padding: 18px; }
+  .manual-problem-card { grid-template-columns: 1fr; padding: 18px; }
+  .manual-problem-card > label:last-child { grid-column: auto; }
+  .manual-import-form > .action-row { align-items: stretch; }
   .statement-view .problem-statement .time-limit,
   .statement-view .problem-statement .memory-limit,
   .statement-view .problem-statement .input-file,

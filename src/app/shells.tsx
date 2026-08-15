@@ -127,6 +127,7 @@ import {
   type ManualBackupPreviewDto,
 } from "../ipc/workspace";
 import type { AppRoute, NormalPage } from "./routing";
+import { displayProblemTitle } from "./translation";
 
 type Navigate = (pathname: string, options?: { replace?: boolean }) => void;
 type ConfiguredWorkspace = Extract<WorkspaceStatusDto, { state: "configured" }>;
@@ -142,8 +143,8 @@ export function LoadingShell() {
   return (
     <main aria-busy="true" className="gate-shell gate-shell--loading">
       <Brand />
-      <p className="eyebrow">Startup gate</p>
-      <h1 ref={headingRef} tabIndex={-1}>Checking system facts</h1>
+      <p className="eyebrow">启动检查</p>
+      <h1 ref={headingRef} tabIndex={-1}>正在检查系统事实</h1>
       <p aria-live="polite">Validating the local database and workspace configuration…</p>
     </main>
   );
@@ -175,26 +176,26 @@ export function RecoveryShell({
   return (
     <main className="gate-shell gate-shell--recovery">
       <Brand />
-      <p className="eyebrow">Recovery shell</p>
+      <p className="eyebrow">恢复模式</p>
       <h1 ref={headingRef} tabIndex={-1}>Normal startup is blocked</h1>
       <p>
         ACM-OS could not prove that System Facts are safe to use. Normal navigation stays hidden
         so the application cannot continue in a partially valid state.
       </p>
       <section aria-labelledby="recovery-detail" className="gate-panel" role="alert">
-        <h2 id="recovery-detail">Diagnostic status</h2>
+        <h2 id="recovery-detail">诊断状态</h2>
         <dl className="detail-list">
-          <dt>Reason</dt>
+          <dt>原因</dt>
           <dd>{reason}</dd>
           {supportedSchemaVersion !== null ? (
             <>
-              <dt>Supported schema</dt>
+              <dt>支持的数据库结构版本</dt>
               <dd>{supportedSchemaVersion}</dd>
             </>
           ) : null}
           {foundSchemaVersion !== null ? (
             <>
-              <dt>Found schema</dt>
+              <dt>检测到的数据库结构版本</dt>
               <dd>{foundSchemaVersion}</dd>
             </>
           ) : null}
@@ -202,10 +203,10 @@ export function RecoveryShell({
       </section>
       <p className="safe-note">No automatic repair or destructive action is performed in B0.4.</p>
       <section aria-labelledby="recovery-tools" className="gate-panel">
-        <h2 id="recovery-tools">Recovery diagnostics</h2>
-        <p>Generate a privacy-filtered JSON diagnostic package for manual inspection or support.</p>
+        <h2 id="recovery-tools">恢复诊断</h2>
+        <p>生成经过隐私过滤的 JSON 诊断包，供人工检查或技术支持使用。</p>
         <div className="action-row">
-          <button className="secondary-action" onClick={inspectDiagnostics} type="button">Preview export</button>
+          <button className="secondary-action" onClick={inspectDiagnostics} type="button">预览导出</button>
           <button className="primary-action" disabled={exporting} onClick={exportDiagnostics} type="button">{exporting ? "Exporting…" : "Create diagnostic export"}</button>
         </div>
         {diagnosticPreview ? <p className="system-caption">Output directory: {diagnosticPreview.outputDirectory}; sections: {diagnosticPreview.sections.length}</p> : null}
@@ -556,11 +557,11 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
     <main className="review-shell" ref={mainRef} tabIndex={-1}>
       <header className="review-header">
         <div>
-          <p className="eyebrow">M4 · Review Focus</p>
-          <h1>{focus ? `${focus.attempt.index}. ${focus.title}` : "Isolated review workspace"}</h1>
+          <p className="eyebrow">M4 · 复习专注</p>
+          <h1>{focus ? `${focus.attempt.index}. ${displayProblemTitle(focus.attempt.index, focus.title)}` : "Isolated review workspace"}</h1>
         </div>
         <button className="secondary-action" onClick={() => navigate("/today")} type="button">
-          Return to Today
+          返回今日计划
         </button>
       </header>
       {completedReview ? (
@@ -569,18 +570,18 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
         <ReviewHistoryEvidenceCard item={terminalHistory} />
       ) : failed ? (
         <section className="review-stage" role="alert">
-          <h2>Review Attempt is unavailable</h2>
-          <p>No Review result or learning state was changed.</p>
+          <h2>复习记录不可用</h2>
+          <p>复习结果和学习状态均未改变。</p>
         </section>
       ) : !focus || renderedHtml === null ? (
         <section aria-busy="true" className="review-stage"><p>Loading isolated statement…</p></section>
       ) : (
         <>
           <section aria-labelledby="review-attempt-metadata" className="review-stage">
-            <h2 id="review-attempt-metadata">Cold-start attempt</h2>
+            <h2 id="review-attempt-metadata">首次冷启动复习</h2>
             <p>
-              {reviewAttemptTypeLabel(focus.attempt.attemptType)} · scheduled {focus.attempt.scheduledDueLocalDate}
-              {focus.attempt.startedEarly ? " · started early" : ""}
+              {reviewAttemptTypeLabel(focus.attempt.attemptType)} · 计划日期 {focus.attempt.scheduledDueLocalDate}
+              {focus.attempt.startedEarly ? " · 已提前开始" : ""}
             </p>
             <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">Open original OJ</a>
             {ojOpenError ? <p role="alert">{ojOpenError}</p> : null}
@@ -588,17 +589,17 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
             <p className="safe-note">Old notes, hints, solutions, Contest history, and Review history are not loaded into this Focus view.</p>
           </section>
           <section className="review-stage statement-view" aria-labelledby="review-statement-heading">
-            <h2 id="review-statement-heading">Statement snapshot</h2>
+            <div className="statement-heading-row"><h2 id="review-statement-heading">题面快照</h2></div>
             <div dangerouslySetInnerHTML={{ __html: renderedHtml }} />
           </section>
           <form className="review-stage review-facts-form" onSubmit={submitCompletion}>
             <div>
-              <p className="eyebrow">Facts, not a self-selected grade</p>
-              <h2>Finish this Review</h2>
+              <p className="eyebrow">依据事实，而不是自选评分</p>
+              <h2>完成本次复习</h2>
               <p>The system derives Mastered, Partial, or Not passed from these facts and recorded help.</p>
             </div>
             <fieldset>
-              <legend>Submission facts</legend>
+              <legend>提交事实</legend>
               <label><input checked={completion.finalAc} onChange={(event) => setCompletion({ ...completion, finalAc: event.target.checked })} type="checkbox" /> Final result was AC</label>
               <label>First submission result<select value={completion.firstSubmissionResult} onChange={(event) => { const result = event.target.value as SubmissionResultDto; setCompletion({ ...completion, firstSubmissionResult: result, firstSubmissionOther: result === "other" ? completion.firstSubmissionOther : null }); }}>{submissionResultOptions()}</select></label>
               {completion.firstSubmissionResult === "other" ? <label>First result detail<input maxLength={120} onChange={(event) => setCompletion({ ...completion, firstSubmissionOther: event.target.value })} required value={completion.firstSubmissionOther ?? ""} /></label> : null}
@@ -607,14 +608,14 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
               <label>Total submissions<input min="1" onChange={(event) => setCompletion({ ...completion, totalSubmissions: Number(event.target.value) })} required type="number" value={completion.totalSubmissions} /></label>
             </fieldset>
             <fieldset>
-              <legend>Independence</legend>
+              <legend>独立性</legend>
               <label><input checked={completion.ideaIndependent} onChange={(event) => setCompletion({ ...completion, ideaIndependent: event.target.checked })} type="checkbox" /> Idea was independent</label>
               <label><input checked={completion.implementationIndependent} onChange={(event) => setCompletion({ ...completion, implementationIndependent: event.target.checked })} type="checkbox" /> Implementation was independent</label>
               <label>Debug<select value={completion.debugIndependence} onChange={(event) => setCompletion({ ...completion, debugIndependence: event.target.value as CompleteReviewInputDto["debugIndependence"] })}><option value="notNeeded">No debug needed</option><option value="independent">Debugged independently</option><option value="usedSolvingHelp">Used problem-solving help to debug</option></select></label>
               <label>Unrecorded external help<select value={completion.externalHelp} onChange={(event) => setCompletion({ ...completion, externalHelp: event.target.value as CompleteReviewInputDto["externalHelp"] })}><option value="none">None</option><option value="solvingHint">Problem-solving hint</option><option value="fullSolution">Full solution</option></select></label>
             </fieldset>
             <fieldset>
-              <legend>Failure reasons</legend>
+              <legend>失败原因</legend>
               <p>Select at least one when the derived result may be Partial or Not passed.</p>
               {reviewFailureReasonOptions.map(([code, label]) => <label key={code}><input checked={completion.failureReasons.some((reason) => reason.code === code)} onChange={(event) => setCompletion({ ...completion, failureReasons: event.target.checked ? [...completion.failureReasons, { code, otherText: null }] : completion.failureReasons.filter((reason) => reason.code !== code) })} type="checkbox" /> {label}</label>)}
               {completion.failureReasons.some((reason) => reason.code === "other") ? <label>Other reason<input maxLength={500} onChange={(event) => setCompletion({ ...completion, failureReasons: completion.failureReasons.map((reason) => reason.code === "other" ? { ...reason, otherText: event.target.value } : reason) })} required value={completion.failureReasons.find((reason) => reason.code === "other")?.otherText ?? ""} /></label> : null}
@@ -692,11 +693,11 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
       <>
         <PageHeader eyebrow="Tool" headingRef={headingRef} title="Settings" />
         <section aria-labelledby="workspace-settings" className="content-panel">
-          <h2 id="workspace-settings">Workspace</h2>
+          <h2 id="workspace-settings">工作区</h2>
           <dl className="detail-list detail-list--paths">
-            <dt>Active Vault</dt><dd>{workspace.activeVaultPath}</dd>
-            <dt>Problem Notes Root</dt><dd>{workspace.problemRootPath}</dd>
-            <dt>Knowledge Root</dt><dd>{workspace.knowledgeRootPath}</dd>
+             <dt>当前 Vault</dt><dd>{workspace.activeVaultPath}</dd>
+             <dt>题目笔记目录</dt><dd>{workspace.problemRootPath}</dd>
+             <dt>知识库目录</dt><dd>{workspace.knowledgeRootPath}</dd>
           </dl>
           <p className="safe-note">Changing the Active Vault requires a future preview-and-confirm flow.</p>
          </section>
@@ -736,10 +737,10 @@ function ManualBackupSettings() {
   };
   return (
     <section aria-labelledby="manual-backup" className="content-panel">
-      <h2 id="manual-backup">System Facts backup</h2>
-      <p>Creates a SQLite-consistent snapshot. Markdown files are not copied or changed.</p>
-      <button className="secondary-action" onClick={() => void prepare()} type="button">Preview manual backup</button>
-      <button className="secondary-action" onClick={() => void inspect()} type="button">Inspect backup inventory</button>
+       <h2 id="manual-backup">系统事实备份</h2>
+       <p>创建与 SQLite 一致的快照，不会复制或修改 Markdown 文件。</p>
+       <button className="secondary-action" onClick={() => void prepare()} type="button">Preview manual backup</button>
+       <button className="secondary-action" onClick={() => void inspect()} type="button">Inspect backup inventory</button>
       {preview ? <div role="alertdialog">
         <p>Schema {preview.schemaVersion}; destination <code>{preview.backupDirectory}</code>; filename prefix <code>{preview.filenamePrefix}</code>.</p>
         <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "Creating backup…" : "Create backup"}</button>
@@ -747,7 +748,7 @@ function ManualBackupSettings() {
       {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
       {inventory ? <div>
         <p>Retention preview: keep {inventory.dailyKeep} daily and {inventory.weeklyKeep} weekly snapshots. Manual and migration backups are protected.</p>
-        {inventory.entries.length === 0 ? <p>No published backups found.</p> : <ul className="backup-inventory">
+         {inventory.entries.length === 0 ? <p>没有已发布的备份。</p> : <ul className="backup-inventory">
           {inventory.entries.map((entry) => <li key={entry.path}>
             <code>{entry.path}</code><span>{entry.category} · {entry.integrityVerified ? "integrity verified" : "integrity failed"} · {entry.retention}</span>
           </li>)}
@@ -900,35 +901,35 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
 
   return (
     <>
-      <PageHeader eyebrow="Markdown authority" headingRef={headingRef} title="Knowledge" />
+      <PageHeader eyebrow="Markdown 权威来源" headingRef={headingRef} title="知识库" />
       <section aria-labelledby="knowledge-index-title" className="content-panel knowledge-index">
         <div className="knowledge-toolbar">
-          <div><h2 id="knowledge-index-title">Knowledge index</h2><p>Only Markdown files currently found in Knowledge Root appear here.</p></div>
-          <button className="secondary-action" disabled={loading} onClick={() => void refresh(query)} type="button">{loading ? "Re-indexing..." : "Re-index"}</button>
+          <div><h2 id="knowledge-index-title">知识库索引</h2><p>这里只显示知识库目录中当前找到的 Markdown 文件。</p></div>
+          <button className="secondary-action" disabled={loading} onClick={() => void refresh(query)} type="button">{loading ? "正在重新索引…" : "重新索引"}</button>
         </div>
         <form className="knowledge-search" onSubmit={(event) => { event.preventDefault(); void refresh(query); }}>
-          <label htmlFor="knowledge-search">Search name or path</label>
-          <div><input id="knowledge-search" onChange={(event) => setQuery(event.currentTarget.value)} value={query} /><button type="submit">Search</button></div>
+          <label htmlFor="knowledge-search">搜索名称或路径</label>
+          <div><input id="knowledge-search" onChange={(event) => setQuery(event.currentTarget.value)} value={query} /><button type="submit">搜索</button></div>
         </form>
         {error ? <p aria-live="polite" className="error-copy">{error}</p> : null}
-        {!loading && !error && nodes.length === 0 ? <p className="safe-note">No matching Markdown files were discovered.</p> : null}
+        {!loading && !error && nodes.length === 0 ? <p className="safe-note">没有找到匹配的 Markdown 文件。</p> : null}
         <ul className="knowledge-node-list">
           {nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void openDetail(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}
         </ul>
         {anomalies.length > 0 ? (
           <div className="recovery-actions">
-            <p className="error-copy">{anomalies.length} bound Knowledge node(s) have a location anomaly and require recovery.</p>
+            <p className="error-copy">有 {anomalies.length} 个已绑定的知识节点位置异常，需要恢复。</p>
             <ul className="knowledge-node-list">
               {anomalies.map((node) => (
                 <li key={node.knowledgeNodeId}>
                   <strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span>
-                  <button className="secondary-action" onClick={() => void findKnowledgeRelocationCandidates(node.knowledgeNodeId)} type="button">Find possible locations</button>
+                  <button className="secondary-action" onClick={() => void findKnowledgeRelocationCandidates(node.knowledgeNodeId)} type="button">查找可能的位置</button>
                   {relocationCandidates[node.knowledgeNodeId] ? (
                     <ul>
                       {relocationCandidates[node.knowledgeNodeId].map((candidate) => (
                         <li key={candidate.vaultRelativePath}>
-                          <code>{candidate.vaultRelativePath}</code>{candidate.occupied ? <span>Already bound to another Primary Object</span> : null}
-                          <button disabled={candidate.occupied || repairingNodeId !== null} onClick={() => void confirmKnowledgeRelocation(node.knowledgeNodeId, candidate.vaultRelativePath)} type="button">Use this Markdown</button>
+                          <code>{candidate.vaultRelativePath}</code>{candidate.occupied ? <span>已绑定到其他主对象</span> : null}
+                          <button disabled={candidate.occupied || repairingNodeId !== null} onClick={() => void confirmKnowledgeRelocation(node.knowledgeNodeId, candidate.vaultRelativePath)} type="button">使用此 Markdown</button>
                         </li>
                       ))}
                     </ul>
@@ -950,14 +951,14 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
         ) : null}
         {identityConflicts.length > 0 ? (
           <div className="recovery-actions">
-            <p className="error-copy">A Markdown name matches a previously deleted Knowledge Node. Identity was not chosen automatically.</p>
+            <p className="error-copy">某个 Markdown 名称与之前删除的知识节点相同，系统没有自动猜测其身份。</p>
             <ul className="knowledge-node-list">
               {identityConflicts.map((conflict) => (
                 <li key={`${conflict.historicalKnowledgeNodeId}:${conflict.candidateVaultRelativePath}`}>
                   <strong>{conflict.displayName}</strong><span>{conflict.candidateVaultRelativePath}</span>
-                  <p>Restore keeps the historical identity and understanding. Either choice rebuilds current relations only from this Markdown.</p>
-                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, true)} type="button">Restore old Knowledge Node</button>
-                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, false)} type="button">Create new Knowledge Node</button>
+                  <p>恢复旧节点会保留历史身份和理解状态；无论选择哪一种，当前关系都只会根据这份 Markdown 重新建立。</p>
+                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, true)} type="button">恢复旧知识节点</button>
+                  <button disabled={resolvingConflict} onClick={() => void resolveIdentityConflict(conflict, false)} type="button">创建新知识节点</button>
                 </li>
               ))}
             </ul>
@@ -966,17 +967,17 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
       </section>
       {detail ? (
         <section aria-labelledby="knowledge-detail-title" className="content-panel knowledge-detail">
-          <div className="knowledge-toolbar"><div><p className="eyebrow">Fresh Markdown detail</p><h2 id="knowledge-detail-title">{detail.node.displayName}</h2><p><code>{detail.node.vaultRelativePath}</code></p></div><button className="secondary-action" onClick={() => void openKnowledgeInObsidian(detail.node.knowledgeNodeId).catch(() => setMessage("Obsidian could not open this file."))} type="button">Open in Obsidian</button></div>
+          <div className="knowledge-toolbar"><div><p className="eyebrow">最新 Markdown 详情</p><h2 id="knowledge-detail-title">{detail.node.displayName}</h2><p><code>{detail.node.vaultRelativePath}</code></p></div><button className="secondary-action" onClick={() => void openKnowledgeInObsidian(detail.node.knowledgeNodeId).catch(() => setMessage("Obsidian 无法打开此文件。"))} type="button">在 Obsidian 中打开</button></div>
           <div className="knowledge-understanding">
-            <label>Current understanding<select aria-label="Current understanding" onChange={(event) => setSelectedLevel(event.currentTarget.value as KnowledgeUnderstandingLevel)} value={selectedLevel}>{knowledgeLevels.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <button disabled={saving} onClick={() => void confirmUnderstanding()} type="button">{saving ? "Saving..." : "Confirm status"}</button>
-            {detail.understanding ? <p>Historical highest: <strong>{knowledgeLevelLabel(detail.understanding.historicalHighest)}</strong> · first reached {detail.understanding.firstReachedHighestOn}</p> : <p>No user-confirmed status yet.</p>}
-            {reevaluation?.shouldSuggest ? <p aria-live="polite" className="safe-note">Consider re-evaluating this Knowledge status: {reevaluation.qualifyingProblemCount} distinct related Problems gained new 真会 Review Evidence. Your current status was not changed.</p> : null}
+            <label>当前理解程度<select aria-label="当前理解程度" onChange={(event) => setSelectedLevel(event.currentTarget.value as KnowledgeUnderstandingLevel)} value={selectedLevel}>{knowledgeLevels.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <button disabled={saving} onClick={() => void confirmUnderstanding()} type="button">{saving ? "正在保存…" : "确认状态"}</button>
+            {detail.understanding ? <p>历史最高：<strong>{knowledgeLevelLabel(detail.understanding.historicalHighest)}</strong> · 首次达到 {detail.understanding.firstReachedHighestOn}</p> : <p>尚未有用户确认的状态。</p>}
+            {reevaluation?.shouldSuggest ? <p aria-live="polite" className="safe-note">建议重新评估此知识状态：{reevaluation.qualifyingProblemCount} 道相关题目获得了新的“真会”复习证据。当前状态没有改变。</p> : null}
             {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
           </div>
-          <KnowledgeNeighborList heading="Outgoing knowledge" nodes={detail.outgoing} onOpen={openDetail} />
-          <KnowledgeNeighborList heading="Incoming knowledge" nodes={detail.incoming} onOpen={openDetail} />
-          <div><h3>Related problems</h3>{detail.relatedProblems.length === 0 ? <p>None.</p> : <ul>{detail.relatedProblems.map((problem) => <li key={problem.problemId}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.problemIndex}`)} type="button"><strong>{problem.contestId}{problem.problemIndex} · {problem.title}</strong></button></li>)}</ul>}</div>
+          <KnowledgeNeighborList heading="指向的知识" nodes={detail.outgoing} onOpen={openDetail} />
+          <KnowledgeNeighborList heading="引用此知识" nodes={detail.incoming} onOpen={openDetail} />
+          <div><h3>相关题目</h3>{detail.relatedProblems.length === 0 ? <p>暂无。</p> : <ul>{detail.relatedProblems.map((problem) => <li key={problem.problemId}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.problemIndex}`)} type="button"><strong>{problem.contestId}{problem.problemIndex} · {problem.title}</strong></button></li>)}</ul>}</div>
         </section>
       ) : null}
     </>
@@ -984,7 +985,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
 }
 
 function KnowledgeNeighborList({ heading, nodes, onOpen }: { heading: string; nodes: KnowledgeNodeDto[]; onOpen: (node: KnowledgeNodeDto) => Promise<void> }) {
-  return <div><h3>{heading}</h3>{nodes.length === 0 ? <p>None.</p> : <ul>{nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void onOpen(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}</ul>}</div>;
+  return <div><h3>{heading}</h3>{nodes.length === 0 ? <p>暂无。</p> : <ul>{nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void onOpen(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}</ul>}</div>;
 }
 
 const weekBudgetFields: Array<[keyof WeeklyAcmBudgetDto, string]> = [
@@ -1227,10 +1228,10 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
       {snapshot.entries.length === 0 ? <section className="empty-state"><h2>No tasks fit this budget</h2><p>Only complete 30 or 60 minute tasks are scheduled.</p></section> :
         <ol className="today-list">{snapshot.entries.map((entry, index) => <li className={`today-entry today-entry--${entry.status}`} data-entry-id={entry.entryId} key={entry.entryId} onKeyDown={(event) => { if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); void move(index, -1); } if (event.altKey && event.key === "ArrowDown") { event.preventDefault(); void move(index, 1); } }} tabIndex={0}>
           <div className="today-entry__order"><button aria-label={`Drag ${todayReasonLabel(entry.reason)} to reorder`} className="today-drag-handle" onPointerCancel={clearPointerDrag} onPointerDown={(event) => startPointerDrag(event, entry.entryId)} onPointerMove={movePointerDrag} onPointerUp={finishPointerDrag} title="Drag to reorder" type="button">⋮⋮</button><button aria-label={`Move ${todayReasonLabel(entry.reason)} up`} disabled={index === 0} onClick={() => void move(index, -1)} type="button">↑</button><button aria-label={`Move ${todayReasonLabel(entry.reason)} down`} disabled={index === snapshot.entries.length - 1} onClick={() => void move(index, 1)} type="button">↓</button></div>
-          <div className="today-entry__body"><div><span className="today-lane">{todayLaneLabel(entry.lane)}</span><span className={`today-status today-status--${entry.status}`}>{todayStatusLabel(entry.status)}</span>{entry.origin === "manual" ? <span className="today-origin">Manual</span> : null}</div><button className="today-problem-link" onClick={() => navigate(entry.reviewAttemptId && entry.status === "inProgress" ? `/review/${entry.reviewAttemptId}` : `/problems/${entry.contestId}/${entry.problemIndex}`)} type="button"><strong>{entry.problemTitle}</strong><span>CF {entry.contestId}{entry.problemIndex} · {todayReasonLabel(entry.reason)} · {entry.planningCostMinutes} min</span></button></div>
+          <div className="today-entry__body"><div><span className="today-lane">{todayLaneLabel(entry.lane)}</span><span className={`today-status today-status--${entry.status}`}>{todayStatusLabel(entry.status)}</span>{entry.origin === "manual" ? <span className="today-origin">Manual</span> : null}</div><button className="today-problem-link" onClick={() => navigate(entry.reviewAttemptId && entry.status === "inProgress" ? `/review/${entry.reviewAttemptId}` : `/problems/${entry.contestId}/${entry.problemIndex}`)} type="button"><strong>{displayProblemTitle(entry.problemIndex, entry.problemTitle)}</strong><span>CF {entry.contestId}{entry.problemIndex} · {todayReasonLabel(entry.reason)} · {entry.planningCostMinutes} min</span></button></div>
           {todayDoneAllowed(entry) && entry.status !== "completed" ? <button className="primary-action" disabled={busyEntry === entry.entryId || entry.status === "unavailable"} onClick={() => void done(entry)} type="button">Done for today</button> : null}
         </li>)}</ol>}
-      {suggestions && suggestions.suggestions.length > 0 ? <section className="today-suggestions"><h2>Extra suggestions</h2><p>{suggestions.remainingBudgetMinutes} minutes remain. Nothing is added without your action.</p><ul>{suggestions.suggestions.map((item) => <li key={item.problemId}><span><strong>{item.problemTitle}</strong><small>CF {item.contestId}{item.problemIndex} · {todayReasonLabel(item.reason)} · {item.planningCostMinutes} min</small></span><button className="secondary-action" disabled={busyEntry === item.problemId} onClick={() => void acceptSuggestion(item.problemId)} type="button">Add to Today</button></li>)}</ul></section> : null}
+      {suggestions && suggestions.suggestions.length > 0 ? <section className="today-suggestions"><h2>Extra suggestions</h2><p>{suggestions.remainingBudgetMinutes} minutes remain. Nothing is added without your action.</p><ul>{suggestions.suggestions.map((item) => <li key={item.problemId}><span><strong>{displayProblemTitle(item.problemIndex, item.problemTitle)}</strong><small>CF {item.contestId}{item.problemIndex} · {todayReasonLabel(item.reason)} · {item.planningCostMinutes} min</small></span><button className="secondary-action" disabled={busyEntry === item.problemId} onClick={() => void acceptSuggestion(item.problemId)} type="button">Add to Today</button></li>)}</ul></section> : null}
     </> : null}
     {replan ? <div className="modal-backdrop"><div aria-describedby="today-replan-description" aria-labelledby="today-replan-title" aria-modal="true" ref={replanDialogRef} role="dialog"><h2 id="today-replan-title">Apply this replan?</h2><p id="today-replan-description">Budget {replan.expectedSnapshot.budgetMinutes} → {replan.proposedBudgetMinutes} minutes. This is a one-day override; the weekly default and next week&apos;s same weekday remain unchanged. Planned work becomes {replan.proposedPlannedMinutes} minutes across {replan.entries.length} entries. Completed, in-progress, and manual entries stay protected.</p><div className="button-row"><button className="primary-action" onClick={() => void applyBudget()} ref={replanApplyRef} type="button">Apply replan</button><button className="secondary-action" onClick={() => { setBudgetDraft(String(snapshot?.budgetMinutes ?? Number(initialBudgetDraft))); setReplan(null); queueMicrotask(() => replanTriggerRef.current?.focus()); }} type="button">Cancel</button></div></div></div> : null}
   </>;
@@ -1292,17 +1293,17 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
   return (
     <>
       <PageHeader eyebrow="M1 · 比赛导入" headingRef={headingRef} title="比赛" />
-      <form className="content-panel" onSubmit={submitImport}>
+      <form className="content-panel contest-import-form" onSubmit={submitImport}>
         <label>Codeforces 公开比赛网址
           <input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} />
         </label>
         <button className="primary-action" disabled={importing} type="submit">{importing ? "导入中…" : "导入比赛"}</button>
         {importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}
       </form>
-      <details className="content-panel"><summary>Manual Contest fallback</summary><form onSubmit={submitManual}><p>Use an explicit Codeforces contest ID and canonical problem indexes. Weak similarity is never used to merge Problems.</p><label>Contest ID<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>Contest title<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>Contest date<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset key={position}><legend>Problem {position + 1}</legend><label>Index<input aria-label={`Manual problem ${position + 1} index`} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>Title<input aria-label={`Manual problem ${position + 1} title`} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>Source URL<input aria-label={`Manual problem ${position + 1} source URL`} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>Statement text<textarea aria-label={`Manual problem ${position + 1} statement`} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">Add problem</button><button className="primary-action" disabled={importing} type="submit">Save Manual Contest</button></div></form></details>
+      <details className="content-panel manual-import-panel"><summary>手动比赛导入</summary><form className="manual-import-form" onSubmit={submitManual}><p>请填写明确的 Codeforces 比赛 ID 和标准题号。系统不会使用模糊相似度合并题目。</p><label>比赛 ID<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>比赛标题<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>比赛日期<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset className="manual-problem-card" key={position}><legend>题目 {position + 1}</legend><label>题号<input aria-label={`手动题目 ${position + 1} 题号`} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>英文标题<input aria-label={`手动题目 ${position + 1} 标题`} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>题目链接<input aria-label={`手动题目 ${position + 1} 链接`} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>题面正文<textarea aria-label={`手动题目 ${position + 1} 题面`} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">添加题目</button><button className="primary-action" disabled={importing} type="submit">保存手动比赛</button></div></form></details>
       {failed ? <section className="empty-state" role="alert"><h2>比赛数据暂不可用</h2><p>无法读取本地系统事实，任何导入状态都没有改变。</p></section> : null}
       {items?.length === 0 ? <section className="empty-state"><h2>尚未导入比赛</h2><p>请输入完整的 Codeforces 比赛网址，例如 https://codeforces.com/contest/1979。</p></section> : null}
-      {items?.length ? <section className="content-panel" aria-label="已导入比赛"><button className="secondary-action" onClick={() => setShowArchived((current) => !current)} type="button">{showArchived ? "View active Contests" : "View archived Contests"}</button><ul className="detail-list">{items.filter((item) => item.archived === showArchived).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {item.problemCount} 道题 · {item.archived ? "Archived" : item.importStatus === "complete" ? "导入完整" : `${item.missingSnapshotCount} 道题面缺失`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">重试缺失题面</button> : null}</li>)}</ul></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="已导入比赛"><button className="secondary-action" onClick={() => setShowArchived((current) => !current)} type="button">{showArchived ? "查看进行中的比赛" : "查看已归档比赛"}</button><ul className="detail-list">{items.filter((item) => item.archived === showArchived).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} 道题 · {item.archived ? "已归档" : item.importStatus === "complete" ? "导入完整" : `${item.missingSnapshotCount} 道题面缺失`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => retryMissing(item.contestId)} type="button">重试缺失题面</button> : null}</li>)}</ul></section> : null}
       {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>正在读取本地比赛…</p></section> : null}
     </>
   );
@@ -1332,7 +1333,7 @@ function ProblemIndex({ navigate }: { navigate: Navigate }) {
       <PageHeader eyebrow="M1 · Lightweight Problems" headingRef={headingRef} title="我的题库" />
       {failed ? <section className="empty-state" role="alert"><h2>Problem index is unavailable</h2><p>No local learning state was changed.</p></section> : null}
       {items?.length === 0 ? <section className="empty-state"><h2>No lightweight problems yet</h2><p>Imported contest problems will appear here without creating Markdown notes.</p></section> : null}
-      {items?.length ? <section className="content-panel" aria-label="Lightweight problems"><ul className="detail-list">{items.map((item) => <li key={`${item.contestId}-${item.index}`}><button className="list-link" onClick={() => navigate(`/problems/${item.contestId}/${item.index}`)} type="button"><strong>{item.index}. {item.title}</strong><span>Codeforces {item.contestId}{item.rating ? ` · ${item.rating}` : ""} · {item.hasStatementSnapshot ? "statement captured" : "statement pending"}</span></button></li>)}</ul></section> : null}
+      {items?.length ? <section className="content-panel" aria-label="轻量题目"><ul className="detail-list">{items.map((item) => <li key={`${item.contestId}-${item.index}`}><button className="list-link" onClick={() => navigate(`/problems/${item.contestId}/${item.index}`)} type="button"><strong>{item.index}. {displayProblemTitle(item.index, item.title)}</strong><span>Codeforces {item.contestId}{item.rating ? ` · ${item.rating}` : ""} · {item.hasStatementSnapshot ? "题面已保存" : "题面待获取"}</span></button></li>)}</ul></section> : null}
       {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>Loading local problems…</p></section> : null}
     </>
   );
@@ -1387,10 +1388,10 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   const loadDeletePreview = async () => { setManaging(true); setMessage(null); try { setDeletePreview(await previewDeleteContest(contestId)); } catch { setMessage("Delete preview is unavailable; nothing was deleted."); } finally { setManaging(false); } };
   const confirmDelete = async () => { setManaging(true); setMessage(null); try { await deleteContest(contestId); navigate("/contests", { replace: true }); } catch { setMessage("Contest was not deleted. Existing facts and Problems are unchanged."); setManaging(false); } };
   return <>
-    <PageHeader eyebrow="M7 · Contest facts" headingRef={headingRef} title={detail.title} />
+    <PageHeader eyebrow="M7 · 比赛事实" headingRef={headingRef} title={displayProblemTitle(String(detail.contestId), detail.title)} />
     <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original contest</a></section>
     <section className="content-panel contest-management" aria-label="Contest management"><h2>Contest management</h2><div className="action-row"><button className="secondary-action" disabled={managing} onClick={() => void toggleArchive()} type="button">{detail.archived ? "Restore Contest" : "Archive Contest"}</button>{deletePreview ? null : <button className="danger-action" disabled={managing} onClick={() => void loadDeletePreview()} type="button">Preview delete</button>}</div>{deletePreview ? <div role="alert"><p>Delete {deletePreview.contestTitle}: remove the Contest, its Facts, Analysis, and {deletePreview.relationshipCount} Contest-Problem relationships.</p><p>Preserve {deletePreview.preservedProblemCount} global Problems with identity or history. Clean up {deletePreview.cleanupProblemCount} unreferenced history-free Lightweight Problems.</p><div className="action-row"><button className="secondary-action" onClick={() => setDeletePreview(null)} type="button">Cancel</button><button className="danger-action" disabled={managing} onClick={() => void confirmDelete()} type="button">Delete Contest</button></div></div> : null}</section>
-    <form className="content-panel contest-facts" onSubmit={submitFacts} aria-label="Contest facts snapshot"><h2>Problems</h2><p>比赛结果与赛后补题决策是历史快照；当前学习状态始终实时读取，不会覆盖它们。</p><ul className="contest-facts-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {problem.title}</strong><span>当前学习状态：{learningStatusLabel(problem.liveLearningStatus)}</span></button><label>比赛最终结果<select disabled={saving || correctingIndex === problem.index} value={facts[problem.index] ?? problem.finalContestResult ?? "unknown"} onChange={(event) => { const value = event.currentTarget.value as ContestFinalResultDto; setFacts((current) => ({ ...current, [problem.index]: value })); }}>{contestResultOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>比赛结束时补题决策<select disabled={saving || correctingIndex === problem.index} value={upsolveDecisions[problem.index] ?? problem.upsolveDecision} onChange={(event) => { const value = event.currentTarget.value as ContestUpsolveDecisionDto; setUpsolveDecisions((current) => ({ ...current, [problem.index]: value })); }}>{contestUpsolveOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{detail.factsStatus === "completed" ? <button className="secondary-action" disabled={correctingIndex === problem.index} onClick={() => void correctFacts(problem)} type="button">{correctingIndex === problem.index ? "保存纠错中…" : "保存纠错"}</button> : null}</li>)}</ul>{detail.factsStatus === "pending" ? <button className="primary-action" disabled={saving || detail.importStatus !== "complete" || detail.contestDate === null} type="submit">{saving ? "保存中…" : "完成赛后整理"}</button> : null}{message ? <p aria-live="polite" className="system-caption">{message}</p> : null}</form>
+    <form className="content-panel contest-facts" onSubmit={submitFacts} aria-label="Contest facts snapshot"><h2>Problems</h2><p>比赛结果与赛后补题决策是历史快照；当前学习状态始终实时读取，不会覆盖它们。</p><ul className="contest-facts-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {displayProblemTitle(problem.index, problem.title)}</strong><span>当前学习状态：{learningStatusLabel(problem.liveLearningStatus)}</span></button><label>比赛最终结果<select disabled={saving || correctingIndex === problem.index} value={facts[problem.index] ?? problem.finalContestResult ?? "unknown"} onChange={(event) => { const value = event.currentTarget.value as ContestFinalResultDto; setFacts((current) => ({ ...current, [problem.index]: value })); }}>{contestResultOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>比赛结束时补题决策<select disabled={saving || correctingIndex === problem.index} value={upsolveDecisions[problem.index] ?? problem.upsolveDecision} onChange={(event) => { const value = event.currentTarget.value as ContestUpsolveDecisionDto; setUpsolveDecisions((current) => ({ ...current, [problem.index]: value })); }}>{contestUpsolveOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{detail.factsStatus === "completed" ? <button className="secondary-action" disabled={correctingIndex === problem.index} onClick={() => void correctFacts(problem)} type="button">{correctingIndex === problem.index ? "保存纠错中…" : "保存纠错"}</button> : null}</li>)}</ul>{detail.factsStatus === "pending" ? <button className="primary-action" disabled={saving || detail.importStatus !== "complete" || detail.contestDate === null} type="submit">{saving ? "保存中…" : "完成赛后整理"}</button> : null}{message ? <p aria-live="polite" className="system-caption">{message}</p> : null}</form>
     {detail.corrections.length ? <section className="content-panel"><h2>Correction history</h2><ul className="detail-list">{detail.corrections.map((event) => <li key={event.correctionId}><strong>{event.problemIndex} · {event.field === "finalContestResult" ? "比赛结果" : "补题决策"}</strong><span>{event.oldValue} → {event.newValue} · {event.correctedAtUtc}</span></li>)}</ul></section> : null}
     <section className="content-panel contest-analysis" aria-label="Post-contest AI analysis"><h2>Post-Contest AI Analysis</h2><p>Paste the fixed external AI template. Preview never saves; Save/Replace stores raw text and parsed sections only.</p><label>Raw text<textarea aria-label="Contest AI analysis raw text" rows={8} value={analysisRaw} onInput={(event) => { setAnalysisRaw(event.currentTarget.value); setAnalysisPreview(null); }} /></label><div className="action-row"><button className="secondary-action" disabled={analysisBusy || analysisRaw.trim() === ""} onClick={() => void previewAnalysis()} type="button">Parse preview</button><button className="primary-action" disabled={analysisBusy || !analysisPreview} onClick={() => void saveAnalysis()} type="button">{detail.aiAnalysis ? "Replace analysis" : "Save analysis"}</button></div>{analysisPreview ? <div aria-live="polite"><strong>Preview: {analysisPreview.parseStatus.toUpperCase()}</strong><pre>{analysisPreview.parsedProjectionJson}</pre></div> : null}{detail.aiAnalysis ? <details><summary>Saved raw analysis ({detail.aiAnalysis.parseStatus.toUpperCase()})</summary><pre>{detail.aiAnalysis.rawText}</pre><p>Updated {detail.aiAnalysis.updatedAtUtc}</p></details> : <p>No saved analysis.</p>}</section>
   </>;
@@ -1654,8 +1655,8 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, disposition);
       setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? updated : item));
       setCandidateMessage(disposition === "ignored"
-          ? "Suggestion ignored. No Markdown or relation was changed."
-          : "Suggestion returned to pending.");
+          ? "已忽略建议，没有修改 Markdown 或关系。"
+          : "建议已退回待处理。" );
     } catch {
       setCandidateMessage("The suggestion state could not be changed.");
     } finally { setBusyCandidate(null); }
@@ -1684,7 +1685,7 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     try {
       const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, "acceptedIntent");
       setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? { ...item, ...updated } : item));
-      setCandidateMessage("Intent saved only. No Markdown, Knowledge Node, or formal relation was created.");
+      setCandidateMessage("仅保存意图，没有创建 Markdown、知识节点或正式关系。");
     } catch {
       setCandidateMessage("The intent could not be saved.");
     } finally { setBusyCandidate(null); }
@@ -1692,11 +1693,11 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
   return <>
-    <PageHeader eyebrow="M1 local statement snapshot" headingRef={headingRef} title={detail.index + ". " + detail.title} />
+      <PageHeader eyebrow="M1 · 本地题面快照" headingRef={headingRef} title={detail.index + ". " + displayProblemTitle(detail.index, detail.title)} />
     <section className="content-panel">
       <p>
         Codeforces {detail.contestId}{detail.rating ? " · Rating " + detail.rating : ""}
-        {" · "}{detail.identityType === "personal" ? "Personal Problem" : "Lightweight Problem"}
+        {" · "}{detail.identityType === "personal" ? "个人题目" : "轻量题目"}
       </p>
       <a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a>
       {detail.identityType === "lightweight" ? (
@@ -1767,21 +1768,21 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     {detail.identityType === "personal" ? (
       <section className="content-panel knowledge-candidates" aria-labelledby="knowledge-candidates-heading">
         <h2 id="knowledge-candidates-heading">Prerequisite knowledge suggestions</h2>
-        <p>Suggestions are not Knowledge Nodes or formal relations. Accepting requires target resolution and the separate Safe Patch flow.</p>
-        {knowledgeCandidates.length === 0 ? <p className="safe-note">No suggestions for this Personal Problem.</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition === "acceptedIntent" ? candidate.knowledgeNodeId ? "Accepted intent · existing Knowledge Markdown now found" : "Accepted intent" : candidate.disposition === "ignored" ? "Ignored" : candidate.knowledgeNodeId ? "Pending · existing Knowledge Markdown found" : "Pending · no unique Knowledge Node"}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">Accept existing Knowledge</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">Save intent only</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">Do not suggest</button> : null}{candidate.disposition !== "pending" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "pending")} type="button">Return to pending</button> : null}</div></li>)}</ul>}
+        <p>这些只是前置知识建议，不是知识节点，也不会直接创建正式关系。接受建议前必须先解析目标，并通过独立的安全补丁流程。</p>
+        {knowledgeCandidates.length === 0 ? <p className="safe-note">当前个人题目没有前置知识建议。</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition === "acceptedIntent" ? candidate.knowledgeNodeId ? "已接受意图 · 已找到对应知识 Markdown" : "已接受意图" : candidate.disposition === "ignored" ? "已忽略" : candidate.knowledgeNodeId ? "待处理 · 已找到对应知识 Markdown" : "待处理 · 没有唯一知识节点"}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">接受现有知识</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">只保存意图</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">不再建议</button> : null}{candidate.disposition !== "pending" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "pending")} type="button">退回待处理</button> : null}</div></li>)}</ul>}
         {candidateMessage ? <p aria-live="polite" className="safe-note">{candidateMessage}</p> : null}
       </section>
     ) : null}
     {detail.identityType === "personal" ? (
       <section className="content-panel" aria-labelledby="personal-note-danger-heading">
-        <h2 id="personal-note-danger-heading">Personal note actions</h2>
+         <h2 id="personal-note-danger-heading">个人笔记操作</h2>
         {!showDeletePreview ? (
           <button className="secondary-action" onClick={() => setShowDeletePreview(true)} type="button">
             Delete my personal note…
           </button>
         ) : (
           <div role="alertdialog" aria-labelledby="delete-note-preview-title" aria-describedby="delete-note-preview-description">
-            <h3 id="delete-note-preview-title">Delete this Personal Markdown?</h3>
+             <h3 id="delete-note-preview-title">删除这份个人 Markdown？</h3>
             <div id="delete-note-preview-description">
               <p>This will delete the bound Markdown, downgrade the Problem to Lightweight, exit its current learning lifecycle, and cancel its active Review schedule.</p>
               <p>Contest history, completed Review history, and historical highest evidence will be preserved.</p>
@@ -1798,26 +1799,26 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     ) : null}
     {detail.identityType === "personal" ? (
       noteReadFailed ? (
-        <section className="empty-state" role="alert"><h2>Personal Markdown is unavailable</h2><p>The current bound file could not be read. System Facts were preserved.</p></section>
+         <section className="empty-state" role="alert"><h2>个人 Markdown 不可用</h2><p>当前绑定文件无法读取，系统事实已保留。</p></section>
       ) : noteReadState === null ? (
-        <section className="empty-state" aria-busy="true"><p>Reading current Personal Markdown...</p></section>
+         <section className="empty-state" aria-busy="true"><p>正在读取当前个人 Markdown…</p></section>
       ) : noteReadState.state === "vaultUnavailable" ? (
-        <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>
+         <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>
       ) : noteReadState.state === "locationAnomaly" ? (
         <section className="empty-state" role="status">
-          <h2>Note location needs attention</h2>
+           <h2>Note location needs attention</h2>
           <p>The original path is missing and no unique relocation was found. The Personal Problem was not deleted or downgraded.</p>
-          <button className="secondary-action" onClick={() => void findRelocationCandidates()} type="button">Find possible locations</button>
+          <button className="secondary-action" onClick={() => void findRelocationCandidates()} type="button">查找可能的位置</button>
           {relocationCandidates ? relocationCandidates.length ? (
             <ul className="detail-list" aria-label="Possible note locations">
               {relocationCandidates.map((candidate) => <li key={candidate.vaultRelativePath}>
                 <span>{candidate.vaultRelativePath}{candidate.occupied ? " · already bound" : ""}</span>
                 <button disabled={candidate.occupied || repairingPath !== null} onClick={() => void confirmRelocationCandidate(candidate.vaultRelativePath)} type="button">
-                  {repairingPath === candidate.vaultRelativePath ? "Revalidating…" : "Use this Markdown"}
+                  {repairingPath === candidate.vaultRelativePath ? "正在重新验证…" : "使用此 Markdown"}
                 </button>
               </li>)}
             </ul>
-          ) : <p>No Markdown files are currently available for manual relinking.</p> : null}
+           ) : <p>当前没有可用于手动重新绑定的 Markdown 文件。</p> : null}
           {relocationMessage ? <p aria-live="polite" className="system-caption">{relocationMessage}</p> : null}
           {showMissingNoteDeleteConfirm ? (
             <div role="alertdialog" aria-labelledby="confirm-missing-note-title">
@@ -1834,18 +1835,18 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
         </section>
       ) : (
         <section className="content-panel" aria-label="Personal Markdown projection">
-          <h2>My note</h2>
+           <h2>我的笔记</h2>
           {noteReadState.relocated ? <p className="safe-note">The note binding was restored to its current location.</p> : null}
-          <h3>Known sections</h3>
-          {noteReadState.projection.knownSections.length ? <ul>{noteReadState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>No known sections found.</p>}
-          <h3>Solution routes</h3>
-          {noteReadState.projection.solutionRoutes.length ? <ol>{noteReadState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>No solution routes found.</p>}
+           <h3>已识别章节</h3>
+           {noteReadState.projection.knownSections.length ? <ul>{noteReadState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>没有找到已识别章节。</p>}
+           <h3>解题路线</h3>
+           {noteReadState.projection.solutionRoutes.length ? <ol>{noteReadState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>没有找到解题路线。</p>}
           {noteReadState.projection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
         </section>
       )
     ) : null}
     <ProblemReviewHistory contestId={contestId} index={index} learningStatus={detail.lifecycle.learningStatus} />
-    {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><h2>Statement snapshot</h2><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
+    {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><div className="statement-heading-row"><h2>Statement snapshot</h2></div><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
 }
 
@@ -1893,23 +1894,23 @@ function submissionResultOptions() {
 function ReviewEvidenceCard({ completed }: { completed: CompletedReviewAttemptDto }) {
   return (
     <section className="review-stage review-evidence-card" aria-labelledby="review-evidence-title">
-      <p className="eyebrow">Completed Review · Evidence Card</p>
+      <p className="eyebrow">复习已完成 · 证据卡片</p>
       <h2 id="review-evidence-title">{reviewJudgementLabel(completed.judgement)}</h2>
-      <p>Completed {completed.completedLocalDate}. This result was derived by judgement rule v{completed.attempt.judgementRuleVersion}; it was not selected directly.</p>
-      <h3>Why</h3>
+      <p>完成日期：{completed.completedLocalDate}。结果由判定规则 v{completed.attempt.judgementRuleVersion} 根据事实推导，不是手动选择。</p>
+      <h3>依据</h3>
       <ul>{completed.evidenceCodes.map((code) => <li key={code}>{reviewEvidenceLabel(code)}</li>)}</ul>
-      {completed.failureReasons.length ? <><h3>Failure reasons</h3><ul>{completed.failureReasons.map((reason) => <li key={reason.code}>{reviewFailureReasonLabel(reason)}</li>)}</ul></> : null}
-      <h3>Next state</h3>
-      <p>{learningStatusLabel(completed.lifecycle.learningStatus)}{completed.lifecycle.nextReviewDueLocalDate ? ` · due ${completed.lifecycle.nextReviewDueLocalDate}` : ""}</p>
+      {completed.failureReasons.length ? <><h3>失败原因</h3><ul>{completed.failureReasons.map((reason) => <li key={reason.code}>{reviewFailureReasonLabel(reason)}</li>)}</ul></> : null}
+      <h3>下一状态</h3>
+      <p>{learningStatusLabel(completed.lifecycle.learningStatus)}{completed.lifecycle.nextReviewDueLocalDate ? ` · 到期日 ${completed.lifecycle.nextReviewDueLocalDate}` : ""}</p>
     </section>
   );
 }
 
 function ReviewHistoryEvidenceCard({ item }: { item: ReviewHistoryItemDto }) {
   if (item.status === "void") {
-    return <section className="review-stage review-evidence-card"><p className="eyebrow">Review history</p><h2>Voided mistaken Attempt</h2><p>{item.voidReason}</p><p>Scheduling was unchanged. Revealed help history remains recorded.</p></section>;
+    return <section className="review-stage review-evidence-card"><p className="eyebrow">复习历史</p><h2>已作废的误开复习</h2><p>{item.voidReason}</p><p>复习排程没有改变，已查看的帮助仍保留在历史中。</p></section>;
   }
-  return <section className="review-stage review-evidence-card"><p className="eyebrow">Completed Review · Evidence Card</p><h2>{item.judgement ? reviewJudgementLabel(item.judgement) : "Completed"}</h2><p>Completed {item.completedLocalDate}.</p><ul>{item.evidenceCodes.map((code) => <li key={code}>{reviewEvidenceLabel(code)}</li>)}</ul></section>;
+  return <section className="review-stage review-evidence-card"><p className="eyebrow">复习已完成 · 证据卡片</p><h2>{item.judgement ? reviewJudgementLabel(item.judgement) : "已完成"}</h2><p>完成日期：{item.completedLocalDate}。</p><ul>{item.evidenceCodes.map((code) => <li key={code}>{reviewEvidenceLabel(code)}</li>)}</ul></section>;
 }
 
 const emptyMasteryEvidence: ProblemMasteryEvidenceDto = {
@@ -1922,12 +1923,12 @@ const emptyMasteryEvidence: ProblemMasteryEvidenceDto = {
 };
 
 const masteryEvidenceLabels: ReadonlyArray<readonly [keyof ProblemMasteryEvidenceDto, string]> = [
-  ["recallsProblem", "I can recall what the Problem asks me to solve"],
-  ["multipleSolutionsClear", "Multiple solution routes are clear"],
-  ["knowledgeUnderstood", "The related knowledge is genuinely understood"],
-  ["implementationFluent", "I can implement it quickly and clearly"],
-  ["canAdaptOrCreate", "I understand the setting and can adapt or create a related Problem"],
-  ["transferSolvedIndependently", "I independently solved a related transfer Problem"],
+  ["recallsProblem", "我能回忆起这道题要解决什么问题"],
+  ["multipleSolutionsClear", "我能清楚说出多种解题路线"],
+  ["knowledgeUnderstood", "相关知识已经真正理解"],
+  ["implementationFluent", "我能快速、清晰地完成实现"],
+  ["canAdaptOrCreate", "我理解适用场景，并能迁移或创造相关题目"],
+  ["transferSolvedIndependently", "我能独立解决相关迁移题"],
 ];
 
 function ProblemReviewHistory({ contestId, index, learningStatus }: {
@@ -1964,54 +1965,54 @@ function ProblemReviewHistory({ contestId, index, learningStatus }: {
   const achievedCount = Object.values(masteryDraft).filter(Boolean).length;
   return (
     <section className="content-panel" aria-labelledby="review-history-heading">
-      <h2 id="review-history-heading">Review history</h2>
-      {!history ? <button className="secondary-action" disabled={loading} onClick={load} type="button">{loading ? "Loading…" : "Load Review history"}</button> : null}
-      {error ? <p role="alert">Review history is temporarily unavailable; no history was changed.</p> : null}
+      <h2 id="review-history-heading">复习历史</h2>
+      {!history ? <button className="secondary-action" disabled={loading} onClick={load} type="button">{loading ? "正在加载…" : "加载复习历史"}</button> : null}
+      {error ? <p role="alert">复习历史暂时不可用，历史记录没有改变。</p> : null}
       {history ? <>
-        <p><strong>Historical best Review evidence:</strong> {history.historicalBestReview ? reviewJudgementLabel(history.historicalBestReview) : "None yet"}</p>
+        <p><strong>历史最佳复习证据：</strong> {history.historicalBestReview ? reviewJudgementLabel(history.historicalBestReview) : "暂无"}</p>
         <section className="mastery-evidence" aria-labelledby="mastery-evidence-heading">
-          <h3 id="mastery-evidence-heading">Thorough digestion evidence</h3>
-          <p><strong>Current:</strong> {achievedCount}/6 evidence criteria · {learningStatusLabel(learningStatus)}</p>
-          <p><strong>Historical highest:</strong> {mastery?.historicalThoroughlyDigested ? "Thoroughly digested" : "Not yet thoroughly digested"}{mastery?.firstThoroughlyDigestedLocalDate ? ` · first reached ${mastery.firstThoroughlyDigestedLocalDate}` : ""}</p>
-          <p className="safe-note">Only 6/6 is “Thoroughly digested”. Review Mastered does not automatically change these user-confirmed facts.</p>
+          <h3 id="mastery-evidence-heading">彻底掌握证据</h3>
+          <p><strong>当前：</strong> {achievedCount}/6 项证据 · {learningStatusLabel(learningStatus)}</p>
+          <p><strong>历史最高：</strong> {mastery?.historicalThoroughlyDigested ? "已彻底掌握" : "尚未彻底掌握"}{mastery?.firstThoroughlyDigestedLocalDate ? ` · 首次达到 ${mastery.firstThoroughlyDigestedLocalDate}` : ""}</p>
+          <p className="safe-note">只有 6/6 才算“彻底掌握”。复习结果为“已掌握”不会自动修改这些由用户确认的事实。</p>
           <fieldset>
-            <legend>Current evidence</legend>
+            <legend>当前证据</legend>
             {masteryEvidenceLabels.map(([key, label]) => <label key={key}><input checked={masteryDraft[key]} onChange={(event) => setMasteryDraft({ ...masteryDraft, [key]: event.target.checked })} type="checkbox" /> {label}</label>)}
           </fieldset>
-          <button className="secondary-action" disabled={savingMastery} onClick={saveMastery} type="button">{savingMastery ? "Saving…" : "Save current evidence"}</button>
+          <button className="secondary-action" disabled={savingMastery} onClick={saveMastery} type="button">{savingMastery ? "正在保存…" : "保存当前证据"}</button>
         </section>
-        {history.attempts.length === 0 ? <p>No Review Attempts yet.</p> : <ol className="review-history-list">{history.attempts.map((item) => <li key={item.attempt.attemptId}><strong>{item.status === "void" ? "Void" : item.status === "inProgress" ? "In progress" : item.judgement ? reviewJudgementLabel(item.judgement) : "Completed"}</strong><span>{item.attempt.attemptType} · started {item.attempt.startedAtUtc}</span>{item.completionFacts ? <span>Final AC: {item.completionFacts.finalAc ? "yes" : "no"} · submissions: {item.completionFacts.totalSubmissions} · idea independent: {item.completionFacts.ideaIndependent ? "yes" : "no"} · implementation independent: {item.completionFacts.implementationIndependent ? "yes" : "no"}</span> : null}{item.helpLevels.length ? <span>Help levels: {item.helpLevels.join(", ")}</span> : null}{item.failureReasons.length ? <span>Reasons: {item.failureReasons.map(reviewFailureReasonLabel).join("; ")}</span> : null}</li>)}</ol>}
+        {history.attempts.length === 0 ? <p>暂无复习记录。</p> : <ol className="review-history-list">{history.attempts.map((item) => <li key={item.attempt.attemptId}><strong>{item.status === "void" ? "已作废" : item.status === "inProgress" ? "进行中" : item.judgement ? reviewJudgementLabel(item.judgement) : "已完成"}</strong><span>{reviewAttemptTypeLabel(item.attempt.attemptType)} · 开始时间：{item.attempt.startedAtUtc}</span>{item.completionFacts ? <span>最终 AC：{item.completionFacts.finalAc ? "是" : "否"} · 提交次数：{item.completionFacts.totalSubmissions} · 思路独立：{item.completionFacts.ideaIndependent ? "是" : "否"} · 实现独立：{item.completionFacts.implementationIndependent ? "是" : "否"}</span> : null}{item.helpLevels.length ? <span>使用帮助等级：{item.helpLevels.join(", ")}</span> : null}{item.failureReasons.length ? <span>失败原因：{item.failureReasons.map(reviewFailureReasonLabel).join("；")}</span> : null}</li>)}</ol>}
       </> : null}
     </section>
   );
 }
 
 function reviewJudgementLabel(judgement: CompletedReviewAttemptDto["judgement"]): string {
-  return judgement === "mastered" ? "Mastered" : judgement === "partial" ? "Partial" : "Not passed";
+  return judgement === "mastered" ? "已掌握" : judgement === "partial" ? "部分掌握" : "未通过";
 }
 
 function reviewFailureReasonLabel(reason: { code: ReviewFailureReasonCodeDto; otherText: string | null }): string {
   return reason.code === "other"
-    ? `Other: ${reason.otherText ?? ""}`
+    ? `其他：${reason.otherText ?? ""}`
     : reviewFailureReasonOptions.find(([code]) => code === reason.code)?.[1] ?? reason.code;
 }
 
 function reviewEvidenceLabel(code: string): string {
   const labels: Record<string, string> = {
-    final_ac: "Final submission accepted",
-    no_final_ac: "No final accepted submission",
-    controlled_help_l1: "Prerequisite names revealed",
-    controlled_help_l2: "Hint revealed",
-    controlled_help_l3: "Prerequisite content revealed",
-    controlled_help_l4: "Old idea or code revealed",
-    controlled_help_l5: "Full solution revealed",
-    external_solving_hint: "External problem-solving hint reported",
-    external_full_solution: "External full solution reported",
-    idea_not_independent: "Idea was not independent",
-    implementation_not_independent: "Implementation was not independent",
-    debug_not_needed: "No debugging was needed",
-    debug_independent: "Debugging was independent",
-    debug_solving_help: "Problem-solving help was used while debugging",
+    final_ac: "最终提交通过",
+    no_final_ac: "没有最终通过的提交",
+    controlled_help_l1: "查看了前置知识名称",
+    controlled_help_l2: "查看了提示",
+    controlled_help_l3: "查看了前置知识内容",
+    controlled_help_l4: "查看了旧思路或旧代码",
+    controlled_help_l5: "查看了完整题解",
+    external_solving_hint: "记录了外部解题提示",
+    external_full_solution: "记录了外部完整题解",
+    idea_not_independent: "思路不是独立完成",
+    implementation_not_independent: "实现不是独立完成",
+    debug_not_needed: "不需要调试",
+    debug_independent: "独立完成调试",
+    debug_solving_help: "调试时使用了解题帮助",
   };
   return labels[code] ?? code;
 }
@@ -2043,9 +2044,9 @@ function lifecycleActionLabel(action: ProblemLifecycleActionDto): string {
 
 function reviewAttemptTypeLabel(type: ReviewFocusDto["attempt"]["attemptType"]): string {
   const labels = {
-    firstColdStart: "First cold-start Review",
-    longTermReview: "Long-term Review",
-    earlyCheck: "Early check",
+    firstColdStart: "首次冷启动复习",
+    longTermReview: "长期复习",
+    earlyCheck: "提前检查",
   } satisfies Record<ReviewFocusDto["attempt"]["attemptType"], string>;
   return labels[type];
 }
@@ -2139,10 +2140,10 @@ function NotFoundContent({ pathname, navigate }: { pathname: string; navigate: N
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   return (
     <section className="empty-state">
-      <p className="eyebrow">Unknown route</p>
-      <h1 ref={headingRef} tabIndex={-1}>Page not found</h1>
+       <p className="eyebrow">未知路径</p>
+       <h1 ref={headingRef} tabIndex={-1}>页面不存在</h1>
       <p><code>{pathname}</code> is not part of the current application map.</p>
-      <button className="primary-action" onClick={() => navigate("/today")} type="button">Go to Today</button>
+       <button className="primary-action" onClick={() => navigate("/today")} type="button">返回今日计划</button>
     </section>
   );
 }
@@ -2224,8 +2225,8 @@ function useRouteFocus<T extends HTMLElement>() {
 
 function foundationCaption(foundation: FoundationStatus): string {
   switch (foundation.state) {
-    case "checking": return "checking";
-    case "unavailable": return "unavailable";
-    case "ready": return `ready · ${foundation.foundation.core}`;
+    case "checking": return "检查中";
+    case "unavailable": return "不可用";
+    case "ready": return `已就绪 · ${foundation.foundation.core}`;
   }
 }

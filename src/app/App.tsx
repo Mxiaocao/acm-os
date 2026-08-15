@@ -3,6 +3,7 @@ import { getAppShellStatus, type AppShellStatusDto } from "../ipc/app-shell";
 import { getFoundationStatus, type FoundationStatus } from "../ipc/foundation";
 import type { WorkspaceStatusDto } from "../ipc/workspace";
 import { parseAppRoute } from "./routing";
+import { installChineseUiTranslation } from "./translation";
 import {
   LoadingShell,
   NormalAppShell,
@@ -18,6 +19,10 @@ export function App() {
   const [foundation, setFoundation] = useState<FoundationStatus>({ state: "checking" });
   const [startupUnavailable, setStartupUnavailable] = useState(false);
   const [pathname, setPathname] = useState(window.location.pathname);
+
+  useEffect(() => {
+    return installChineseUiTranslation();
+  }, []);
 
   useEffect(() => {
     let active = true;

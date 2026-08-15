@@ -413,6 +413,42 @@ test("Contest facts snapshot preserves contest result beside live learning statu
   } finally { await view.cleanup(); }
 });
 
+test("Contest detail renders cached Russian problem titles in built-in English", { concurrency: false }, async () => {
+  const detail = {
+    contestId: 2256,
+    title: "Codeforces Round 1116 (Div. 2)",
+    sourceUrl: "https://codeforces.com/contest/2256",
+    contestDate: "2026-08-11",
+    importStatus: "complete",
+    factsStatus: "completed",
+    archived: false,
+    corrections: [],
+    aiAnalysis: null,
+    problems: [{
+      contestId: 2256,
+      index: "C",
+      title: "Горячая картошка на складе фей",
+      rating: null,
+      hasStatementSnapshot: true,
+      identityType: "lightweight",
+      finalContestResult: "unknown",
+      upsolveDecision: "undecided",
+      liveLearningStatus: "unstarted",
+    }],
+  };
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/2256");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /C\. Hot Potatoes at the Fairy Warehouse/);
+    assert.doesNotMatch(view.document.body.textContent, /[\u0400-\u04ff]/);
+  } finally { await view.cleanup(); }
+});
+
 test("Completed Contest correction updates facts and keeps an explicit history event", { concurrency: false }, async () => {
   let corrected = false;
   const detail = () => ({ contestId: 1979, title: "Round", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed",
@@ -505,7 +541,7 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     await settle();
     assert.equal(createCalls, 1);
     assert.equal(detailReads, 2);
-    assert.match(view.document.body.textContent, /Personal Problem/);
+    assert.match(view.document.body.textContent, /个人题目/);
     assert.match(view.document.body.textContent, /Archive\/renamed\.md/);
     assert.match(view.document.body.textContent, /binding was restored/);
     assert.match(view.document.body.textContent, /External edit ×/);
@@ -556,7 +592,7 @@ test("Location Anomaly lists possible Markdown locations and explicitly rebinds 
     await settle();
     assert.match(view.document.body.textContent, /Note location needs attention/);
     const find = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Find possible locations");
+      .find((button) => button.textContent === "查找可能的位置");
     await act(async () => find.click()); await settle();
     const occupied = [...view.document.querySelectorAll("li")]
       .find((item) => item.textContent.includes("CF-1979-B.md"));
@@ -605,7 +641,7 @@ test("Location Anomaly confirms a missing file only through an explicit conseque
     const confirm = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "Confirm deleted");
     await act(async () => confirm.click()); await settle();
-    assert.match(view.document.body.textContent, /Lightweight Problem/);
+    assert.match(view.document.body.textContent, /轻量题目/);
     assert.doesNotMatch(view.document.body.textContent, /Note location needs attention/);
     assert.equal(calls.filter(([command]) => command === "confirm_personal_note_deleted").length, 1);
   } finally {
@@ -730,7 +766,7 @@ test("Problem lifecycle actions and personal-note consequence preview use author
     await act(async () => confirmDelete.click());
     await settle();
     assert.equal(deleteCalls, 1);
-    assert.match(view.document.body.textContent, /Lightweight Problem/);
+    assert.match(view.document.body.textContent, /轻量题目/);
     assert.match(view.document.body.textContent, /historical facts were preserved/);
   } finally {
     await view.cleanup();
@@ -933,8 +969,8 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     await settle();
     assert.equal(completeCalls.length, 2);
     assert.deepEqual(completeCalls[1].failureReasons, [{ code: "keyPropertyBlocked", otherText: null }]);
-    assert.match(view.document.body.textContent, /Completed Review/);
-    assert.match(view.document.body.textContent, /Partial/);
+    assert.match(view.document.body.textContent, /复习已完成/);
+    assert.match(view.document.body.textContent, /部分掌握/);
     assert.match(view.document.body.textContent, /回炉中/);
   } finally {
     await view.cleanup();
@@ -984,11 +1020,11 @@ test("Review history preserves an earlier Mastered result after a later Partial 
   }, "/problems/1979/A");
   try {
     const load = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Load Review history");
+      .find((button) => button.textContent === "加载复习历史");
     await act(async () => load.click());
     await settle();
-    assert.match(view.document.body.textContent, /Historical best Review evidence:\s*Mastered/);
-    assert.match(view.document.body.textContent, /Partial/);
+    assert.match(view.document.body.textContent, /历史最佳复习证据：\s*已掌握/);
+    assert.match(view.document.body.textContent, /部分掌握/);
     assert.match(view.document.body.textContent, /Direction found, key property blocked/);
   } finally {
     await view.cleanup();
@@ -1029,7 +1065,7 @@ test("Problem detail preserves Personal identity when the Vault is unavailable",
   }, "/problems/1979/A");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /Personal Problem/);
+    assert.match(view.document.body.textContent, /个人题目/);
     assert.match(view.document.body.textContent, /Vault is unavailable/);
     assert.match(view.document.body.textContent, /System Facts were preserved/);
     assert.equal(
@@ -1077,26 +1113,26 @@ test("six mastery evidence items preserve historical thorough digestion after cu
   }, "/problems/1979/A");
   try {
     const load = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Load Review history");
+      .find((button) => button.textContent === "加载复习历史");
     await act(async () => load.click());
     await settle();
     const checks = [...view.document.querySelectorAll(".mastery-evidence input[type='checkbox']")];
     assert.equal(checks.length, 6);
     for (const check of checks) await act(async () => check.click());
     const save = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Save current evidence");
+      .find((button) => button.textContent === "保存当前证据");
     await act(async () => save.click());
     await settle();
     assert.equal(updates.length, 1);
     assert.ok(Object.values(updates[0]).every(Boolean));
-    assert.match(view.document.body.textContent, /Historical highest:\s*Thoroughly digested · first reached 2026-08-12/);
+    assert.match(view.document.body.textContent, /历史最高：\s*已彻底掌握 · 首次达到 2026-08-12/);
     await act(async () => checks[5].click());
     await act(async () => save.click());
     await settle();
     assert.equal(updates.length, 2);
     assert.equal(updates[1].transferSolvedIndependently, false);
-    assert.match(view.document.body.textContent, /Current:\s*5\/6 evidence criteria/);
-    assert.match(view.document.body.textContent, /Historical highest:\s*Thoroughly digested/);
+    assert.match(view.document.body.textContent, /当前：\s*5\/6 项证据/);
+    assert.match(view.document.body.textContent, /历史最高：\s*已彻底掌握/);
     assert.match(view.document.body.textContent, /回炉中|鍥炵倝涓?/);
   } finally {
     await view.cleanup();
@@ -1165,7 +1201,7 @@ test("Obsidian open failure is scoped and exposes recovery actions", {
     assert.match(view.document.body.textContent, /Retry/);
     assert.match(view.document.body.textContent, /Copy path/);
     assert.match(view.document.body.textContent, /Check settings/);
-    assert.match(view.document.body.textContent, /Personal Problem/);
+    assert.match(view.document.body.textContent, /个人题目/);
   } finally {
     await view.cleanup();
   }
@@ -1377,18 +1413,18 @@ test("Problem Detail can save a missing Knowledge intent without creating author
     await settle();
     assert.equal(calls.filter(([name]) => name === "knowledge_candidates").length, 1);
     assert.match(view.document.body.textContent, /Segment Tree/);
-    const saveIntent = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save intent only");
+    const saveIntent = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "只保存意图");
     assert.ok(saveIntent);
     await act(async () => saveIntent.click()); await settle();
     assert.equal(calls.at(-1)[0], "set_knowledge_candidate_disposition");
     assert.equal(calls.at(-1)[1].input.disposition, "acceptedIntent");
-    assert.match(view.document.body.textContent, /Intent saved only/);
-    const ignore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Do not suggest");
+    assert.match(view.document.body.textContent, /仅保存意图/);
+    const ignore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "不再建议");
     await act(async () => ignore.click()); await settle();
     assert.equal(calls.at(-1)[0], "set_knowledge_candidate_disposition");
     assert.equal(calls.at(-1)[1].input.disposition, "ignored");
     assert.equal(calls.some(([, args]) => args?.input?.disposition === "acceptedIntent"), true);
-    assert.match(view.document.body.textContent, /Suggestion ignored/);
+    assert.match(view.document.body.textContent, /已忽略建议/);
   } finally { await view.cleanup(); }
 });
 
@@ -1422,13 +1458,13 @@ test("Problem Detail accepts only a uniquely resolved existing Knowledge Node th
   }, "/problems/1/A");
   try {
     await settle();
-    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Accept existing Knowledge");
+    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "接受现有知识");
     assert.ok(accept);
     await act(async () => accept.click()); await settle();
     assert.equal(calls.length, 1);
     assert.equal(calls[0][1].input.knowledgeNodeId, candidate.knowledgeNodeId);
     assert.match(view.document.body.textContent, /written to current Markdown, re-read, and verified as a formal relation/);
-    assert.match(view.document.body.textContent, /No suggestions for this Personal Problem/);
+    assert.match(view.document.body.textContent, /当前个人题目没有前置知识建议/);
   } finally { await view.cleanup(); }
 });
 
@@ -1459,9 +1495,9 @@ test("Problem Detail requires a second explicit action after accepted intent lat
   }, "/problems/1/A");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /Accepted intent · existing Knowledge Markdown now found/);
+    assert.match(view.document.body.textContent, /已接受意图 · 已找到对应知识 Markdown/);
     assert.equal(calls.length, 0);
-    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Accept existing Knowledge");
+    const accept = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "接受现有知识");
     assert.ok(accept);
     await act(async () => accept.click()); await settle();
     assert.equal(calls.length, 1);
@@ -1551,21 +1587,21 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
     await act(async () => nodeButton.click()); await settle();
     assert.equal(calls.filter(([name]) => name === "knowledge_detail").length, 1);
     assert.equal(calls.filter(([name]) => name === "knowledge_reevaluation_suggestion").length, 1);
-    assert.match(view.document.body.textContent, /3 distinct related Problems gained new 真会 Review Evidence/);
-    assert.match(view.document.body.textContent, /Your current status was not changed/);
-    assert.match(view.document.body.textContent, /No user-confirmed status yet/);
-    const select = view.document.querySelector('select[aria-label="Current understanding"]');
+    assert.match(view.document.body.textContent, /建议重新评估此知识状态：3 道相关题目获得了新的“真会”复习证据/);
+    assert.match(view.document.body.textContent, /当前状态没有改变/);
+    assert.match(view.document.body.textContent, /尚未有用户确认的状态/);
+    const select = view.document.querySelector('select[aria-label="当前理解程度"]');
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(select, "basic");
       select.dispatchEvent(new view.window.Event("change", { bubbles: true }));
     });
     await settle();
     assert.equal(calls.filter(([name]) => name === "confirm_knowledge_understanding").length, 0);
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm status");
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认状态");
     await act(async () => confirm.click()); await settle();
     assert.equal(calls.at(-1)[0], "confirm_knowledge_understanding");
     assert.equal(calls.at(-1)[1].input.level, "basic");
-    assert.match(view.document.body.textContent, /Historical highest: 基本理解/);
+    assert.match(view.document.body.textContent, /历史最高：\s*基本理解/);
   } finally { await view.cleanup(); }
 });
 
@@ -1605,14 +1641,14 @@ test("Knowledge location anomaly requires explicit candidate selection before re
   try {
     assert.match(view.document.body.textContent, /Old Segment Tree/);
     assert.equal(calls.filter(([name]) => name === "knowledge_relocation_candidates").length, 0);
-    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Find possible locations");
+    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "查找可能的位置");
     await act(async () => find.click()); await settle();
     assert.equal(calls.at(-1)[0], "knowledge_relocation_candidates");
     assert.equal(calls.at(-1)[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
-    const occupied = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Use this Markdown" && button.parentElement.textContent.includes("Occupied.md"));
+    const occupied = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "使用此 Markdown" && button.parentElement.textContent.includes("Occupied.md"));
     assert.equal(occupied.disabled, true);
-    assert.match(view.document.body.textContent, /Already bound to another Primary Object/);
-    const use = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Use this Markdown" && button.parentElement.textContent.includes("Archive/Segment Tree.md"));
+    assert.match(view.document.body.textContent, /已绑定到其他主对象/);
+    const use = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "使用此 Markdown" && button.parentElement.textContent.includes("Archive/Segment Tree.md"));
     await act(async () => use.click()); await settle();
     const rebind = calls.find(([name]) => name === "rebind_knowledge_node");
     assert.equal(rebind[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
@@ -1684,16 +1720,16 @@ test("Knowledge same-name rebuild requires explicit identity choice", {
     throw new Error(`unexpected command ${command}`);
   }, "/knowledge");
   try {
-    assert.match(view.document.body.textContent, /Identity was not chosen automatically/);
-    assert.match(view.document.body.textContent, /Restore old Knowledge Node/);
-    assert.match(view.document.body.textContent, /Create new Knowledge Node/);
-    const restore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Restore old Knowledge Node");
+    assert.match(view.document.body.textContent, /系统没有自动猜测其身份/);
+    assert.match(view.document.body.textContent, /恢复旧知识节点/);
+    assert.match(view.document.body.textContent, /创建新知识节点/);
+    const restore = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "恢复旧知识节点");
     await act(async () => restore.click()); await settle();
     const call = calls.find(([name]) => name === "resolve_knowledge_identity_conflict");
     assert.equal(call[1].input.historicalKnowledgeNodeId, conflict.historicalKnowledgeNodeId);
     assert.equal(call[1].input.candidateVaultRelativePath, conflict.candidateVaultRelativePath);
     assert.equal(call[1].input.restoreOldIdentity, true);
-    assert.doesNotMatch(view.document.body.textContent, /Identity was not chosen automatically/);
+    assert.doesNotMatch(view.document.body.textContent, /系统没有自动猜测其身份/);
   } finally { await view.cleanup(); }
 });
 

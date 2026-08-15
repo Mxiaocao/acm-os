@@ -47,6 +47,13 @@ test("programmatically focused route headings keep a content-sized focus ring", 
   assert.match(css, /\.page-header h1:focus-visible\s*\{[\s\S]*?outline:\s*3px solid var\(--focus\);/);
 });
 
+test("fullscreen normal pages share one centered content rail", async () => {
+  const css = await readFile(cssUrl, "utf8");
+  assert.match(css, /\.normal-content\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*1280px;[\s\S]*?justify-self:\s*center;/);
+  assert.match(css, /\.content-panel\s*\{\s*width:\s*100%;\s*max-width:\s*none;/);
+  assert.match(css, /\.contest-import-form,\s*\.manual-import-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
+});
+
 test("semantic detail lists keep definition grids separate from full-width item lists", async () => {
   const css = await readFile(cssUrl, "utf8");
   assert.match(css, /\.detail-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(150px,\s*0\.35fr\)\s+minmax\(0,\s*1fr\);/);

@@ -98,7 +98,7 @@ impl CodeforcesHttpAdapter {
         &self,
         problem: &CodeforcesProblemIdentity,
     ) -> Result<String, CodeforcesHttpError> {
-        self.fetch_text(&problem_page_url(problem), STATEMENT_MAX_BYTES)
+        self.fetch_text(&problem_page_fetch_url(problem), STATEMENT_MAX_BYTES)
             .await
     }
 
@@ -317,6 +317,10 @@ pub fn problem_page_url(problem: &CodeforcesProblemIdentity) -> String {
         problem.contest().contest_id(),
         problem.index()
     )
+}
+
+fn problem_page_fetch_url(problem: &CodeforcesProblemIdentity) -> String {
+    format!("{}?locale=en", problem_page_url(problem))
 }
 
 /// Deterministic adapter boundary for fixed official API, HTML, and asset
@@ -663,6 +667,10 @@ mod tests {
         assert_eq!(
             problem_page_url(&problem),
             "https://codeforces.com/contest/1979/problem/A"
+        );
+        assert_eq!(
+            problem_page_fetch_url(&problem),
+            "https://codeforces.com/contest/1979/problem/A?locale=en"
         );
         assert_eq!(
             trusted_asset_url_http("/predownloaded/asset.png"),
