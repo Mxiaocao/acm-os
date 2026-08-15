@@ -1,4 +1,55 @@
-# ACM-OS Durable Recovery Prompt — M10 Release Candidate
+# ACM-OS Durable Recovery Prompt – M10 Release Candidate
+
+## 最新窗口 prompt（优先于下方旧 RC 快照）
+
+将下面内容复制到下一个 Codex Local 窗口：
+
+```text
+请接管 E:\项目开发\acm-os 的后续 BUILD 工作。
+
+不要依赖旧聊天记忆。先执行并报告：
+
+Get-Location
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log -10 --oneline --decorate
+git remote -v
+git tag --list
+git tag --points-at HEAD
+git diff --check
+
+然后完整读取：
+1. ACM-OS_SPEC_v1.md
+2. ACM-OS_DESIGN_v1.md
+3. ACM-OS_PLAN_v1.md
+4. ACM-OS_BUILD_HANDOFF.md
+5. ACM-OS_RECOVERY_PROMPT.md
+
+权威顺序：SPEC > DESIGN > PLAN > IMPLEMENTATION。
+
+当前已知 checkpoint：
+- Branch: main
+- HEAD: 93e320b
+- Subject: ui: localize interface and refine responsive layout
+- 该提交已完成 ACM-OS 操作界面中文化、俄文题目标题内置英文映射、locale=en 题面抓取、比赛导入页 UI 网格化和全屏统一内容轨道。
+- 已验证：build PASS；DOM 36/36；visual-consistency 7/7；accessibility 4/4；定向 Rust URL 测试 PASS。
+
+必须保留且不得提交的未知文件：
+- acm-os.exe
+- Uninstall ACM-OS.lnk
+
+保护规则：
+- 不得 git reset、git clean 或覆盖式 checkout。
+- 不得删除或覆盖现有未提交修改和未知文件。
+- 未经用户明确授权不得 commit、amend、tag 或 push。
+- 不得修改冻结 SPEC、DESIGN、PLAN。
+- 不得创建额外 M9/M10 handoff 文件；只更新 ACM-OS_BUILD_HANDOFF.md 和 ACM-OS_RECOVERY_PROMPT.md。
+- 不得伪造 OJ 提交、Review 结果或人工 PASS。
+- 除非用户明确要求，不进入新功能阶段。
+
+恢复核对通过后，先报告真实状态和与本 prompt 的差异，再等待用户下一步指令。
+```
 
 将下面代码块中的全部内容复制到下一个 Codex Local 窗口。
 

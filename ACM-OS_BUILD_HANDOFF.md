@@ -1,6 +1,36 @@
 # ACM-OS BUILD Handoff — M10 Release Candidate
 
-Updated: 2026-08-14 (Asia/Shanghai)
+Updated: 2026-08-15 (Asia/Shanghai)
+
+## 当前权威 checkpoint（2026-08-15 UI follow-up）
+
+本节覆盖旧的 Git 快照记录，恢复时以真实仓库命令输出为准：
+
+- Branch: `main`
+- HEAD: `93e320b`
+- Subject: `ui: localize interface and refine responsive layout`
+- 本次提交已包含 7 个实现/测试文件；未包含 `acm-os.exe` 和 `Uninstall ACM-OS.lnk`。
+- 未经用户再次授权，不得 amend、tag 或 push。
+
+本窗口完成的实现范围：
+
+- ACM-OS 操作界面主要英文文案已切换为中文。
+- Codeforces 缓存中的俄文题目标题使用内置英文映射；未知俄文标题显示安全的 `Problem X`。
+- A-F 题面保留本地英文快照；后续 Codeforces 题面抓取明确请求 `locale=en`。
+- 比赛导入页的公开导入、手动导入和题目编辑区完成网格化 UI 调整。
+- 普通页面统一使用居中的宽屏内容轨道，解决全屏后的左右边界不一致和右侧过大留白。
+- 删除了界面中的中文速览功能；原始英文题面和 KaTeX 本地渲染保留。
+
+本窗口验证：
+
+- `npm.cmd run build`: PASS
+- `npm.cmd run test:dom-shells`: 36/36 PASS
+- `npm.cmd run test:visual-consistency`: 7/7 PASS
+- `npm.cmd run test:accessibility`: 4/4 PASS
+- Rust `real_adapter_url_construction_is_identity_bound_and_assets_stay_codeforces_only`: PASS
+- `git diff --check`: PASS（仅 CRLF 转换提示）
+
+当前未提交内容只应为用户要求保留的安装器生成文件：`acm-os.exe`、`Uninstall ACM-OS.lnk`。如实际状态不同，先报告差异，不要清理或覆盖。
 
 本文档是后续 BUILD 窗口的正式交接文件。它不替代 Git、冻结文档、实际产物或命令输出；恢复时必须先核对真实仓库状态。
 
