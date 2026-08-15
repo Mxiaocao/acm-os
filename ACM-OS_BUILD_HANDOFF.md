@@ -7,8 +7,8 @@ Updated: 2026-08-15 (Asia/Shanghai)
 本节覆盖旧的 Git 快照记录，恢复时以真实仓库命令输出为准：
 
 - Branch: `main`
-- HEAD: `93e320b`
-- Subject: `ui: localize interface and refine responsive layout`
+- Implementation checkpoint: `93e320b` (`ui: localize interface and refine responsive layout`)
+- 交接文档提交位于该实现提交之后；不要从文档反推 HEAD，必须执行 `git rev-parse HEAD`。
 - 本次提交已包含 7 个实现/测试文件；未包含 `acm-os.exe` 和 `Uninstall ACM-OS.lnk`。
 - 未经用户再次授权，不得 amend、tag 或 push。
 

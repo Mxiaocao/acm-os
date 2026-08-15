@@ -28,10 +28,9 @@ git diff --check
 
 权威顺序：SPEC > DESIGN > PLAN > IMPLEMENTATION。
 
-当前已知 checkpoint：
+当前已知实现 checkpoint（交接文档提交位于其后，真实 HEAD 以命令输出为准）：
 - Branch: main
-- HEAD: 93e320b
-- Subject: ui: localize interface and refine responsive layout
+- Implementation commit: 93e320b ui: localize interface and refine responsive layout
 - 该提交已完成 ACM-OS 操作界面中文化、俄文题目标题内置英文映射、locale=en 题面抓取、比赛导入页 UI 网格化和全屏统一内容轨道。
 - 已验证：build PASS；DOM 36/36；visual-consistency 7/7；accessibility 4/4；定向 Rust URL 测试 PASS。
 
