@@ -333,6 +333,305 @@ pub trait ContestManagementPort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestFamily {
+    pub family_id: i64,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestSeries {
+    pub series_id: i64,
+    pub family_id: i64,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestPlacement {
+    pub placement_id: i64,
+    pub family_id: i64,
+    pub family_name: String,
+    pub series_id: Option<i64>,
+    pub series_name: Option<String>,
+    pub year: Option<u32>,
+    pub ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateContestPlacement {
+    pub contest: acm_os_domain::CodeforcesContestIdentity,
+    pub family_id: i64,
+    pub series_id: Option<i64>,
+    pub year: Option<u32>,
+    pub ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateContestPlacement {
+    pub placement_id: i64,
+    pub family_id: i64,
+    pub series_id: Option<i64>,
+    pub year: Option<u32>,
+    pub ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestLibrarySeriesFilter {
+    Any,
+    Unassigned,
+    Exact(i64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestLibraryYearFilter {
+    Any,
+    Unassigned,
+    Exact(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestLibraryArchiveFilter {
+    All,
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestLibraryScope {
+    All,
+    Family {
+        family_id: i64,
+        series: ContestLibrarySeriesFilter,
+        year: ContestLibraryYearFilter,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContestLibraryError {
+    InvalidId,
+    InvalidName,
+    InvalidYear,
+    InvalidOrdinal,
+    FamilyNotFound,
+    SeriesNotFound,
+    ContestNotFound,
+    PlacementNotFound,
+    DuplicateFamilyName,
+    DuplicateSeriesName,
+    DuplicatePlacement,
+    SeriesFamilyMismatch,
+    PersistenceUnavailable,
+    IntegrityViolation,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ContestLibraryPort {
+    async fn list_families(&self) -> Result<Vec<ContestFamily>, ContestLibraryError>;
+    async fn create_family(&self, display_name: &str)
+        -> Result<ContestFamily, ContestLibraryError>;
+    async fn rename_family(
+        &self,
+        family_id: i64,
+        display_name: &str,
+    ) -> Result<ContestFamily, ContestLibraryError>;
+    async fn list_series(&self, family_id: i64) -> Result<Vec<ContestSeries>, ContestLibraryError>;
+    async fn create_series(
+        &self,
+        family_id: i64,
+        display_name: &str,
+    ) -> Result<ContestSeries, ContestLibraryError>;
+    async fn rename_series(
+        &self,
+        series_id: i64,
+        display_name: &str,
+    ) -> Result<ContestSeries, ContestLibraryError>;
+    async fn list_years(
+        &self,
+        family_id: i64,
+        series: ContestLibrarySeriesFilter,
+    ) -> Result<Vec<Option<u32>>, ContestLibraryError>;
+    async fn list_contest_placements(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<Vec<ContestPlacement>, ContestLibraryError>;
+    async fn create_placement(
+        &self,
+        input: &CreateContestPlacement,
+    ) -> Result<ContestPlacement, ContestLibraryError>;
+    async fn update_placement(
+        &self,
+        input: &UpdateContestPlacement,
+    ) -> Result<ContestPlacement, ContestLibraryError>;
+    async fn remove_placement(&self, placement_id: i64) -> Result<(), ContestLibraryError>;
+    async fn list_library_contests(
+        &self,
+        scope: ContestLibraryScope,
+        archive: ContestLibraryArchiveFilter,
+    ) -> Result<Vec<ContestShelfItem>, ContestLibraryError>;
+}
+
+fn normalize_contest_library_name(value: &str) -> Result<String, ContestLibraryError> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(ContestLibraryError::InvalidName);
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_contest_library_id(value: i64) -> Result<i64, ContestLibraryError> {
+    (value > 0)
+        .then_some(value)
+        .ok_or(ContestLibraryError::InvalidId)
+}
+
+fn validate_contest_library_year(value: Option<u32>) -> Result<Option<u32>, ContestLibraryError> {
+    if value == Some(0) {
+        Err(ContestLibraryError::InvalidYear)
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_contest_library_ordinal(
+    value: Option<u32>,
+) -> Result<Option<u32>, ContestLibraryError> {
+    if value == Some(0) {
+        Err(ContestLibraryError::InvalidOrdinal)
+    } else {
+        Ok(value)
+    }
+}
+
+pub async fn list_families<P: ContestLibraryPort>(
+    port: &P,
+) -> Result<Vec<ContestFamily>, ContestLibraryError> {
+    port.list_families().await
+}
+
+pub async fn create_family<P: ContestLibraryPort>(
+    port: &P,
+    display_name: &str,
+) -> Result<ContestFamily, ContestLibraryError> {
+    let display_name = normalize_contest_library_name(display_name)?;
+    port.create_family(&display_name).await
+}
+
+pub async fn rename_family<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+    display_name: &str,
+) -> Result<ContestFamily, ContestLibraryError> {
+    let family_id = validate_contest_library_id(family_id)?;
+    let display_name = normalize_contest_library_name(display_name)?;
+    port.rename_family(family_id, &display_name).await
+}
+
+pub async fn list_series<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+) -> Result<Vec<ContestSeries>, ContestLibraryError> {
+    port.list_series(validate_contest_library_id(family_id)?)
+        .await
+}
+
+pub async fn create_series<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+    display_name: &str,
+) -> Result<ContestSeries, ContestLibraryError> {
+    let family_id = validate_contest_library_id(family_id)?;
+    let display_name = normalize_contest_library_name(display_name)?;
+    port.create_series(family_id, &display_name).await
+}
+
+pub async fn rename_series<P: ContestLibraryPort>(
+    port: &P,
+    series_id: i64,
+    display_name: &str,
+) -> Result<ContestSeries, ContestLibraryError> {
+    let series_id = validate_contest_library_id(series_id)?;
+    let display_name = normalize_contest_library_name(display_name)?;
+    port.rename_series(series_id, &display_name).await
+}
+
+pub async fn list_years<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+    series: ContestLibrarySeriesFilter,
+) -> Result<Vec<Option<u32>>, ContestLibraryError> {
+    let family_id = validate_contest_library_id(family_id)?;
+    if let ContestLibrarySeriesFilter::Exact(series_id) = series {
+        validate_contest_library_id(series_id)?;
+    }
+    port.list_years(family_id, series).await
+}
+
+pub async fn list_contest_placements<P: ContestLibraryPort>(
+    port: &P,
+    contest: &acm_os_domain::CodeforcesContestIdentity,
+) -> Result<Vec<ContestPlacement>, ContestLibraryError> {
+    port.list_contest_placements(contest).await
+}
+
+pub async fn create_placement<P: ContestLibraryPort>(
+    port: &P,
+    mut input: CreateContestPlacement,
+) -> Result<ContestPlacement, ContestLibraryError> {
+    input.family_id = validate_contest_library_id(input.family_id)?;
+    if let Some(series_id) = input.series_id {
+        input.series_id = Some(validate_contest_library_id(series_id)?);
+    }
+    input.year = validate_contest_library_year(input.year)?;
+    input.ordinal = validate_contest_library_ordinal(input.ordinal)?;
+    port.create_placement(&input).await
+}
+
+pub async fn update_placement<P: ContestLibraryPort>(
+    port: &P,
+    mut input: UpdateContestPlacement,
+) -> Result<ContestPlacement, ContestLibraryError> {
+    input.placement_id = validate_contest_library_id(input.placement_id)?;
+    input.family_id = validate_contest_library_id(input.family_id)?;
+    if let Some(series_id) = input.series_id {
+        input.series_id = Some(validate_contest_library_id(series_id)?);
+    }
+    input.year = validate_contest_library_year(input.year)?;
+    input.ordinal = validate_contest_library_ordinal(input.ordinal)?;
+    port.update_placement(&input).await
+}
+
+pub async fn remove_placement<P: ContestLibraryPort>(
+    port: &P,
+    placement_id: i64,
+) -> Result<(), ContestLibraryError> {
+    port.remove_placement(validate_contest_library_id(placement_id)?)
+        .await
+}
+
+pub async fn list_library_contests<P: ContestLibraryPort>(
+    port: &P,
+    scope: ContestLibraryScope,
+    archive: ContestLibraryArchiveFilter,
+) -> Result<Vec<ContestShelfItem>, ContestLibraryError> {
+    if let ContestLibraryScope::Family {
+        family_id,
+        series,
+        year,
+    } = scope
+    {
+        validate_contest_library_id(family_id)?;
+        if let ContestLibrarySeriesFilter::Exact(series_id) = series {
+            validate_contest_library_id(series_id)?;
+        }
+        if let ContestLibraryYearFilter::Exact(value) = year {
+            if value == 0 {
+                return Err(ContestLibraryError::InvalidYear);
+            }
+        }
+    }
+    port.list_library_contests(scope, archive).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContestAiAnalysis {
     pub raw_text: String,
     pub parse_status: ContestAiParseStatus,

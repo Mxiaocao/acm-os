@@ -61,6 +61,145 @@ pub struct ContestShelfItemDto {
     archived: bool,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryFamilyDto {
+    family_id: i64,
+    display_name: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibrarySeriesDto {
+    series_id: i64,
+    family_id: i64,
+    display_name: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryPlacementDto {
+    placement_id: i64,
+    family_id: i64,
+    family_name: String,
+    series_id: Option<i64>,
+    series_name: Option<String>,
+    year: Option<u32>,
+    ordinal: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContestLibrarySeriesFilterDto {
+    Any,
+    Unassigned,
+    Exact {
+        #[serde(rename = "seriesId")]
+        series_id: i64,
+    },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContestLibraryYearFilterDto {
+    Any,
+    Unassigned,
+    Exact { year: u32 },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContestLibraryScopeDto {
+    All,
+    Family {
+        #[serde(rename = "familyId")]
+        family_id: i64,
+        series: ContestLibrarySeriesFilterDto,
+        year: ContestLibraryYearFilterDto,
+    },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContestLibraryArchiveFilterDto {
+    All,
+    Active,
+    Archived,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryFamilyInput {
+    display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryFamilyRenameInput {
+    family_id: i64,
+    display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryFamilyIdInput {
+    family_id: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibrarySeriesInput {
+    family_id: i64,
+    display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibrarySeriesRenameInput {
+    series_id: i64,
+    display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryYearsInput {
+    family_id: i64,
+    series: ContestLibrarySeriesFilterDto,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryPlacementInput {
+    contest_id: u64,
+    family_id: i64,
+    series_id: Option<i64>,
+    year: Option<u32>,
+    ordinal: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryPlacementUpdateInput {
+    placement_id: i64,
+    family_id: i64,
+    series_id: Option<i64>,
+    year: Option<u32>,
+    ordinal: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryPlacementRemoveInput {
+    placement_id: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryListInput {
+    scope: ContestLibraryScopeDto,
+    archive: ContestLibraryArchiveFilterDto,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContestDetailInput {
@@ -1069,6 +1208,204 @@ pub async fn contest_shelf(
         .await
         .map(|items| items.into_iter().map(contest_shelf_item_dto).collect())
         .map_err(|_| ())
+}
+
+#[tauri::command]
+pub async fn contest_library_list_families(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<ContestLibraryFamilyDto>, &'static str> {
+    acm_os_application::list_families(database.inner())
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| ContestLibraryFamilyDto {
+                    family_id: item.family_id,
+                    display_name: item.display_name,
+                })
+                .collect()
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_create_family(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryFamilyInput,
+) -> Result<ContestLibraryFamilyDto, &'static str> {
+    acm_os_application::create_family(database.inner(), &input.display_name)
+        .await
+        .map(|item| ContestLibraryFamilyDto {
+            family_id: item.family_id,
+            display_name: item.display_name,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_rename_family(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryFamilyRenameInput,
+) -> Result<ContestLibraryFamilyDto, &'static str> {
+    acm_os_application::rename_family(database.inner(), input.family_id, &input.display_name)
+        .await
+        .map(|item| ContestLibraryFamilyDto {
+            family_id: item.family_id,
+            display_name: item.display_name,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_list_series(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryFamilyIdInput,
+) -> Result<Vec<ContestLibrarySeriesDto>, &'static str> {
+    acm_os_application::list_series(database.inner(), input.family_id)
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| ContestLibrarySeriesDto {
+                    series_id: item.series_id,
+                    family_id: item.family_id,
+                    display_name: item.display_name,
+                })
+                .collect()
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_create_series(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibrarySeriesInput,
+) -> Result<ContestLibrarySeriesDto, &'static str> {
+    acm_os_application::create_series(database.inner(), input.family_id, &input.display_name)
+        .await
+        .map(|item| ContestLibrarySeriesDto {
+            series_id: item.series_id,
+            family_id: item.family_id,
+            display_name: item.display_name,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_rename_series(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibrarySeriesRenameInput,
+) -> Result<ContestLibrarySeriesDto, &'static str> {
+    acm_os_application::rename_series(database.inner(), input.series_id, &input.display_name)
+        .await
+        .map(|item| ContestLibrarySeriesDto {
+            series_id: item.series_id,
+            family_id: item.family_id,
+            display_name: item.display_name,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_list_years(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryYearsInput,
+) -> Result<Vec<Option<u32>>, &'static str> {
+    let series = contest_library_series_filter(input.series)?;
+    acm_os_application::list_years(database.inner(), input.family_id, series)
+        .await
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_list_contest_placements(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestDetailInput,
+) -> Result<Vec<ContestLibraryPlacementDto>, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    acm_os_application::list_contest_placements(database.inner(), &contest)
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| ContestLibraryPlacementDto {
+                    placement_id: item.placement_id,
+                    family_id: item.family_id,
+                    family_name: item.family_name,
+                    series_id: item.series_id,
+                    series_name: item.series_name,
+                    year: item.year,
+                    ordinal: item.ordinal,
+                })
+                .collect()
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_create_placement(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryPlacementInput,
+) -> Result<ContestLibraryPlacementDto, &'static str> {
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    acm_os_application::create_placement(
+        database.inner(),
+        acm_os_application::CreateContestPlacement {
+            contest,
+            family_id: input.family_id,
+            series_id: input.series_id,
+            year: input.year,
+            ordinal: input.ordinal,
+        },
+    )
+    .await
+    .map(contest_library_placement_dto)
+    .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_update_placement(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryPlacementUpdateInput,
+) -> Result<ContestLibraryPlacementDto, &'static str> {
+    acm_os_application::update_placement(
+        database.inner(),
+        acm_os_application::UpdateContestPlacement {
+            placement_id: input.placement_id,
+            family_id: input.family_id,
+            series_id: input.series_id,
+            year: input.year,
+            ordinal: input.ordinal,
+        },
+    )
+    .await
+    .map(contest_library_placement_dto)
+    .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_remove_placement(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryPlacementRemoveInput,
+) -> Result<(), &'static str> {
+    acm_os_application::remove_placement(database.inner(), input.placement_id)
+        .await
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_list_contests(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryListInput,
+) -> Result<Vec<ContestShelfItemDto>, &'static str> {
+    let scope = contest_library_scope(input.scope)?;
+    let archive = contest_library_archive_filter(input.archive);
+    acm_os_application::list_library_contests(database.inner(), scope, archive)
+        .await
+        .map(|items| items.into_iter().map(contest_shelf_item_dto).collect())
+        .map_err(contest_library_error_code)
 }
 
 #[tauri::command]
@@ -2273,6 +2610,113 @@ fn contest_management_error_code(
     match error {
         acm_os_application::ContestManagementError::Unavailable => "contest_management_unavailable",
         acm_os_application::ContestManagementError::NotFound => "contest_not_found",
+    }
+}
+
+fn contest_library_series_filter(
+    value: ContestLibrarySeriesFilterDto,
+) -> Result<acm_os_application::ContestLibrarySeriesFilter, &'static str> {
+    Ok(match value {
+        ContestLibrarySeriesFilterDto::Any => acm_os_application::ContestLibrarySeriesFilter::Any,
+        ContestLibrarySeriesFilterDto::Unassigned => {
+            acm_os_application::ContestLibrarySeriesFilter::Unassigned
+        }
+        ContestLibrarySeriesFilterDto::Exact { series_id } => {
+            if series_id <= 0 {
+                return Err("invalid_contest_library_id");
+            }
+            acm_os_application::ContestLibrarySeriesFilter::Exact(series_id)
+        }
+    })
+}
+
+fn contest_library_year_filter(
+    value: ContestLibraryYearFilterDto,
+) -> Result<acm_os_application::ContestLibraryYearFilter, &'static str> {
+    Ok(match value {
+        ContestLibraryYearFilterDto::Any => acm_os_application::ContestLibraryYearFilter::Any,
+        ContestLibraryYearFilterDto::Unassigned => {
+            acm_os_application::ContestLibraryYearFilter::Unassigned
+        }
+        ContestLibraryYearFilterDto::Exact { year } => {
+            if year == 0 {
+                return Err("invalid_year");
+            }
+            acm_os_application::ContestLibraryYearFilter::Exact(year)
+        }
+    })
+}
+
+fn contest_library_scope(
+    value: ContestLibraryScopeDto,
+) -> Result<acm_os_application::ContestLibraryScope, &'static str> {
+    match value {
+        ContestLibraryScopeDto::All => Ok(acm_os_application::ContestLibraryScope::All),
+        ContestLibraryScopeDto::Family {
+            family_id,
+            series,
+            year,
+        } => {
+            if family_id <= 0 {
+                return Err("invalid_contest_library_id");
+            }
+            Ok(acm_os_application::ContestLibraryScope::Family {
+                family_id,
+                series: contest_library_series_filter(series)?,
+                year: contest_library_year_filter(year)?,
+            })
+        }
+    }
+}
+
+fn contest_library_archive_filter(
+    value: ContestLibraryArchiveFilterDto,
+) -> acm_os_application::ContestLibraryArchiveFilter {
+    match value {
+        ContestLibraryArchiveFilterDto::All => acm_os_application::ContestLibraryArchiveFilter::All,
+        ContestLibraryArchiveFilterDto::Active => {
+            acm_os_application::ContestLibraryArchiveFilter::Active
+        }
+        ContestLibraryArchiveFilterDto::Archived => {
+            acm_os_application::ContestLibraryArchiveFilter::Archived
+        }
+    }
+}
+
+fn contest_library_placement_dto(
+    item: acm_os_application::ContestPlacement,
+) -> ContestLibraryPlacementDto {
+    ContestLibraryPlacementDto {
+        placement_id: item.placement_id,
+        family_id: item.family_id,
+        family_name: item.family_name,
+        series_id: item.series_id,
+        series_name: item.series_name,
+        year: item.year,
+        ordinal: item.ordinal,
+    }
+}
+
+fn contest_library_error_code(error: acm_os_application::ContestLibraryError) -> &'static str {
+    match error {
+        acm_os_application::ContestLibraryError::InvalidId => "invalid_contest_library_id",
+        acm_os_application::ContestLibraryError::InvalidName => "invalid_name",
+        acm_os_application::ContestLibraryError::InvalidYear => "invalid_year",
+        acm_os_application::ContestLibraryError::InvalidOrdinal => "invalid_ordinal",
+        acm_os_application::ContestLibraryError::FamilyNotFound => "family_not_found",
+        acm_os_application::ContestLibraryError::SeriesNotFound => "series_not_found",
+        acm_os_application::ContestLibraryError::ContestNotFound => "contest_not_found",
+        acm_os_application::ContestLibraryError::PlacementNotFound => "placement_not_found",
+        acm_os_application::ContestLibraryError::DuplicateFamilyName => "duplicate_family_name",
+        acm_os_application::ContestLibraryError::DuplicateSeriesName => "duplicate_series_name",
+        acm_os_application::ContestLibraryError::DuplicatePlacement => "duplicate_placement",
+        acm_os_application::ContestLibraryError::SeriesFamilyMismatch => "series_family_mismatch",
+        acm_os_application::ContestLibraryError::PersistenceUnavailable => {
+            "contest_library_persistence_unavailable"
+        }
+        acm_os_application::ContestLibraryError::IntegrityViolation => {
+            "contest_library_integrity_violation"
+        }
     }
 }
 
@@ -3866,14 +4310,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, knowledge_index_error_code, knowledge_understanding_dto,
-        knowledge_understanding_level, normalize_windows_verbatim_path, obsidian_open_uri,
-        parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
-        revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
-        startup_status_dto, workspace_error_dto, workspace_status_dto, CompleteReviewInput,
-        LightweightProblemDetailDto, PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto,
-        ReviewFailureReasonInput, StatementReadStateDto, TodayExtraSuggestionsPreviewDto,
-        TodayReplanPreviewDto,
+        app_shell_status_dto, contest_library_error_code, contest_library_placement_dto,
+        contest_library_scope, contest_library_series_filter, knowledge_index_error_code,
+        knowledge_understanding_dto, knowledge_understanding_level,
+        normalize_windows_verbatim_path, obsidian_open_uri, parse_review_completion_input,
+        personal_note_read_state_dto, problem_lifecycle_state_dto, revealed_review_help_dto,
+        review_action_dto, review_focus_dto, review_help_drawer_dto, startup_status_dto,
+        workspace_error_dto, workspace_status_dto, CompleteReviewInput, ContestLibraryScopeDto,
+        ContestLibrarySeriesFilterDto, LightweightProblemDetailDto,
+        PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
+        StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
     };
 
     #[test]
@@ -3888,6 +4334,76 @@ mod tests {
                 "supportedSchemaVersion": 1,
                 "foundSchemaVersion": null
             })
+        );
+    }
+
+    #[test]
+    fn contest_library_ipc_contract_uses_camel_case_tagged_filters_and_stable_errors() {
+        let series: ContestLibrarySeriesFilterDto = serde_json::from_value(json!({
+            "kind": "exact",
+            "seriesId": 42
+        }))
+        .expect("deserialize exact series filter");
+        assert_eq!(
+            contest_library_series_filter(series),
+            Ok(acm_os_application::ContestLibrarySeriesFilter::Exact(42))
+        );
+
+        let scope: ContestLibraryScopeDto = serde_json::from_value(json!({
+            "kind": "family",
+            "familyId": 3,
+            "series": { "kind": "unassigned" },
+            "year": { "kind": "exact", "year": 2026 }
+        }))
+        .expect("deserialize family scope");
+        assert_eq!(
+            contest_library_scope(scope),
+            Ok(acm_os_application::ContestLibraryScope::Family {
+                family_id: 3,
+                series: acm_os_application::ContestLibrarySeriesFilter::Unassigned,
+                year: acm_os_application::ContestLibraryYearFilter::Exact(2026),
+            })
+        );
+
+        let placement = contest_library_placement_dto(acm_os_application::ContestPlacement {
+            placement_id: 9,
+            family_id: 3,
+            family_name: "Codeforces".to_owned(),
+            series_id: None,
+            series_name: None,
+            year: Some(2026),
+            ordinal: None,
+        });
+        assert_eq!(
+            serde_json::to_value(placement).expect("serialize placement DTO"),
+            json!({
+                "placementId": 9,
+                "familyId": 3,
+                "familyName": "Codeforces",
+                "seriesId": null,
+                "seriesName": null,
+                "year": 2026,
+                "ordinal": null
+            })
+        );
+
+        assert_eq!(
+            contest_library_error_code(acm_os_application::ContestLibraryError::InvalidName),
+            "invalid_name"
+        );
+        assert_eq!(
+            contest_library_error_code(acm_os_application::ContestLibraryError::DuplicatePlacement),
+            "duplicate_placement"
+        );
+        assert_eq!(
+            contest_library_error_code(
+                acm_os_application::ContestLibraryError::SeriesFamilyMismatch
+            ),
+            "series_family_mismatch"
+        );
+        assert_eq!(
+            contest_library_error_code(acm_os_application::ContestLibraryError::PlacementNotFound),
+            "placement_not_found"
         );
     }
 

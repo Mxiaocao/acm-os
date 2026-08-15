@@ -9,6 +9,53 @@ export interface ContestShelfItemDto {
   archived: boolean;
 }
 
+export interface ContestLibraryFamilyDto {
+  familyId: number;
+  displayName: string;
+}
+
+export interface ContestLibrarySeriesDto {
+  seriesId: number;
+  familyId: number;
+  displayName: string;
+}
+
+export interface ContestLibraryPlacementDto {
+  placementId: number;
+  familyId: number;
+  familyName: string;
+  seriesId: number | null;
+  seriesName: string | null;
+  year: number | null;
+  ordinal: number | null;
+}
+
+export type ContestLibrarySeriesFilterDto =
+  | { kind: "any" }
+  | { kind: "unassigned" }
+  | { kind: "exact"; seriesId: number };
+
+export type ContestLibraryYearFilterDto =
+  | { kind: "any" }
+  | { kind: "unassigned" }
+  | { kind: "exact"; year: number };
+
+export type ContestLibraryScopeDto =
+  | { kind: "all" }
+  | {
+      kind: "family";
+      familyId: number;
+      series: ContestLibrarySeriesFilterDto;
+      year: ContestLibraryYearFilterDto;
+    };
+
+export type ContestLibraryArchiveFilterDto = "all" | "active" | "archived";
+
+export interface ContestLibraryListInput {
+  scope: ContestLibraryScopeDto;
+  archive: ContestLibraryArchiveFilterDto;
+}
+
 export interface ContestDetailDto {
   contestId: number;
   title: string;
@@ -286,6 +333,96 @@ export function importCodeforcesContest(contestUrl: string): Promise<ContestImpo
 
 export function getContestShelf(): Promise<ContestShelfItemDto[]> {
   return invoke<ContestShelfItemDto[]>("contest_shelf");
+}
+
+export function listContestLibraryFamilies(): Promise<ContestLibraryFamilyDto[]> {
+  return invoke<ContestLibraryFamilyDto[]>("contest_library_list_families");
+}
+
+export function createContestLibraryFamily(displayName: string): Promise<ContestLibraryFamilyDto> {
+  return invoke<ContestLibraryFamilyDto>("contest_library_create_family", {
+    input: { displayName },
+  });
+}
+
+export function renameContestLibraryFamily(
+  familyId: number,
+  displayName: string,
+): Promise<ContestLibraryFamilyDto> {
+  return invoke<ContestLibraryFamilyDto>("contest_library_rename_family", {
+    input: { familyId, displayName },
+  });
+}
+
+export function listContestLibrarySeries(familyId: number): Promise<ContestLibrarySeriesDto[]> {
+  return invoke<ContestLibrarySeriesDto[]>("contest_library_list_series", {
+    input: { familyId },
+  });
+}
+
+export function createContestLibrarySeries(
+  familyId: number,
+  displayName: string,
+): Promise<ContestLibrarySeriesDto> {
+  return invoke<ContestLibrarySeriesDto>("contest_library_create_series", {
+    input: { familyId, displayName },
+  });
+}
+
+export function renameContestLibrarySeries(
+  seriesId: number,
+  displayName: string,
+): Promise<ContestLibrarySeriesDto> {
+  return invoke<ContestLibrarySeriesDto>("contest_library_rename_series", {
+    input: { seriesId, displayName },
+  });
+}
+
+export function listContestLibraryYears(
+  familyId: number,
+  series: ContestLibrarySeriesFilterDto,
+): Promise<Array<number | null>> {
+  return invoke<Array<number | null>>("contest_library_list_years", {
+    input: { familyId, series },
+  });
+}
+
+export function listContestLibraryPlacements(
+  contestId: number,
+): Promise<ContestLibraryPlacementDto[]> {
+  return invoke<ContestLibraryPlacementDto[]>("contest_library_list_contest_placements", {
+    input: { contestId },
+  });
+}
+
+export function createContestLibraryPlacement(input: {
+  contestId: number;
+  familyId: number;
+  seriesId: number | null;
+  year: number | null;
+  ordinal: number | null;
+}): Promise<ContestLibraryPlacementDto> {
+  return invoke<ContestLibraryPlacementDto>("contest_library_create_placement", { input });
+}
+
+export function updateContestLibraryPlacement(input: {
+  placementId: number;
+  familyId: number;
+  seriesId: number | null;
+  year: number | null;
+  ordinal: number | null;
+}): Promise<ContestLibraryPlacementDto> {
+  return invoke<ContestLibraryPlacementDto>("contest_library_update_placement", { input });
+}
+
+export function removeContestLibraryPlacement(placementId: number): Promise<void> {
+  return invoke<void>("contest_library_remove_placement", { input: { placementId } });
+}
+
+export function listContestLibraryContests(
+  input: ContestLibraryListInput,
+): Promise<ContestShelfItemDto[]> {
+  return invoke<ContestShelfItemDto[]>("contest_library_list_contests", { input });
 }
 
 export function getContestDetail(contestId: number): Promise<ContestDetailDto> {
