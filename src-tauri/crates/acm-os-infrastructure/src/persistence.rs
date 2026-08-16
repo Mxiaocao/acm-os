@@ -9334,6 +9334,7 @@ async fn validate_schema_contract(
             | 22
             | 23
             | 24
+            | 25
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9460,7 +9461,10 @@ async fn validate_schema_contract(
     if schema_version >= 22 {
         validate_knowledge_index_contract(pool).await?;
     }
-    if schema_version >= 24 {
+    if schema_version == 24 {
+        validate_contest_collections_contract(pool).await?;
+    }
+    if schema_version >= 25 {
         validate_contest_library_contract(pool).await?;
     }
     Ok(())
@@ -9722,7 +9726,32 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
     if schema_version >= 22 {
         expected_objects.sort();
     }
-    if schema_version >= 24 {
+    if schema_version == 24 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "idx_contest_collection_memberships_contest".to_owned(),
+                "contest_collection_memberships".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "idx_contest_collection_memberships_order".to_owned(),
+                "contest_collection_memberships".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "contest_collection_memberships".to_owned(),
+                "contest_collection_memberships".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "contest_collections".to_owned(),
+                "contest_collections".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 25 {
         expected_objects.extend([
             (
                 "index".to_owned(),
@@ -9753,6 +9782,64 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
         expected_objects.sort();
     }
     expected_objects
+}
+
+async fn validate_contest_collections_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "contest_collections",
+        &[
+            "id",
+            "collection_key",
+            "display_name",
+            "sort_order",
+            "created_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "contest_collection_memberships",
+        &["collection_id", "contest_id", "ordinal", "created_at_utc"],
+    )
+    .await?;
+
+    const COLLECTIONS_SQL: &str = "\
+        CREATE TABLE contest_collections (\
+            id INTEGER PRIMARY KEY,\
+            collection_key TEXT NOT NULL UNIQUE CHECK (length(collection_key) > 0),\
+            display_name TEXT NOT NULL CHECK (length(display_name) > 0),\
+            sort_order INTEGER NOT NULL CHECK (sort_order > 0),\
+            created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+        )";
+    const MEMBERSHIPS_SQL: &str = "\
+        CREATE TABLE contest_collection_memberships (\
+            collection_id INTEGER NOT NULL REFERENCES contest_collections(id) ON DELETE CASCADE,\
+            contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,\
+            ordinal INTEGER CHECK (ordinal IS NULL OR ordinal > 0),\
+            created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
+            PRIMARY KEY (collection_id, contest_id),\
+            UNIQUE (collection_id, ordinal)\
+        )";
+    for (table, expected) in [
+        ("contest_collections", COLLECTIONS_SQL),
+        ("contest_collection_memberships", MEMBERSHIPS_SQL),
+    ] {
+        let actual: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        )
+        .bind(table)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+        .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+        if normalize_schema_sql(&actual) != normalize_schema_sql(expected) {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+    Ok(())
 }
 
 async fn validate_contest_library_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
@@ -10486,6 +10573,10 @@ async fn validate_table_columns(
         "contest_correction_events" => "PRAGMA table_xinfo('contest_correction_events')",
         "contest_ai_analyses" => "PRAGMA table_xinfo('contest_ai_analyses')",
         "critical_operations" => "PRAGMA table_xinfo('critical_operations')",
+        "contest_collections" => "PRAGMA table_xinfo('contest_collections')",
+        "contest_collection_memberships" => {
+            "PRAGMA table_xinfo('contest_collection_memberships')"
+        }
         "contest_families" => "PRAGMA table_xinfo('contest_families')",
         "contest_series" => "PRAGMA table_xinfo('contest_series')",
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
@@ -12612,7 +12703,7 @@ mod tests {
             "DROP TABLE contest_placements",
             "DROP TABLE contest_series",
             "DROP TABLE contest_families",
-            "DELETE FROM _sqlx_migrations WHERE version = 24",
+            "DELETE FROM _sqlx_migrations WHERE version IN (24, 25)",
             "UPDATE app_metadata SET schema_generation = 23 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -12621,6 +12712,36 @@ mod tests {
                 .expect("rewrite schema 23");
         }
         transaction.commit().await.expect("commit schema 23");
+    }
+
+    async fn rewrite_as_schema_24_collections(pool: &SqlitePool) {
+        let mut transaction = pool.begin().await.expect("schema 24 transaction");
+        for statement in [
+            "DROP INDEX contest_placements_by_path",
+            "DROP INDEX contest_placements_unique_identity",
+            "DROP TABLE contest_placements",
+            "DROP TABLE contest_series",
+            "DROP TABLE contest_families",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await
+                .expect("remove schema 25 contest library");
+        }
+        sqlx::raw_sql(include_str!(
+            "../migrations/0024_create_contest_collections.sql"
+        ))
+        .execute(&mut *transaction)
+        .await
+        .expect("restore historical schema 24");
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 25")
+            .execute(&mut *transaction)
+            .await
+            .expect("remove schema 25 ledger row");
+        transaction
+            .commit()
+            .await
+            .expect("commit historical schema 24");
     }
 
     async fn insert_contest_row(pool: &SqlitePool, external_key: i64) -> i64 {
@@ -12675,7 +12796,7 @@ mod tests {
             "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
             "DROP TABLE today_plan_entries_current",
             "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
-            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)",
+            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)",
             "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -12698,23 +12819,23 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 24);
+        assert_eq!(ledger_count, 25);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 24);
-        validate_schema_contract(pool, 24)
+        assert_eq!(schema_generation, 25);
+        validate_schema_contract(pool, 25)
             .await
-            .expect("generation 24 schema contract");
+            .expect("generation 25 schema contract");
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -12729,6 +12850,8 @@ mod tests {
              VALUES (41, 'codeforces', 1979, 'Preserved Contest', 'https://codeforces.com/contest/1979', '2025-08-01T00:00:00Z', 'complete', 'completed', '2025-08-01T03:00:00Z', '2026-01-01T00:00:00Z');\
              INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url, identity_type) \
              VALUES (51, 'codeforces', 1979, 'A', 'Preserved Problem', 'https://codeforces.com/contest/1979/problem/A', 'personal');\
+             INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) \
+             VALUES (51, '<p>source</p>', '<p>safe</p>');\
              INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) \
              VALUES (51, 'long_term_review', '2025-08-02T00:00:00Z');\
              INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state, final_contest_result, upsolve_decision) \
@@ -12759,7 +12882,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -12797,10 +12920,217 @@ mod tests {
         let placement_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contest_placements")
             .fetch_one(pool)
             .await
-            .expect("zero placements");
-        assert_eq!(placement_count, 0);
+            .expect("system placements");
+        assert_eq!(placement_count, 1);
         let backups = files_under(&directory.path().join("backups/pre-migration"));
         assert_eq!(backups.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn historical_schema_24_migrates_all_memberships_without_changing_contest_identity() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool").clone();
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
+             VALUES (71, 'codeforces', 4001, 'Legacy One', 'https://codeforces.com/contest/4001', '2024-08-01T00:00:00Z', 'complete');\
+             INSERT INTO contests (id, platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
+             VALUES (72, 'codeforces', 4002, 'Legacy Two', 'https://codeforces.com/contest/4002', '2026-05-01T00:00:00Z', 'complete');\
+             INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url) \
+             VALUES (81, 'codeforces', 4001, 'A', 'Legacy Problem', 'https://codeforces.com/contest/4001/problem/A');\
+             INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) \
+             VALUES (71, 81, 1, 'ready');\
+             INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) \
+             VALUES (81, '<p>source</p>', '<p>safe</p>');\
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) \
+             VALUES (81, 'upsolve_pending', '2026-08-01T00:00:00Z');",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy authoritative facts");
+        let facts_before: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contests), \
+                    (SELECT COUNT(*) FROM problems), \
+                    (SELECT COUNT(*) FROM problem_statement_snapshots), \
+                    (SELECT COUNT(*) FROM problem_learning_states)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("facts before migration");
+
+        drop(runtime);
+        rewrite_as_schema_24_collections(&pool).await;
+        sqlx::raw_sql(
+            "INSERT INTO contest_collection_memberships (collection_id, contest_id, ordinal) \
+             SELECT id, 71, 1 FROM contest_collections WHERE collection_key = 'hdu_multi_2026';\
+             INSERT INTO contest_collection_memberships (collection_id, contest_id, ordinal) \
+             SELECT id, 72, 2 FROM contest_collections WHERE collection_key = 'xcpc_provincial';\
+             INSERT INTO contest_collections (id, collection_key, display_name, sort_order) \
+             VALUES (100, 'custom_training', '私人收藏', 90);\
+             INSERT INTO contest_collection_memberships (collection_id, contest_id, ordinal) \
+             VALUES (100, 72, 1);",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy collection facts");
+        let schema_objects: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT type, name, tbl_name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("historical schema objects");
+        assert_eq!(schema_objects, expected_schema_objects(24));
+        validate_contest_collections_contract(&pool)
+            .await
+            .expect("historical collection table contract");
+        validate_schema_contract(&pool, 24)
+            .await
+            .expect("historical schema 24 contract");
+        verify_integrity(&pool)
+            .await
+            .expect("historical schema 24 integrity");
+        let ledger: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT description, checksum FROM _sqlx_migrations WHERE version = 24",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("historical migration ledger");
+        let embedded = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 24)
+            .expect("embedded historical migration");
+        assert_eq!(ledger.0, "create contest collections");
+        assert_eq!(ledger.1.as_slice(), embedded.checksum.as_ref());
+        let legacy_membership_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_collection_memberships")
+                .fetch_one(&pool)
+                .await
+                .expect("legacy memberships");
+        assert_eq!(legacy_membership_count, 5);
+        pool.close().await;
+
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(
+            upgraded.status(),
+            &StartupGateStatus::Ready { schema_version: 25 }
+        );
+        let pool = upgraded._pool.as_ref().expect("upgraded pool");
+        validate_schema_contract(pool, 25)
+            .await
+            .expect("schema 25 contract");
+        verify_integrity(pool).await.expect("schema 25 integrity");
+        let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contests), \
+                    (SELECT COUNT(*) FROM problems), \
+                    (SELECT COUNT(*) FROM problem_statement_snapshots), \
+                    (SELECT COUNT(*) FROM problem_learning_states)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("facts after migration");
+        assert_eq!(facts_after, facts_before);
+        let contest_identities: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT id, external_contest_key FROM contests ORDER BY id")
+                .fetch_all(pool)
+                .await
+                .expect("contest identities");
+        assert_eq!(contest_identities, [(71, 4001), (72, 4002)]);
+
+        let placements: Vec<(i64, String, Option<String>, Option<i64>, Option<i64>)> =
+            sqlx::query_as(
+                "SELECT c.external_contest_key, f.display_name, s.display_name, p.year, p.ordinal \
+                 FROM contest_placements p \
+                 JOIN contests c ON c.id = p.contest_id \
+                 JOIN contest_families f ON f.id = p.family_id \
+                 LEFT JOIN contest_series s ON s.id = p.series_id \
+                 ORDER BY c.external_contest_key, f.display_name, s.display_name",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("migrated placements");
+        assert_eq!(placements.len() as i64, legacy_membership_count);
+        assert!(placements.contains(&(
+            4001,
+            "Codeforces".to_owned(),
+            None,
+            Some(2024),
+            None,
+        )));
+        assert!(placements.contains(&(
+            4001,
+            "杭电".to_owned(),
+            Some("暑期多校".to_owned()),
+            Some(2026),
+            Some(1),
+        )));
+        assert!(placements.contains(&(
+            4002,
+            "XCPC".to_owned(),
+            Some("省赛".to_owned()),
+            Some(2026),
+            Some(2),
+        )));
+        assert!(placements.contains(&(
+            4002,
+            "私人收藏 [custom_training#100]".to_owned(),
+            None,
+            None,
+            Some(1),
+        )));
+        let legacy_objects: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE name IN ('contest_collections', 'contest_collection_memberships', \
+                            'idx_contest_collection_memberships_contest', \
+                            'idx_contest_collection_memberships_order')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("legacy object cleanup");
+        assert_eq!(legacy_objects, 0);
+        let invitation_series: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contest_series s \
+             JOIN contest_families f ON f.id = s.family_id \
+             WHERE f.display_name = 'XCPC' AND s.display_name = '邀请赛'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("invitation series seed");
+        assert_eq!(invitation_series, 1);
+    }
+
+    #[tokio::test]
+    async fn contest_collection_migration_rolls_back_as_one_transaction() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool").clone();
+        drop(runtime);
+        rewrite_as_schema_24_collections(&pool).await;
+
+        let mut transaction = pool.begin().await.expect("migration transaction");
+        sqlx::raw_sql(include_str!(
+            "../migrations/0025_migrate_contest_collections_to_library.sql"
+        ))
+        .execute(&mut *transaction)
+        .await
+        .expect("migration statements");
+        assert!(sqlx::query("SELECT * FROM contest_collections")
+            .fetch_all(&mut *transaction)
+            .await
+            .is_err());
+        transaction.rollback().await.expect("rollback migration");
+
+        validate_schema_contract(&pool, 24)
+            .await
+            .expect("historical contract after rollback");
+        let generation: i64 =
+            sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("schema generation after rollback");
+        assert_eq!(generation, 24);
+        verify_integrity(&pool)
+            .await
+            .expect("integrity after rollback");
     }
 
     #[tokio::test]
@@ -12823,7 +13153,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("placement count");
-        assert_eq!((series_count, placement_count), (0, 0));
+        assert_eq!((series_count, placement_count), (6, 0));
 
         assert!(
             sqlx::query("INSERT INTO contest_families (display_name) VALUES ('codeforces')")
@@ -12854,19 +13184,21 @@ mod tests {
                 .fetch_one(pool)
                 .await
                 .expect("Nowcoder family");
-        let hdu_series_id = sqlx::query(
-            "INSERT INTO contest_series (family_id, display_name) VALUES (?1, '暑期多校')",
+        let hdu_series_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM contest_series WHERE family_id = ?1 AND display_name = '暑期多校'",
         )
         .bind(hdu_id)
-        .execute(pool)
+        .fetch_one(pool)
         .await
-        .expect("HDU series")
-        .last_insert_rowid();
-        sqlx::query("INSERT INTO contest_series (family_id, display_name) VALUES (?1, '暑期多校')")
+        .expect("HDU series");
+        let nowcoder_series_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM contest_series WHERE family_id = ?1 AND display_name = '暑期多校'",
+        )
             .bind(nowcoder_id)
-            .execute(pool)
+            .fetch_one(pool)
             .await
             .expect("same series name under another family");
+        assert_ne!(hdu_series_id, nowcoder_series_id);
         assert!(sqlx::query(
             "INSERT INTO contest_series (family_id, display_name) VALUES (?1, '暑期多校')",
         )
@@ -13067,12 +13399,18 @@ mod tests {
             Err(acm_os_application::ContestLibraryError::DuplicateFamilyName)
         );
 
-        let hdu_series = acm_os_application::create_series(&runtime, hdu_id, "暑期多校")
+        let hdu_series = acm_os_application::list_series(&runtime, hdu_id)
             .await
-            .expect("HDU series");
-        let nowcoder_series = acm_os_application::create_series(&runtime, nowcoder_id, "暑期多校")
+            .expect("HDU series list")
+            .into_iter()
+            .find(|series| series.display_name == "暑期多校")
+            .expect("seeded HDU series");
+        let nowcoder_series = acm_os_application::list_series(&runtime, nowcoder_id)
             .await
-            .expect("same series name under another family");
+            .expect("Nowcoder series list")
+            .into_iter()
+            .find(|series| series.display_name == "暑期多校")
+            .expect("seeded Nowcoder series");
         assert_ne!(hdu_series.series_id, nowcoder_series.series_id);
         assert_eq!(
             acm_os_application::create_series(&runtime, hdu_id, "暑期多校").await,
@@ -13083,7 +13421,7 @@ mod tests {
                 .await
                 .expect("series list")
                 .len(),
-            1
+            2
         );
         let empty_series = acm_os_application::create_series(&runtime, hdu_id, "空系列")
             .await
@@ -13490,7 +13828,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -13525,7 +13863,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-24-"));
+            .starts_with("schema-10-to-25-"));
     }
 
     #[tokio::test]
@@ -17162,7 +17500,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
     }
 
@@ -17228,7 +17566,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17261,7 +17599,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17306,7 +17644,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -17471,7 +17809,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
     }
 
@@ -17680,7 +18018,7 @@ mod tests {
                  updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
              );\
              UPDATE app_metadata SET schema_generation = 22 WHERE singleton = 1;\
-             DELETE FROM _sqlx_migrations WHERE version IN (23, 24);",
+             DELETE FROM _sqlx_migrations WHERE version IN (23, 24, 25);",
         )
         .execute(&older_pool)
         .await
@@ -17691,7 +18029,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 24);
+        assert_eq!(preview.supported_schema_version, 25);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -18173,7 +18511,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -18265,7 +18603,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-24-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-25-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -18390,7 +18728,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 25), \
+                        CHECK (schema_generation < 26), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -18525,7 +18863,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -18559,7 +18897,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -19264,7 +19602,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 24 }
+            &StartupGateStatus::Ready { schema_version: 25 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
