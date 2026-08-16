@@ -37,6 +37,18 @@ import {
   deletePersonalNote,
   getContestDetail,
   getContestShelf,
+  listContestLibraryFamilies,
+  createContestLibraryFamily,
+  renameContestLibraryFamily,
+  listContestLibrarySeries,
+  createContestLibrarySeries,
+  renameContestLibrarySeries,
+  listContestLibraryYears,
+  listContestLibraryPlacements,
+  createContestLibraryPlacement,
+  updateContestLibraryPlacement,
+  removeContestLibraryPlacement,
+  listContestLibraryContests,
   getLightweightProblemDetail,
   getLightweightProblems,
   getPersonalNoteProjection,
@@ -71,6 +83,13 @@ import {
   type ContestFinalResultDto,
   type ContestUpsolveDecisionDto,
   type ContestShelfItemDto,
+  type ContestLibraryFamilyDto,
+  type ContestLibrarySeriesDto,
+  type ContestLibraryPlacementDto,
+  type ContestLibrarySeriesFilterDto,
+  type ContestLibraryYearFilterDto,
+  type ContestLibraryScopeDto,
+  type ContestLibraryArchiveFilterDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
@@ -706,7 +725,7 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
       </>
     );
   }
-  if (page === "contests") return <ContestShelf navigate={navigate} />;
+  if (page === "contests") return <ContestLibraryPage navigate={navigate} />;
   if (page === "problems") return <ProblemIndex navigate={navigate} />;
   return <KnowledgePage navigate={navigate} />;
 }
@@ -1243,6 +1262,160 @@ function todayStatusLabel(status: TodayEntryDto["status"]) { return ({ notStarte
 function todayReasonLabel(reason: TodayEntryDto["reason"]) { return ({ continueReview: "Continue Review", continueLearning: "Continue learning", dueFirstColdStart: "First cold-start Review", dueLongTermReview: "Long-term Review", relearn: "Relearn", upsolve: "Upsolve" } as const)[reason]; }
 function todayErrorMessage(cause: unknown) { const code = String(cause); if (code.includes("stale_today")) return "The Today plan changed. Reload and try again."; if (code.includes("invalid_today_done")) return "This entry cannot be completed from Today."; if (code.includes("invalid_today_reorder")) return "The saved order changed. Reload and try again."; if (code.includes("today_integrity")) return "Today data failed an integrity check."; return "Today is temporarily unavailable."; }
 
+function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const [families, setFamilies] = useState<ContestLibraryFamilyDto[] | null>(null);
+  const [series, setSeries] = useState<ContestLibrarySeriesDto[]>([]);
+  const [years, setYears] = useState<Array<number | null>>([]);
+  const [items, setItems] = useState<ContestShelfItemDto[] | null>(null);
+  const [familyId, setFamilyId] = useState<number | null>(null);
+  const [seriesFilter, setSeriesFilter] = useState<ContestLibrarySeriesFilterDto>({ kind: "any" });
+  const [yearFilter, setYearFilter] = useState<ContestLibraryYearFilterDto>({ kind: "any" });
+  const [archiveFilter, setArchiveFilter] = useState<ContestLibraryArchiveFilterDto>("active");
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
+  const [managementMessage, setManagementMessage] = useState<string | null>(null);
+  const [managementBusy, setManagementBusy] = useState(false);
+  const [familyDraft, setFamilyDraft] = useState("");
+  const [seriesDraft, setSeriesDraft] = useState("");
+  const [editingFamily, setEditingFamily] = useState<number | null>(null);
+  const [editingSeries, setEditingSeries] = useState<number | null>(null);
+  const familyRequest = useRef(0);
+  const libraryRequest = useRef(0);
+  const [contestUrl, setContestUrl] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [manualContestId, setManualContestId] = useState("");
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualDate, setManualDate] = useState("");
+  const [manualProblems, setManualProblems] = useState([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
+
+  useEffect(() => {
+    let active = true;
+    listContestLibraryFamilies().then((next) => { if (active) setFamilies(next); }).catch(() => { if (active) setFailed(true); });
+    return () => { active = false; };
+  }, [retryNonce]);
+
+  useEffect(() => {
+    const request = ++familyRequest.current;
+    if (familyId === null) { setSeries([]); setYears([]); return; }
+    Promise.all([listContestLibrarySeries(familyId), listContestLibraryYears(familyId, seriesFilter)])
+      .then(([nextSeries, nextYears]) => {
+        if (request !== familyRequest.current) return;
+        setSeries(nextSeries); setYears(nextYears);
+      })
+      .catch(() => { if (request === familyRequest.current) setManagementMessage("Family navigation could not be loaded. Try again."); });
+  }, [familyId, seriesFilter]);
+
+  useEffect(() => {
+    const request = ++libraryRequest.current;
+    const scope: ContestLibraryScopeDto = familyId === null
+      ? { kind: "all" }
+      : { kind: "family", familyId, series: seriesFilter, year: yearFilter };
+    setLoading(true); setFailed(false);
+    listContestLibraryContests({ scope, archive: archiveFilter }).then((next) => {
+      if (request === libraryRequest.current) { setItems(next); setLoading(false); }
+    }).catch(() => { if (request === libraryRequest.current) { setFailed(true); setLoading(false); } });
+  }, [familyId, seriesFilter, yearFilter, archiveFilter, retryNonce]);
+
+  const selectFamily = (next: number | null) => {
+    setFamilyId(next); setSeries([]); setYears([]); setSeriesFilter({ kind: "any" }); setYearFilter({ kind: "any" });
+  };
+  const selectSeries = (next: ContestLibrarySeriesFilterDto) => {
+    setSeriesFilter(next); setYears([]); setYearFilter({ kind: "any" });
+  };
+  const refreshFamilies = async (selected: number | null = familyId) => {
+    const next = await listContestLibraryFamilies();
+    setFamilies(next);
+    if (selected !== null && next.some((family) => family.familyId === selected)) setFamilyId(selected);
+  };
+  const createFamily = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try { const created = await createContestLibraryFamily(familyDraft); await refreshFamilies(created.familyId); setFamilyDraft(""); }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const renameFamily = async (event: FormEvent<HTMLFormElement>, id: number) => {
+    event.preventDefault(); if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try { await renameContestLibraryFamily(id, familyDraft); await refreshFamilies(id); setFamilyDraft(""); setEditingFamily(null); }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const createSeries = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (managementBusy || familyId === null) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try { await createContestLibrarySeries(familyId, seriesDraft); setSeriesDraft(""); setSeries(await listContestLibrarySeries(familyId)); }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const renameSeries = async (event: FormEvent<HTMLFormElement>, id: number) => {
+    event.preventDefault(); if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try { await renameContestLibrarySeries(id, seriesDraft); setSeriesDraft(""); setEditingSeries(null); if (familyId !== null) setSeries(await listContestLibrarySeries(familyId)); }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const submitImport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (importing) return;
+    setImporting(true); setImportMessage(null);
+    try { const result = await importCodeforcesContest(contestUrl); setImportMessage(result.importStatus === "complete" ? "Contest imported." : `Contest saved; ${result.missingSnapshotProblems.length} snapshots remain.`); setRetryNonce((value) => value + 1); }
+    catch (error) { setImportMessage(contestImportErrorMessage(error)); }
+    finally { setImporting(false); }
+  };
+  const retryMissing = async (contestId: number) => {
+    if (importing) return;
+    setImporting(true); setImportMessage(null);
+    try {
+      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`);
+      setImportMessage(result.importStatus === "complete" ? "Missing snapshots were completed." : `Retry finished; ${result.missingSnapshotProblems.length} snapshots remain.`);
+      setRetryNonce((value) => value + 1);
+    } catch (error) { setImportMessage(contestImportErrorMessage(error)); }
+    finally { setImporting(false); }
+  };
+  const submitManual = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (importing) return;
+    setImporting(true); setImportMessage(null);
+    try {
+      const contestId = Number(manualContestId);
+      await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setImportMessage("Manual Contest saved through the canonical import and statement snapshot contract.");
+      setRetryNonce((value) => value + 1);
+    } catch (error) {
+      const code = String(error);
+      setImportMessage(code.includes("manual_manifest_conflict") ? "This Contest identity already has a different manifest. Existing data was not changed." : "Manual Contest was not saved. Check the explicit identities and all required fields.");
+    } finally { setImporting(false); }
+  };
+  const updateManualProblem = (position: number, patch: Partial<(typeof manualProblems)[number]>) => setManualProblems((current) => current.map((item, index) => index === position ? { ...item, ...patch } : item));
+
+  return (
+    <>
+      <PageHeader eyebrow="Contest Library" headingRef={headingRef} title="比赛" />
+      <section className="content-panel contest-library-navigation" aria-label="Contest Library navigation">
+        <div className="contest-library-navigation__header"><div><p className="eyebrow">Browse</p><h2>Contest archive</h2></div><label>Archive status<select value={archiveFilter} onChange={(event) => setArchiveFilter(event.currentTarget.value as ContestLibraryArchiveFilterDto)}><option value="active">Active contests</option><option value="archived">Archived contests</option><option value="all">All contests</option></select></label></div>
+        <div className="contest-library-navigation__levels">
+          <div><span className="filter-label">Family</span><div className="filter-options"><button className={familyId === null ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectFamily(null)} type="button">All contests</button>{families?.map((family) => <button className={familyId === family.familyId ? "filter-option filter-option--selected" : "filter-option"} key={family.familyId} onClick={() => selectFamily(family.familyId)} type="button">{family.displayName}</button>)}</div></div>
+          {familyId !== null && series.length > 0 ? <div><span className="filter-label">Series</span><div className="filter-options"><button className={seriesFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectSeries({ kind: "any" })} type="button">All series</button><button className={seriesFilter.kind === "unassigned" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectSeries({ kind: "unassigned" })} type="button">Unassigned series</button>{series.map((item) => <button className={seriesFilter.kind === "exact" && seriesFilter.seriesId === item.seriesId ? "filter-option filter-option--selected" : "filter-option"} key={item.seriesId} onClick={() => selectSeries({ kind: "exact", seriesId: item.seriesId })} type="button">{item.displayName}</button>)}</div></div> : null}
+          {familyId !== null && years.length > 0 ? <div><span className="filter-label">Year</span><div className="filter-options"><button className={yearFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "any" })} type="button">All years</button>{years.includes(null) ? <button className={yearFilter.kind === "unassigned" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "unassigned" })} type="button">Unassigned year</button> : null}{years.filter((year): year is number => year !== null).map((year) => <button className={yearFilter.kind === "exact" && yearFilter.year === year ? "filter-option filter-option--selected" : "filter-option"} key={year} onClick={() => setYearFilter({ kind: "exact", year })} type="button">{year}</button>)}</div></div> : null}
+        </div>
+        {families === null && !failed ? <p aria-busy="true">Loading contest families…</p> : null}
+        {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
+        <div className="action-row"><details><summary className="secondary-action">Create family</summary><form className="inline-form" onSubmit={createFamily}><label>Family name<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">Create family</button></form></details>{familyId !== null ? <details><summary className="secondary-action">Create series</summary><form className="inline-form" onSubmit={createSeries}><label>Series name<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">Create series</button></form></details> : null}</div>
+        {familyId !== null && families?.find((family) => family.familyId === familyId) ? <div className="management-list"><div><strong>Selected family</strong><button className="text-button" onClick={() => { setEditingFamily(familyId); setFamilyDraft(families.find((family) => family.familyId === familyId)?.displayName ?? ""); }} type="button">Rename</button></div>{editingFamily === familyId ? <form className="inline-form" onSubmit={(event) => void renameFamily(event, familyId)}><label>Family name<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">Save name</button><button className="secondary-action" onClick={() => setEditingFamily(null)} type="button">Cancel</button></form> : null}</div> : null}
+        {familyId !== null && series.length > 0 ? <div className="management-list"><strong>Series management</strong>{series.map((item) => <div className="management-list__row" key={item.seriesId}><span>{item.displayName}</span><button className="text-button" onClick={() => { setEditingSeries(item.seriesId); setSeriesDraft(item.displayName); }} type="button">Rename</button>{editingSeries === item.seriesId ? <form className="inline-form" onSubmit={(event) => void renameSeries(event, item.seriesId)}><label>Series name<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">Save name</button><button className="secondary-action" onClick={() => setEditingSeries(null)} type="button">Cancel</button></form> : null}</div>)}</div> : null}
+      </section>
+      <form className="content-panel contest-import-form" onSubmit={submitImport}><label>Codeforces contest URL<input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} /></label><button className="primary-action" disabled={importing} type="submit">{importing ? "Importing…" : "Import contest"}</button>{importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}</form>
+      <details className="content-panel manual-import-panel"><summary>手动比赛导入</summary><form className="manual-import-form" onSubmit={submitManual}><p>Use explicit Codeforces Contest and Problem identities. Manual import does not guess or merge identities.</p><label>Contest ID<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>Contest title<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>Contest date<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset className="manual-problem-card" key={position}><legend>Problem {position + 1}</legend><label>Index<input aria-label={`Manual problem ${position + 1} index`} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>English title<input aria-label={`Manual problem ${position + 1} title`} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>Problem URL<input aria-label={`Manual problem ${position + 1} URL`} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>Statement text<textarea aria-label={`Manual problem ${position + 1} statement`} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">Add problem</button><button className="primary-action" disabled={importing} type="submit">Save manual Contest</button></div></form></details>
+      {failed ? <section className="empty-state" role="alert"><h2>Contest Library is unavailable</h2><p>Nothing was changed. Retry after the local IPC becomes available.</p><button className="secondary-action" onClick={() => setRetryNonce((value) => value + 1)} type="button">Retry</button></section> : null}
+      {loading && !failed ? <section className="empty-state" aria-busy="true"><p>Loading contests…</p></section> : null}
+      {!loading && !failed && items?.length === 0 ? <section className="empty-state"><h2>No contests in this view</h2><p>Try another Family, Series, Year, or archive filter.</p></section> : null}
+      {!loading && !failed && items?.length ? <section className="content-panel" aria-label="Contest list"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.archived ? "Archived" : item.importStatus === "complete" ? "Imported" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">Retry missing snapshots</button> : null}</li>)}</ul></section> : null}
+    </>
+  );
+}
+
 function ContestShelf({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [items, setItems] = useState<ContestShelfItemDto[] | null>(null);
@@ -1323,6 +1496,26 @@ function contestImportErrorMessage(error: unknown): string {
   return "连接或读取 Codeforces 失败，请检查网络后重试；本地已有导入数据保持不变。";
 }
 
+function contestLibraryErrorMessage(error: unknown): string {
+  const code = String(error);
+  const messages: Record<string, string> = {
+    invalid_name: "Name cannot be empty or contain control characters.",
+    duplicate_family_name: "That Family name already exists.",
+    duplicate_series_name: "That Series name already exists in this Family.",
+    family_not_found: "The selected Family no longer exists. Reload and try again.",
+    series_not_found: "The selected Series no longer exists. Reload and try again.",
+    contest_not_found: "The Contest no longer exists. Return to the Library and reload.",
+    placement_not_found: "That archive placement no longer exists. Reload and try again.",
+    series_family_mismatch: "That Series belongs to a different Family.",
+    duplicate_placement: "This Contest already has the same Family, Series, Year, and ordinal placement.",
+    invalid_year: "Year must be empty or a positive whole number.",
+    invalid_ordinal: "Ordinal must be empty or a positive whole number.",
+    contest_library_persistence_unavailable: "Contest Library is temporarily unavailable. Retry without changing local data.",
+    contest_library_integrity_violation: "Contest Library data failed an integrity check. No local data was changed.",
+  };
+  return messages[code] ?? "Contest Library operation failed. Existing data was not changed.";
+}
+
 function ProblemIndex({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [items, setItems] = useState<LightweightProblemItemDto[] | null>(null);
@@ -1339,6 +1532,105 @@ function ProblemIndex({ navigate }: { navigate: Navigate }) {
   );
 }
 
+function ContestPlacementPanel({
+  contestId,
+  placements,
+  error,
+  editor,
+  busy,
+  onRetry,
+  onEdit,
+  onSaved,
+  onBusy,
+}: {
+  contestId: number;
+  placements: ContestLibraryPlacementDto[] | null;
+  error: string | null;
+  editor: ContestLibraryPlacementDto | "new" | null;
+  busy: boolean;
+  onRetry: () => void;
+  onEdit: (value: ContestLibraryPlacementDto | "new" | null) => void;
+  onSaved: () => void;
+  onBusy: (value: boolean) => void;
+}) {
+  const [families, setFamilies] = useState<ContestLibraryFamilyDto[]>([]);
+  const [series, setSeries] = useState<ContestLibrarySeriesDto[]>([]);
+  const [familyId, setFamilyId] = useState(0);
+  const [seriesId, setSeriesId] = useState<number | null>(null);
+  const [year, setYear] = useState("");
+  const [ordinal, setOrdinal] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<ContestLibraryPlacementDto | null>(null);
+  const removeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const seriesRequest = useRef(0);
+
+  useEffect(() => {
+    if (editor === null) return;
+    let active = true;
+    listContestLibraryFamilies().then((next) => {
+      if (!active) return;
+      setFamilies(next);
+      const nextFamily = editor === "new" ? next[0]?.familyId ?? 0 : editor.familyId;
+      setFamilyId(nextFamily);
+      setSeriesId(editor === "new" ? null : editor.seriesId);
+      setYear(editor === "new" || editor.year === null ? "" : String(editor.year));
+      setOrdinal(editor === "new" || editor.ordinal === null ? "" : String(editor.ordinal));
+      setSeries([]);
+      const request = ++seriesRequest.current;
+      if (nextFamily > 0) listContestLibrarySeries(nextFamily)
+        .then((rows) => { if (active && request === seriesRequest.current) setSeries(rows); })
+        .catch((cause) => { if (active && request === seriesRequest.current) setFormError(contestLibraryErrorMessage(cause)); });
+    }).catch((cause) => { if (active) setFormError(contestLibraryErrorMessage(cause)); });
+    return () => { active = false; };
+  }, [editor]);
+
+  useEffect(() => {
+    if (!removeTarget) return;
+    const dialog = dialogRef.current;
+    dialog?.querySelector<HTMLElement>("button")?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setRemoveTarget(null); queueMicrotask(() => removeButtonRef.current?.focus()); }
+    };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [removeTarget]);
+
+  const changeFamily = (next: number) => {
+    setFamilyId(next); setSeriesId(null); setSeries([]); setFormError(null);
+    const request = ++seriesRequest.current;
+    if (next > 0) listContestLibrarySeries(next).then((rows) => { if (request === seriesRequest.current) setSeries(rows); }).catch((cause) => { if (request === seriesRequest.current) setFormError(contestLibraryErrorMessage(cause)); });
+  };
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); if (busy || familyId <= 0) return;
+    onBusy(true); setFormError(null);
+    try {
+      const values = { familyId, seriesId, year: year === "" ? null : Number(year), ordinal: ordinal === "" ? null : Number(ordinal) };
+      if (editor === "new") await createContestLibraryPlacement({ contestId, ...values });
+      else if (editor) await updateContestLibraryPlacement({ placementId: editor.placementId, ...values });
+      onSaved();
+    } catch (cause) { setFormError(contestLibraryErrorMessage(cause)); }
+    finally { onBusy(false); }
+  };
+  const remove = async () => {
+    if (!removeTarget || busy) return;
+    onBusy(true); setFormError(null);
+    try { await removeContestLibraryPlacement(removeTarget.placementId); setRemoveTarget(null); onSaved(); }
+    catch (cause) { setFormError(contestLibraryErrorMessage(cause)); }
+    finally { onBusy(false); }
+  };
+
+  return <section className="content-panel contest-placement-panel" aria-label="Contest archive placements">
+    <div className="contest-placement-panel__header"><div><h2>Archive placements</h2><p>Removing a placement removes only this archive location, never the Contest.</p></div><button className="primary-action" onClick={() => onEdit("new")} type="button">Add placement</button></div>
+    {error ? <div role="alert"><p>{error}</p><button className="secondary-action" onClick={onRetry} type="button">Retry</button></div> : null}
+    {placements === null && !error ? <p aria-busy="true">Loading archive placements…</p> : null}
+    {placements?.length === 0 ? <p className="safe-note">No archive placement yet. This Contest remains available in All contests.</p> : null}
+    {placements?.length ? <ul className="placement-list">{placements.map((item) => <li key={item.placementId}><div><strong>{item.familyName}</strong><span>{item.seriesName ?? "No series"} · {item.year ?? "Unassigned year"}{item.ordinal === null ? "" : ` · #${String(item.ordinal).padStart(2, "0")}`}</span></div><div className="action-row"><button className="secondary-action" onClick={() => onEdit(item)} type="button">Edit</button><button className="danger-action" onClick={() => setRemoveTarget(item)} ref={removeButtonRef} type="button">Remove placement</button></div></li>)}</ul> : null}
+    {editor ? <form className="placement-form" onSubmit={submit}><h3>{editor === "new" ? "Add archive placement" : "Edit archive placement"}</h3><label>Family<select disabled={busy} onChange={(event) => changeFamily(Number(event.currentTarget.value))} required value={familyId}>{families.map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><label>Series<select disabled={busy} onChange={(event) => setSeriesId(event.currentTarget.value === "" ? null : Number(event.currentTarget.value))} value={seriesId ?? ""}><option value="">No series</option>{series.map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><label>Year<input disabled={busy} inputMode="numeric" min="1" onChange={(event) => setYear(event.currentTarget.value)} placeholder="Unassigned" type="number" value={year} /></label><label>Ordinal<input disabled={busy} inputMode="numeric" min="1" onChange={(event) => setOrdinal(event.currentTarget.value)} placeholder="Optional" type="number" value={ordinal} /></label>{formError ? <p className="error-message" role="alert">{formError}</p> : null}<div className="action-row"><button className="primary-action" disabled={busy || familyId <= 0} type="submit">{busy ? "Saving…" : "Save placement"}</button><button className="secondary-action" disabled={busy} onClick={() => onEdit(null)} type="button">Cancel</button></div></form> : null}
+    {removeTarget ? <div className="modal-backdrop"><div aria-describedby="remove-placement-description" aria-labelledby="remove-placement-title" aria-modal="true" ref={dialogRef} role="dialog"><h2 id="remove-placement-title">Remove this archive placement?</h2><p id="remove-placement-description">This removes the {removeTarget.familyName} archive location only. The Contest, Problems, Facts, Review history, and Markdown remain unchanged.</p><div className="action-row"><button className="danger-action" disabled={busy} onClick={() => void remove()} type="button">Remove placement</button><button className="secondary-action" disabled={busy} onClick={() => { setRemoveTarget(null); queueMicrotask(() => removeButtonRef.current?.focus()); }} type="button">Cancel</button></div></div></div> : null}
+  </section>;
+}
+
 function ContestDetail({ contestId, navigate }: { contestId: number; navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [detail, setDetail] = useState<ContestDetailDto | null>(null);
@@ -1353,7 +1645,15 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [deletePreview, setDeletePreview] = useState<ContestDeletePreviewDto | null>(null);
   const [managing, setManaging] = useState(false);
-  useEffect(() => { getContestDetail(contestId).then(setDetail).catch(() => setFailed(true)); }, [contestId]);
+  const [placements, setPlacements] = useState<ContestLibraryPlacementDto[] | null>(null);
+  const [placementError, setPlacementError] = useState<string | null>(null);
+  const [placementEditor, setPlacementEditor] = useState<ContestLibraryPlacementDto | "new" | null>(null);
+  const [placementBusy, setPlacementBusy] = useState(false);
+  const loadPlacements = () => {
+    setPlacementError(null);
+    listContestLibraryPlacements(contestId).then(setPlacements).catch((error) => setPlacementError(contestLibraryErrorMessage(error)));
+  };
+  useEffect(() => { getContestDetail(contestId).then(setDetail).catch(() => setFailed(true)); loadPlacements(); }, [contestId]);
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Contest is unavailable</h1><p>The local contest detail could not be read.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading contest</h1></section>;
   const submitFacts = async (event: FormEvent<HTMLFormElement>) => {
@@ -1390,6 +1690,7 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   return <>
     <PageHeader eyebrow="M7 · 比赛事实" headingRef={headingRef} title={displayProblemTitle(String(detail.contestId), detail.title)} />
     <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">Open original contest</a></section>
+    <ContestPlacementPanel contestId={contestId} placements={placements} error={placementError} editor={placementEditor} busy={placementBusy} onRetry={loadPlacements} onEdit={setPlacementEditor} onSaved={() => { setPlacementEditor(null); loadPlacements(); }} onBusy={setPlacementBusy} />
     <section className="content-panel contest-management" aria-label="Contest management"><h2>Contest management</h2><div className="action-row"><button className="secondary-action" disabled={managing} onClick={() => void toggleArchive()} type="button">{detail.archived ? "Restore Contest" : "Archive Contest"}</button>{deletePreview ? null : <button className="danger-action" disabled={managing} onClick={() => void loadDeletePreview()} type="button">Preview delete</button>}</div>{deletePreview ? <div role="alert"><p>Delete {deletePreview.contestTitle}: remove the Contest, its Facts, Analysis, and {deletePreview.relationshipCount} Contest-Problem relationships.</p><p>Preserve {deletePreview.preservedProblemCount} global Problems with identity or history. Clean up {deletePreview.cleanupProblemCount} unreferenced history-free Lightweight Problems.</p><div className="action-row"><button className="secondary-action" onClick={() => setDeletePreview(null)} type="button">Cancel</button><button className="danger-action" disabled={managing} onClick={() => void confirmDelete()} type="button">Delete Contest</button></div></div> : null}</section>
     <form className="content-panel contest-facts" onSubmit={submitFacts} aria-label="Contest facts snapshot"><h2>Problems</h2><p>比赛结果与赛后补题决策是历史快照；当前学习状态始终实时读取，不会覆盖它们。</p><ul className="contest-facts-list">{detail.problems.map((problem) => <li key={problem.index}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.index}`)} type="button"><strong>{problem.index}. {displayProblemTitle(problem.index, problem.title)}</strong><span>当前学习状态：{learningStatusLabel(problem.liveLearningStatus)}</span></button><label>比赛最终结果<select disabled={saving || correctingIndex === problem.index} value={facts[problem.index] ?? problem.finalContestResult ?? "unknown"} onChange={(event) => { const value = event.currentTarget.value as ContestFinalResultDto; setFacts((current) => ({ ...current, [problem.index]: value })); }}>{contestResultOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>比赛结束时补题决策<select disabled={saving || correctingIndex === problem.index} value={upsolveDecisions[problem.index] ?? problem.upsolveDecision} onChange={(event) => { const value = event.currentTarget.value as ContestUpsolveDecisionDto; setUpsolveDecisions((current) => ({ ...current, [problem.index]: value })); }}>{contestUpsolveOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{detail.factsStatus === "completed" ? <button className="secondary-action" disabled={correctingIndex === problem.index} onClick={() => void correctFacts(problem)} type="button">{correctingIndex === problem.index ? "保存纠错中…" : "保存纠错"}</button> : null}</li>)}</ul>{detail.factsStatus === "pending" ? <button className="primary-action" disabled={saving || detail.importStatus !== "complete" || detail.contestDate === null} type="submit">{saving ? "保存中…" : "完成赛后整理"}</button> : null}{message ? <p aria-live="polite" className="system-caption">{message}</p> : null}</form>
     {detail.corrections.length ? <section className="content-panel"><h2>Correction history</h2><ul className="detail-list">{detail.corrections.map((event) => <li key={event.correctionId}><strong>{event.problemIndex} · {event.field === "finalContestResult" ? "比赛结果" : "补题决策"}</strong><span>{event.oldValue} → {event.newValue} · {event.correctedAtUtc}</span></li>)}</ul></section> : null}

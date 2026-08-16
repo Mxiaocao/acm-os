@@ -62,13 +62,14 @@ test("Manual Contest submits explicit identities and statement text through one 
   const view = await renderApp((command, args) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
-    if (command === "contest_shelf") return [];
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return [];
     if (command === "import_manual_codeforces_contest") { calls.push(args.input); return { importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
     await settle();
-    const details = view.document.querySelector("details"); details.open = true;
+    const details = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("手动")); details.open = true;
     const inputs = [...details.querySelectorAll("input")];
     const values = ["1979", "Manual Round", "2026-08-13", "A", "Manual A", "https://codeforces.com/contest/1979/problem/A"];
     await act(async () => { inputs.forEach((input, index) => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, values[index]); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); }); const textarea = details.querySelector("textarea"); Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "x < y"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
@@ -212,6 +213,307 @@ async function renderApp(ipc, pathname = "/", strict = false) {
   };
 }
 
+test("Contest Library uses typed All, Family, Series, Year, and archive filters", { concurrency: false }, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Codeforces" }, { familyId: 2, displayName: "User Family" }];
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? [{ seriesId: 11, familyId: 1, displayName: "Rounds" }] : [];
+    if (command === "contest_library_list_years") { calls.push([command, args.input]); return [2026, null]; }
+    if (command === "contest_library_list_contests") { calls.push([command, args.input]); return [{ contestId: 1979, title: "Round", importStatus: "complete", problemCount: 2, missingSnapshotCount: 0, archived: args.input.archive === "archived" }]; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    assert.deepEqual(calls.find(([name]) => name === "contest_library_list_contests")[1], { scope: { kind: "all" }, archive: "active" });
+    const codeforces = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Codeforces");
+    await act(async () => codeforces.click()); await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "All series"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned series"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2026"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned year"));
+    const rounds = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Rounds");
+    await act(async () => rounds.click()); await settle();
+    const year = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "2026");
+    await act(async () => year.click()); await settle();
+    const archive = view.document.querySelector('select');
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(archive, "archived"); archive.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    await settle();
+    assert.deepEqual(calls.at(-1)[1], { scope: { kind: "family", familyId: 1, series: { kind: "exact", seriesId: 11 }, year: { kind: "exact", year: 2026 } }, archive: "archived" });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library creates and renames persisted Family and Series without changing IDs", { concurrency: false }, async () => {
+  const calls = [];
+  let families = [{ familyId: 1, displayName: "Codeforces" }];
+  let series = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return families;
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_list_series") return series;
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_create_family") { calls.push([command, args.input]); families = [...families, { familyId: 2, displayName: args.input.displayName.trim() }]; return families[1]; }
+    if (command === "contest_library_rename_family") { calls.push([command, args.input]); families = families.map((item) => item.familyId === args.input.familyId ? { ...item, displayName: args.input.displayName } : item); return families.find((item) => item.familyId === args.input.familyId); }
+    if (command === "contest_library_create_series") { calls.push([command, args.input]); series = [{ seriesId: 21, familyId: args.input.familyId, displayName: args.input.displayName }]; return series[0]; }
+    if (command === "contest_library_rename_series") { calls.push([command, args.input]); series = [{ ...series[0], displayName: args.input.displayName }]; return series[0]; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const createFamilyDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("Create family"));
+    createFamilyDetails.open = true;
+    const familyInput = createFamilyDetails.querySelector("input");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(familyInput, " User Family "); familyInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await settle();
+    await act(async () => createFamilyDetails.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "User Family"));
+    assert.equal(calls.find(([name]) => name === "contest_library_create_family")[1].displayName, " User Family ");
+    const selected = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "User Family");
+    await act(async () => selected.click()); await settle();
+    const createSeriesDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("Create series"));
+    createSeriesDetails.open = true;
+    const seriesInput = createSeriesDetails.querySelector("input");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(seriesInput, "Rounds"); seriesInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await settle();
+    await act(async () => createSeriesDetails.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    assert.ok(calls.some(([name]) => name === "contest_library_create_series"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
+    const familyRename = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "Rename");
+    await act(async () => familyRename.click()); await settle();
+    const familyRenameForm = view.document.querySelector(".management-list .inline-form");
+    const familyRenameInput = familyRenameForm.querySelector("input");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(familyRenameInput, "Renamed Family"); familyRenameInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await settle();
+    await act(async () => familyRenameForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "contest_library_rename_family")[1], { familyId: 2, displayName: "Renamed Family" });
+    const seriesRename = [...view.document.querySelectorAll(".management-list__row > button")].find((button) => button.textContent === "Rename");
+    await act(async () => seriesRename.click()); await settle();
+    const seriesRenameForm = view.document.querySelector(".management-list__row .inline-form");
+    const seriesRenameInput = seriesRenameForm.querySelector("input");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(seriesRenameInput, "Renamed Series"); seriesRenameInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await settle();
+    await act(async () => seriesRenameForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "contest_library_rename_series")[1], { seriesId: 21, displayName: "Renamed Series" });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Detail manages nullable placements and removal never calls Contest delete", { concurrency: false }, async () => {
+  const calls = [];
+  let placements = [];
+  const detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null, archived: false };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "contest_library_list_contest_placements") return placements;
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Codeforces" }];
+    if (command === "contest_library_list_series") return [];
+    if (command === "contest_library_create_placement") { calls.push([command, args.input]); placements = [{ placementId: 9, familyId: 1, familyName: "Codeforces", seriesId: null, seriesName: null, year: null, ordinal: null }]; return placements[0]; }
+    if (command === "contest_library_update_placement") { calls.push([command, args.input]); placements = [{ ...placements[0], year: args.input.year, ordinal: args.input.ordinal }]; return placements[0]; }
+    if (command === "contest_library_remove_placement") { calls.push([command, args.input]); placements = []; return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add placement");
+    await act(async () => add.click()); await settle();
+    const form = view.document.querySelector(".placement-form");
+    await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.deepEqual(calls[0], ["contest_library_create_placement", { contestId: 1979, familyId: 1, seriesId: null, year: null, ordinal: null }]);
+    const edit = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Edit");
+    await act(async () => edit.click()); await settle();
+    const numberInputs = [...view.document.querySelectorAll(".placement-form input")];
+    await act(async () => { for (const [input, value] of [[numberInputs[0], "2026"], [numberInputs[1], "8"]]) { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new view.window.Event("change", { bubbles: true })); } view.document.querySelector(".placement-form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })); });
+    await settle();
+    assert.equal(calls[1][0], "contest_library_update_placement");
+    assert.equal(calls[1][1].placementId, 9);
+    const remove = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Remove placement");
+    await act(async () => remove.click()); await settle();
+    assert.match(view.document.body.textContent, /removes the Codeforces archive location only/i);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Remove placement" && button.closest('[role="dialog"]'));
+    await act(async () => confirm.click()); await settle();
+    assert.ok(calls.some(([name]) => name === "contest_library_remove_placement"));
+    assert.equal(calls.some(([name]) => name === "delete_contest"), false);
+    assert.match(view.document.body.textContent, /No archive placement yet/);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library Retry reloads Families after the first Family request fails", { concurrency: false }, async () => {
+  let familyCalls = 0;
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") {
+      familyCalls += 1;
+      if (familyCalls === 1) return Promise.reject(new Error("family unavailable"));
+      return [{ familyId: 1, displayName: "Recovered Family" }];
+    }
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const retry = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Retry");
+    assert.ok(retry);
+    await act(async () => retry.click()); await settle();
+    assert.equal(familyCalls, 2);
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Recovered Family"));
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library clears old child navigation immediately when Family changes", { concurrency: false }, async () => {
+  let resolveB;
+  const seriesB = new Promise((resolve) => { resolveB = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? [{ seriesId: 11, familyId: 1, displayName: "Series A" }] : seriesB;
+    if (command === "contest_library_list_years") return args.input.familyId === 1 ? [2025] : [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const familyA = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A");
+    const familyB = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family B");
+    await act(async () => familyA.click()); await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series A"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2025"));
+    await act(async () => familyB.click());
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series A"), false);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2025"), false);
+    await act(async () => resolveB([])); await settle();
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library shows Unassigned year only when Backend years contain null", { concurrency: false }, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family" }];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_list_series") return [];
+    if (command === "contest_library_list_years") return [2026];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const family = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family");
+    await act(async () => family.click()); await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "All years"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2026"));
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned year"), false);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library mutation refresh uses the latest selected scope", { concurrency: false }, async () => {
+  let finishImport;
+  const pendingImport = new Promise((resolve) => { finishImport = resolve; });
+  const contestCalls = [];
+  const item = (contestId, title) => ({ contestId, title, importStatus: "complete", problemCount: 1, missingSnapshotCount: 0, archived: false });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+    if (command === "contest_library_list_series") return [];
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_list_contests") {
+      contestCalls.push(args.input);
+      if (args.input.scope.kind === "family" && args.input.scope.familyId === 1) return [item(1001, "Contest A")];
+      if (args.input.scope.kind === "family" && args.input.scope.familyId === 2) return [item(2002, "Contest B")];
+      return [];
+    }
+    if (command === "import_codeforces_contest") return pendingImport;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const familyA = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A");
+    const familyB = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family B");
+    await act(async () => familyA.click()); await settle();
+    const input = view.document.querySelector('input[placeholder="https://codeforces.com/contest/1979"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "https://codeforces.com/contest/1979");
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      input.closest("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => familyB.click()); await settle();
+    assert.match(view.document.body.textContent, /Contest B/);
+    await act(async () => finishImport({ importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] })); await settle();
+    assert.match(view.document.body.textContent, /Contest B/);
+    assert.doesNotMatch(view.document.body.textContent, /Contest A/);
+    assert.deepEqual(contestCalls.at(-1).scope, { kind: "family", familyId: 2, series: { kind: "any" }, year: { kind: "any" } });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest placement editor ignores stale Series responses after Family changes", { concurrency: false }, async () => {
+  let resolveA;
+  let resolveB;
+  const seriesA = new Promise((resolve) => { resolveA = resolve; });
+  const seriesB = new Promise((resolve) => { resolveB = resolve; });
+  const detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null, archived: false };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "contest_library_list_contest_placements") return [];
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? seriesA : seriesB;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add placement");
+    await act(async () => add.click()); await settle();
+    const familySelect = view.document.querySelector(".placement-form select");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(familySelect, "2");
+      familySelect.dispatchEvent(new view.window.Event("change", { bubbles: true }));
+    });
+    await act(async () => resolveB([{ seriesId: 22, familyId: 2, displayName: "Series B" }])); await settle();
+    assert.ok([...view.document.querySelectorAll(".placement-form option")].some((option) => option.textContent === "Series B"));
+    await act(async () => resolveA([{ seriesId: 11, familyId: 1, displayName: "Series A" }])); await settle();
+    assert.ok([...view.document.querySelectorAll(".placement-form option")].some((option) => option.textContent === "Series B"));
+    assert.equal([...view.document.querySelectorAll(".placement-form option")].some((option) => option.textContent === "Series A"), false);
+    assert.equal(view.document.querySelectorAll(".placement-form select")[1].value, "");
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library ignores stale Series responses after rapid Family switching", { concurrency: false }, async () => {
+  let resolveA;
+  let resolveB;
+  const seriesA = new Promise((resolve) => { resolveA = resolve; });
+  const seriesB = new Promise((resolve) => { resolveB = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? seriesA : seriesB;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const familyA = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A");
+    const familyB = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family B");
+    await act(async () => familyA.click());
+    await act(async () => familyB.click());
+    await act(async () => resolveB([{ seriesId: 22, familyId: 2, displayName: "Series B" }])); await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series B"));
+    await act(async () => resolveA([{ seriesId: 11, familyId: 1, displayName: "Series A" }])); await settle();
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series B"));
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series A"), false);
+  } finally { await view.cleanup(); }
+});
+
 test.after(async () => vite.close());
 
 test("Loading, Recovery, and Setup hide ordinary navigation and focus their content", { concurrency: false }, async () => {
@@ -347,18 +649,19 @@ test("Contest import exposes a specific Chinese error instead of swallowing the 
     if (command === "app_shell_status") {
       return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
     }
-    if (command === "contest_shelf") return [];
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return [];
     if (command === "import_codeforces_contest") throw new Error("unsupported_contest_url");
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
-    const input = view.document.querySelector("input");
+    const input = view.document.querySelector('input[placeholder="https://codeforces.com/contest/1979"]');
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "https://codeforces.com");
       input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
     });
     await act(async () => {
-      view.document.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+      input.closest("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
     });
     await settle();
     assert.match(view.document.body.textContent, /比赛网址格式不正确/);
