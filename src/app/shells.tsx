@@ -9,6 +9,7 @@ import {
 } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import contestBookShell from "../assets/contest-book-shell.png";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
   confirmKnowledgeUnderstanding,
@@ -1262,6 +1263,77 @@ function todayStatusLabel(status: TodayEntryDto["status"]) { return ({ notStarte
 function todayReasonLabel(reason: TodayEntryDto["reason"]) { return ({ continueReview: "Continue Review", continueLearning: "Continue learning", dueFirstColdStart: "First cold-start Review", dueLongTermReview: "Long-term Review", relearn: "Relearn", upsolve: "Upsolve" } as const)[reason]; }
 function todayErrorMessage(cause: unknown) { const code = String(cause); if (code.includes("stale_today")) return "The Today plan changed. Reload and try again."; if (code.includes("invalid_today_done")) return "This entry cannot be completed from Today."; if (code.includes("invalid_today_reorder")) return "The saved order changed. Reload and try again."; if (code.includes("today_integrity")) return "Today data failed an integrity check."; return "Today is temporarily unavailable."; }
 
+function contestBookCoverTitle(title: string) {
+  const match = /^(Educational\s+)?Codeforces(?:\s+(Global))?\s+Round\s+(\d+)(?:\s*\(([^)]+)\))?/i.exec(title.trim());
+  if (!match) return { series: "Contest archive", roundNumber: null, subtitle: null };
+  return {
+    series: match[1] ? "Educational series" : match[2] ? "Global series" : "Round series",
+    roundNumber: match[3],
+    subtitle: match[4] ?? null,
+  };
+}
+
+function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; navigate: Navigate }) {
+  const title = displayProblemTitle(String(item.contestId), item.title);
+  const coverTitle = contestBookCoverTitle(title);
+  return (
+    <button
+      aria-label={`Open contest ${title}`}
+      className="contest-book contest-book--asset"
+      data-contest-id={item.contestId}
+      onClick={() => navigate(`/contests/${item.contestId}`)}
+      type="button"
+    >
+      <img aria-hidden="true" className="contest-book__shell" src={contestBookShell} alt="" />
+      <span aria-hidden="true" className="contest-book__volume" />
+      <span aria-hidden="true" className="contest-book__spine" />
+      <span className="contest-book__cover">
+        <span aria-hidden="true" className="contest-book__outer-edge" />
+        <span aria-hidden="true" className="contest-book__frame" />
+        <span className="contest-book__content">
+          <span className="contest-book__masthead">
+            <span className="contest-book__collection">Codeforces</span>
+            <span className="contest-book__series">{coverTitle.series}</span>
+          </span>
+          {coverTitle.roundNumber ? <strong className="contest-book__title">
+            <span className="contest-book__round-label">Round</span>
+            <span className="contest-book__round-number">{coverTitle.roundNumber}</span>
+          </strong> : <strong className="contest-book__title contest-book__title--fallback">{title}</strong>}
+          {coverTitle.subtitle ? <span className="contest-book__subtitle">{coverTitle.subtitle}</span> : null}
+          <span className="contest-book__footer">
+            <span className="contest-book__identity">CF {item.contestId}</span>
+            <span aria-hidden="true" className="contest-book__motif">ACM-OS</span>
+          </span>
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function ContestShelfPrototype({ items, navigate }: { items: ContestShelfItemDto[]; navigate: Navigate }) {
+  return (
+    <section aria-labelledby="contest-cabinet-title" className="contest-cabinet-prototype">
+      <div className="contest-cabinet-prototype__heading">
+        <div>
+          <p className="eyebrow">Visual prototype</p>
+          <h2 id="contest-cabinet-title">Current shelf</h2>
+        </div>
+        <p>Front-facing hardcover study using the current filtered results.</p>
+      </div>
+      <div className="contest-cabinet">
+        <div aria-hidden="true" className="contest-cabinet__inset-line" />
+        <div className="contest-cabinet__back">
+          <div className="contest-shelf-books">
+            {items.map((item) => <ContestBookPrototype item={item} key={item.contestId} navigate={navigate} />)}
+          </div>
+        </div>
+        <div aria-hidden="true" className="contest-shelf__top" />
+        <div aria-hidden="true" className="contest-shelf__front" />
+      </div>
+    </section>
+  );
+}
+
 function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [families, setFamilies] = useState<ContestLibraryFamilyDto[] | null>(null);
@@ -1411,7 +1483,21 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       {failed ? <section className="empty-state" role="alert"><h2>Contest Library is unavailable</h2><p>Nothing was changed. Retry after the local IPC becomes available.</p><button className="secondary-action" onClick={() => setRetryNonce((value) => value + 1)} type="button">Retry</button></section> : null}
       {loading && !failed ? <section className="empty-state" aria-busy="true"><p>Loading contests…</p></section> : null}
       {!loading && !failed && items?.length === 0 ? <section className="empty-state"><h2>No contests in this view</h2><p>Try another Family, Series, Year, or archive filter.</p></section> : null}
-      {!loading && !failed && items?.length ? <section className="content-panel" aria-label="Contest list"><ul className="detail-list">{items.map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.archived ? "Archived" : item.importStatus === "complete" ? "Imported" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">Retry missing snapshots</button> : null}</li>)}</ul></section> : null}
+      {!loading && !failed && items?.length ? (
+        <>
+          <ContestShelfPrototype items={items.slice(0, 2)} navigate={navigate} />
+          {items.slice(0, 2).some((item) => !item.archived && item.importStatus === "incomplete") ? (
+            <div aria-label="Prototype contest maintenance" className="contest-shelf-maintenance">
+              {items.slice(0, 2).filter((item) => !item.archived && item.importStatus === "incomplete").map((item) => (
+                <button className="secondary-action" disabled={importing} key={item.contestId} onClick={() => void retryMissing(item.contestId)} type="button">
+                  Retry missing snapshots for {displayProblemTitle(String(item.contestId), item.title)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {items.length > 2 ? <section className="content-panel contest-library-remainder" aria-label="Remaining contest list"><div><p className="eyebrow">More in this view</p><h2>Remaining contests</h2></div><ul className="detail-list">{items.slice(2).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.archived ? "Archived" : item.importStatus === "complete" ? "Imported" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">Retry missing snapshots</button> : null}</li>)}</ul></section> : null}
+        </>
+      ) : null}
     </>
   );
 }

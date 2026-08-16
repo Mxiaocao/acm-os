@@ -245,6 +245,53 @@ test("Contest Library uses typed All, Family, Series, Year, and archive filters"
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library D1 uses real result items for two books and keeps remaining contests accessible", { concurrency: false }, async () => {
+  const items = [
+    { contestId: 1979, title: "Codeforces Round 951 (Div. 2)", importStatus: "complete", problemCount: 7, missingSnapshotCount: 0, archived: false },
+    { contestId: 1980, title: "Educational Codeforces Round 166", importStatus: "complete", problemCount: 6, missingSnapshotCount: 0, archived: false },
+    { contestId: 1981, title: "Codeforces Round 952", importStatus: "incomplete", problemCount: 8, missingSnapshotCount: 1, archived: false },
+  ];
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return items;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const books = [...view.document.querySelectorAll("button.contest-book")];
+    assert.equal(books.length, 2);
+    assert.equal(books[0].dataset.contestId, "1979");
+    const shell = books[0].querySelector(".contest-book__shell");
+    assert.ok(shell);
+    assert.equal(shell.getAttribute("alt"), "");
+    assert.equal(shell.getAttribute("aria-hidden"), "true");
+    assert.ok(books[0].querySelector(".contest-book__volume"));
+    assert.ok(books[0].querySelector(".contest-book__spine"));
+    assert.ok(books[0].querySelector(".contest-book__cover"));
+    assert.ok(books[0].querySelector(".contest-book__content"));
+    assert.ok(books[0].querySelector(".contest-book__masthead"));
+    assert.ok(books[0].querySelector(".contest-book__footer"));
+    assert.equal(books[0].querySelector(".contest-book__hinge"), null);
+    assert.equal(books[0].querySelector(".contest-book__collection")?.textContent, "Codeforces");
+    assert.equal(books[0].querySelector(".contest-book__series")?.textContent, "Round series");
+    assert.equal(books[0].querySelector(".contest-book__round-label")?.textContent, "Round");
+    assert.equal(books[0].querySelector(".contest-book__round-number")?.textContent, "951");
+    assert.equal(books[0].querySelector(".contest-book__subtitle")?.textContent, "Div. 2");
+    assert.equal(books[0].querySelector(".contest-book__identity")?.textContent, "CF 1979");
+    assert.equal(books[1].querySelector(".contest-book__series")?.textContent, "Educational series");
+    assert.equal(books[1].querySelector(".contest-book__round-number")?.textContent, "166");
+    const remaining = view.document.querySelector('[aria-label="Remaining contest list"]');
+    assert.ok(remaining);
+    assert.match(remaining.textContent, /Codeforces Round 952/);
+    assert.ok(view.document.querySelector('[aria-label="Contest Library navigation"]'));
+    assert.ok(view.document.querySelector(".contest-import-form"));
+    await act(async () => books[0].click());
+    assert.equal(view.window.location.pathname, "/contests/1979");
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Library creates and renames persisted Family and Series without changing IDs", { concurrency: false }, async () => {
   const calls = [];
   let families = [{ familyId: 1, displayName: "Codeforces" }];
