@@ -266,7 +266,7 @@ test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps ove
     const books = [...view.document.querySelectorAll("button.contest-book")];
     const cabinet = view.document.querySelector('[aria-label="Three-tier contest cabinet"]');
     assert.ok(cabinet);
-    assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 contests in this view/);
+    assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 contests/);
     assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece").length, 3);
     assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece[alt='']").length, 3);
     assert.equal(view.document.querySelector(".contest-cabinet__shell")?.getAttribute("aria-hidden"), "true");
@@ -289,6 +289,18 @@ test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps ove
     assert.equal(cabinet.querySelectorAll(".contest-shelf").length, 3);
     assert.equal(cabinet.querySelectorAll(".contest-shelf__bottom-shadow").length, 3);
     assert.equal(books.length, 12);
+    const slots = [...cabinet.querySelectorAll(".contest-book-slot")];
+    assert.equal(slots.length, 12);
+    assert.equal(cabinet.querySelectorAll(".contest-display-stand--rear").length, 12);
+    assert.equal(cabinet.querySelectorAll(".contest-display-stand--front").length, 12);
+    assert.ok(slots.every((slot) => slot.querySelectorAll(".contest-display-stand").length === 2));
+    assert.deepEqual(tiers.map((tier) => [...tier.querySelectorAll(".contest-book-slot")].map((slot) => slot.dataset.logicalColumn)), [[
+      "1", "2", "3", "4"
+    ], [
+      "1", "2", "3", "4"
+    ], [
+      "1", "2", "3", "4"
+    ]]);
     assert.equal(books[0].dataset.contestId, "1979");
     assert.equal(tiers[1].querySelector("button.contest-book")?.dataset.contestId, "1983");
     assert.equal(tiers[2].querySelector("button.contest-book")?.dataset.contestId, "1987");
@@ -312,6 +324,31 @@ test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps ove
     assert.equal(books[0].querySelector(".contest-book__identity")?.textContent, "CF 1979");
     assert.equal(books[1].querySelector(".contest-book__series")?.textContent, "Educational series");
     assert.equal(books[1].querySelector(".contest-book__round-number")?.textContent, "166");
+    const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
+    assert.ok(pager);
+    assert.equal(cabinet.contains(pager), false);
+    const previous = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Previous");
+    const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+    const pageStatus = pager.querySelector("output");
+    assert.equal(previous.disabled, true);
+    assert.equal(next.disabled, false);
+    assert.equal(pageStatus.textContent.trim(), "1 / 4");
+    assert.equal(pageStatus.getAttribute("aria-label"), "Cabinet column 1 of 4");
+    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1979", "1983", "1987"]);
+    await act(async () => next.click()); await settle();
+    assert.equal(pageStatus.textContent.trim(), "2 / 4");
+    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1980", "1984", "1988"]);
+    await act(async () => next.click()); await settle();
+    await act(async () => next.click()); await settle();
+    assert.equal(pageStatus.textContent.trim(), "4 / 4");
+    assert.equal(previous.disabled, false);
+    assert.equal(next.disabled, true);
+    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1982", "1986", "1990"]);
+    assert.deepEqual(tiers.map((tier) => [...tier.querySelectorAll("button.contest-book")].map((book) => book.dataset.contestId)), [
+      ["1979", "1980", "1981", "1982"],
+      ["1983", "1984", "1985", "1986"],
+      ["1987", "1988", "1989", "1990"],
+    ]);
     const remaining = view.document.querySelector('[aria-label="Remaining contest list"]');
     assert.ok(remaining);
     assert.match(remaining.textContent, /Codeforces Round 965/);
@@ -347,6 +384,59 @@ test("Contest Library D2-A keeps one real contest in the first position of a com
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library Compact page count follows populated logical columns", { concurrency: false }, async () => {
+  const makeItems = (count) => Array.from({ length: count }, (_, index) => ({
+    contestId: 3000 + index,
+    title: `Codeforces Round ${1200 + index}`,
+    importStatus: "complete",
+    problemCount: 1,
+    missingSnapshotCount: 0,
+    archived: false,
+  }));
+  for (const count of [1, 2, 3, 4, 5, 12, 13]) {
+    const items = makeItems(count);
+    const view = await renderApp((command) => {
+      if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+      if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+      if (command === "contest_library_list_families") return [];
+      if (command === "contest_library_list_contests") return items;
+      throw new Error(`unexpected command ${command}`);
+    }, "/contests");
+    try {
+      await settle();
+      const expectedPages = Math.min(count, 4);
+      const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
+      if (expectedPages === 1) {
+        assert.equal(pager, null);
+      } else {
+        assert.ok(pager);
+        assert.equal(pager.querySelector("output")?.textContent.trim(), `1 / ${expectedPages}`);
+      }
+      assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", new RegExp(`${count} ${count === 1 ? "contest" : "contests"}`));
+      assert.doesNotMatch(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", /in this view/);
+      if (expectedPages === 1) continue;
+      const previous = pager.querySelector("button");
+      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+      assert.equal(previous.disabled, true);
+      for (let page = 1; page < expectedPages; page += 1) {
+        await act(async () => next.click()); await settle();
+        assert.equal(pager.querySelector("output")?.textContent.trim(), `${page + 1} / ${expectedPages}`);
+        assert.ok([...view.document.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].length > 0);
+      }
+      assert.equal(next.disabled, true);
+      if (count === 13) assert.ok(view.document.querySelector('[aria-label="Remaining contest list"]'));
+    } finally { await view.cleanup(); }
+  }
+});
+
+test("Contest Library Compact page state clamps when populated column count shrinks", async () => {
+  const css = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/app/app.css", import.meta.url), "utf8"));
+  const shells = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/app/shells.tsx", import.meta.url), "utf8"));
+  assert.match(shells, /Math\.min\(column, Math\.max\(0, compactPageCount - 1\)\)/);
+  assert.match(shells, /compactColumn === compactPageCount - 1/);
+  assert.match(shells, /compactPageCount = items\.length === 0 \? 0 : Math\.max/);
+  assert.match(css, /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/);
+});
 test("Contest Library D2-A preserves all three tiers for an empty filtered result", { concurrency: false }, async () => {
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
@@ -363,6 +453,7 @@ test("Contest Library D2-A preserves all three tiers for an empty filtered resul
     assert.equal(cabinet.querySelectorAll("button.contest-book").length, 0);
     assert.equal(cabinet.querySelector(".contest-cabinet__empty")?.textContent, "No contests in this view");
     assert.equal(view.document.querySelector(".empty-state"), null);
+    assert.equal(view.document.querySelector('[aria-label="Compact cabinet column navigation"]'), null);
   } finally { await view.cleanup(); }
 });
 

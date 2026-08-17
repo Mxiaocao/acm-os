@@ -68,3 +68,12 @@ test("sanitized Codeforces statements retain readable metadata and section hiera
   assert.match(css, /\.statement-view \.problem-statement \.time-limit,[\s\S]*?grid-template-columns:\s*minmax\(150px,\s*\.4fr\)\s+minmax\(0,\s*1fr\);/);
   assert.match(css, /\.statement-view \.problem-statement \.section-title\s*\{[\s\S]*?font-weight:\s*760;/);
 });
+test("Contest cabinet switches only between full and compact column presentation", async () => {
+  const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
+  assert.match(css, /\.contest-cabinet-prototype\s*\{[\s\S]*?container-name:\s*contest-cabinet-presentation;[\s\S]*?container-type:\s*inline-size;/);
+  assert.match(css, /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/);
+  assert.match(css, /@container\s+contest-cabinet-presentation\s*\(min-width:\s*950px\)[\s\S]*?data-compact-active="false"\][\s\S]*?display:\s*block;[\s\S]*?\.contest-cabinet-pager\s*\{\s*display:\s*none;/);
+  assert.match(shells, /data-logical-column=\{index \+ 1\}/);
+  assert.match(shells, /aria-label="Compact cabinet column navigation"/);
+  assert.doesNotMatch(shells, /tier === 1 && index === 0/);
+});

@@ -475,6 +475,8 @@ ul.detail-list li {
   --cabinet-rosewood: #69434d;
   --cabinet-edge: #241d22;
   --cabinet-highlight: #96727b;
+  container-name: contest-cabinet-presentation;
+  container-type: inline-size;
   margin-top: 30px;
 }
 .contest-cabinet-prototype__heading {
@@ -592,6 +594,7 @@ ul.detail-list li {
   flex: 0 0 157.913px;
 }
 .contest-book-slot > .contest-book { z-index: 1; }
+.contest-book-slot[data-compact-active="false"] { display: none; }
 .contest-display-stand {
   position: absolute;
   top: 127.76px;
@@ -1056,6 +1059,32 @@ ul.detail-list li {
   transform: translateX(-1px);
 }
 .contest-cabinet--asset .contest-shelf > span { display: none; }
+.contest-cabinet-pager {
+  display: flex;
+  width: max-content;
+  align-items: center;
+  gap: 12px;
+  margin: 14px auto 0;
+}
+.contest-cabinet-pager .secondary-action {
+  min-width: 92px;
+  min-height: 40px;
+}
+.contest-cabinet-pager output {
+  min-width: 44px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  text-align: center;
+}
+
+/* The frozen cabinet maps a 950px presentation container to a 662px
+   books area after the 24px cabinet inset, side tracks, and 2% tier insets.
+   Full mode restores all four logical columns; compact mode keeps one. */
+@container contest-cabinet-presentation (min-width: 950px) {
+  .contest-book-slot[data-compact-active="false"] { display: block; }
+  .contest-cabinet-pager { display: none; }
+}
 .contest-cabinet--asset .contest-cabinet__empty {
   top: 42%;
   right: 0;

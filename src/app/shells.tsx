@@ -1334,13 +1334,18 @@ function ContestDisplayStand() {
   </>;
 }
 
-function ContestCabinetTier({ items, navigate, tier }: { items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
+function ContestCabinetTier({ compactColumn, items, navigate, tier }: { compactColumn: number; items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
   return (
     <section aria-label={`Shelf tier ${tier}`} className="contest-cabinet__tier" data-tier={tier}>
       <div className="contest-cabinet__back">
         <div className="contest-shelf-books">
-          {items.map((item, index) => <div className="contest-book-slot" key={item.contestId}>
-            {tier === 1 && index === 0 ? <ContestDisplayStand /> : null}
+          {items.map((item, index) => <div
+            className="contest-book-slot"
+            data-compact-active={index === compactColumn ? "true" : "false"}
+            data-logical-column={index + 1}
+            key={item.contestId}
+          >
+            <ContestDisplayStand />
             <ContestBookPrototype item={item} navigate={navigate} />
           </div>)}
         </div>
@@ -1356,8 +1361,14 @@ function ContestCabinetTier({ items, navigate, tier }: { items: ContestShelfItem
 }
 
 function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfItemDto[]; navigate: Navigate; totalCount: number }) {
+  const [compactColumn, setCompactColumn] = useState(0);
+  const cabinetItemKey = items.map((item) => item.contestId).join(":");
   const tiers = Array.from({ length: CONTEST_CABINET_TIER_COUNT }, (_, tier) =>
     items.slice(tier * CONTEST_BOOKS_PER_TIER, (tier + 1) * CONTEST_BOOKS_PER_TIER));
+  const compactPageCount = items.length === 0 ? 0 : Math.max(...tiers.map((tier) => tier.length));
+  useEffect(() => {
+    setCompactColumn((column) => Math.min(column, Math.max(0, compactPageCount - 1)));
+  }, [cabinetItemKey, compactPageCount]);
   return (
     <section aria-labelledby="contest-cabinet-title" className="contest-cabinet-prototype">
       <div className="contest-cabinet-prototype__heading">
@@ -1365,7 +1376,7 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
           <p className="eyebrow">Contest archive</p>
           <h2 id="contest-cabinet-title">Collection cabinet</h2>
         </div>
-        <p>{totalCount} {totalCount === 1 ? "contest" : "contests"} in this view</p>
+        <p>{totalCount} {totalCount === 1 ? "contest" : "contests"}</p>
       </div>
       <div aria-label="Three-tier contest cabinet" className="contest-cabinet contest-cabinet--asset">
         <div aria-hidden="true" className="contest-cabinet__shell">
@@ -1379,7 +1390,7 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
               <div aria-hidden="true" className="contest-cabinet__stile contest-cabinet__stile--left" />
               <div className="contest-cabinet__tiers">
                 {tiers.map((tierItems, index) => (
-                  <ContestCabinetTier items={tierItems} key={index} navigate={navigate} tier={index + 1} />
+                  <ContestCabinetTier compactColumn={compactColumn} items={tierItems} key={index} navigate={navigate} tier={index + 1} />
                 ))}
                 {items.length === 0 ? <p className="contest-cabinet__empty">No contests in this view</p> : null}
               </div>
@@ -1388,6 +1399,11 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
             <div aria-hidden="true" className="contest-cabinet__plinth"><span /></div>
         </div>
       </div>
+      {compactPageCount > 1 ? <nav aria-label="Compact cabinet column navigation" className="contest-cabinet-pager">
+        <button aria-label="Show previous cabinet column" className="secondary-action" disabled={compactColumn === 0} onClick={() => setCompactColumn((column) => Math.max(0, column - 1))} type="button">Previous</button>
+        <output aria-live="polite" aria-label={`Cabinet column ${compactColumn + 1} of ${compactPageCount}`}>{compactColumn + 1} / {compactPageCount}</output>
+        <button aria-label="Show next cabinet column" className="secondary-action" disabled={compactColumn === compactPageCount - 1} onClick={() => setCompactColumn((column) => Math.min(compactPageCount - 1, column + 1))} type="button">Next</button>
+      </nav> : null}
     </section>
   );
 }
