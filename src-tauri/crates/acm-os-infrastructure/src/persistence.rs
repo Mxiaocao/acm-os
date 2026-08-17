@@ -42,7 +42,7 @@ use acm_os_application::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::SqlitePool;
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 
 use crate::file_binding::{
     markdown_files, resolve_personal_note, resolve_relative_markdown, sha256_hex, windows_file_key,
@@ -54,6 +54,7 @@ use crate::knowledge_index::{
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+const SPECIAL_FK_OFF_MIGRATION_VERSION: i64 = 26;
 const DATABASE_FILENAME: &str = "system-facts.sqlite3";
 const STARTUP_LOCK_FILENAME: &str = ".database-startup.lock";
 const STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -8160,10 +8161,7 @@ async fn try_start_database(
         upgrade_legacy_m5_schema(&pool).await?;
     }
 
-    MIGRATOR
-        .run(&pool)
-        .await
-        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    let pool = run_migrations(&database_path, pool, &MIGRATOR, existing_schema_version).await?;
     if !database_exists || migration_pending {
         verify_integrity(&pool).await?;
     }
@@ -9250,6 +9248,60 @@ async fn connect_read_write(path: &Path) -> Result<SqlitePool, StartupRecoveryRe
         .connect_with(options)
         .await
         .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+}
+
+async fn connect_special_migration(path: &Path) -> Result<SqliteConnection, StartupRecoveryReason> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .foreign_keys(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .busy_timeout(Duration::from_secs(5));
+
+    SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+}
+
+async fn run_migrations(
+    database_path: &Path,
+    normal_pool: SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+    applied_schema_version: i64,
+) -> Result<SqlitePool, StartupRecoveryReason> {
+    if !migrator.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION)
+        || applied_schema_version >= SPECIAL_FK_OFF_MIGRATION_VERSION
+    {
+        migrator
+            .run(&normal_pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+        return Ok(normal_pool);
+    }
+
+    migrator
+        .run_to(SPECIAL_FK_OFF_MIGRATION_VERSION - 1, &normal_pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    normal_pool.close().await;
+
+    let mut special_connection = connect_special_migration(database_path).await?;
+    migrator
+        .run_to(SPECIAL_FK_OFF_MIGRATION_VERSION, &mut special_connection)
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    special_connection
+        .close()
+        .await
+        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+
+    let normal_pool = connect_read_write(database_path).await?;
+    migrator
+        .run(&normal_pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
+    Ok(normal_pool)
 }
 
 async fn inspect_schema_version(pool: &SqlitePool) -> Result<i64, StartupRecoveryReason> {
@@ -11038,10 +11090,214 @@ mod tests {
         WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
         WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
     };
-    use sqlx::Executor;
+    use sqlx::migrate::{Migration, MigrationType, Migrator};
+    use sqlx::{Executor, SqlSafeStr};
     use tempfile::TempDir;
 
     use super::*;
+
+    const PRE_SPECIAL_SQL: &str = "\
+        CREATE TABLE migration_observations (version INTEGER PRIMARY KEY, foreign_keys INTEGER NOT NULL);\
+        INSERT INTO migration_observations SELECT 25, foreign_keys FROM pragma_foreign_keys;\
+        CREATE TABLE parents (id INTEGER PRIMARY KEY, label TEXT NOT NULL);\
+        CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parents(id));\
+        INSERT INTO parents (id, label) VALUES (41, 'before');\
+        INSERT INTO children (id, parent_id) VALUES (73, 41);";
+    const SPECIAL_SQL: &str = "\
+        INSERT INTO migration_observations SELECT 26, foreign_keys FROM pragma_foreign_keys;\
+        CREATE TABLE parents_new (id INTEGER PRIMARY KEY, label TEXT NOT NULL, rebuilt INTEGER NOT NULL DEFAULT 1);\
+        INSERT INTO parents_new (id, label) SELECT id, label FROM parents;\
+        DROP TABLE parents;\
+        ALTER TABLE parents_new RENAME TO parents;";
+    const POST_SPECIAL_SQL: &str = "\
+        INSERT INTO migration_observations SELECT 27, foreign_keys FROM pragma_foreign_keys;\
+        CREATE TABLE post_special_marker (id INTEGER PRIMARY KEY);";
+    const FAILING_SPECIAL_SQL: &str = "\
+        CREATE TABLE special_partial_change (id INTEGER PRIMARY KEY);\
+        UPDATE parents SET label = 'partially changed';\
+        INSERT INTO table_that_does_not_exist VALUES (1);";
+
+    fn miniature_migrator(special_sql: &'static str) -> Migrator {
+        Migrator::with_migrations(vec![
+            Migration::new(
+                25,
+                "pre special".into(),
+                MigrationType::Simple,
+                PRE_SPECIAL_SQL.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                26,
+                "special rebuild".into(),
+                MigrationType::Simple,
+                special_sql.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                27,
+                "post special".into(),
+                MigrationType::Simple,
+                POST_SPECIAL_SQL.into_sql_str(),
+                false,
+            ),
+        ])
+    }
+
+    async fn miniature_database(directory: &TempDir) -> (PathBuf, SqlitePool) {
+        let path = directory.path().join("miniature.sqlite3");
+        let pool = connect_read_write(&path)
+            .await
+            .expect("miniature database connection");
+        (path, pool)
+    }
+
+    #[test]
+    fn production_migrator_has_not_embedded_the_special_version() {
+        assert_eq!(supported_schema_version(), 25);
+        assert!(!MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
+    }
+
+    #[tokio::test]
+    async fn special_migration_pre_phase_stops_before_special_version() {
+        let directory = TempDir::new().expect("temporary database directory");
+        let (_path, pool) = miniature_database(&directory).await;
+        let migrator = miniature_migrator(SPECIAL_SQL);
+
+        migrator
+            .run_to(SPECIAL_FK_OFF_MIGRATION_VERSION - 1, &pool)
+            .await
+            .expect("pre-special phase");
+
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("migration ledger");
+        let observations: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT version, foreign_keys FROM migration_observations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("phase observations");
+        assert_eq!(applied, vec![25]);
+        assert_eq!(observations, vec![(25, 1)]);
+    }
+
+    #[tokio::test]
+    async fn special_migration_runner_isolates_fk_off_and_restores_fk_on() {
+        let directory = TempDir::new().expect("temporary database directory");
+        let (path, pool) = miniature_database(&directory).await;
+        let migrator = miniature_migrator(SPECIAL_SQL);
+
+        let pool = run_migrations(&path, pool, &migrator, 0)
+            .await
+            .expect("three-phase migration run");
+
+        let observations: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT version, foreign_keys FROM migration_observations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("phase observations");
+        assert_eq!(observations, vec![(25, 1), (26, 0), (27, 1)]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .expect("foreign key state"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (i64, String, i64)>("SELECT id, label, rebuilt FROM parents",)
+                .fetch_one(&pool)
+                .await
+                .expect("rebuilt parent"),
+            (41, "before".to_owned(), 1)
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>("SELECT id, parent_id FROM children")
+                .fetch_one(&pool)
+                .await
+                .expect("preserved child"),
+            (73, 41)
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_optional(&pool)
+            .await
+            .expect("foreign key check")
+            .is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(&pool)
+                .await
+                .expect("integrity check"),
+            "ok"
+        );
+
+        let pool = run_migrations(&path, pool, &migrator, 27)
+            .await
+            .expect("already-applied migration validation");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM migration_observations")
+                .fetch_one(&pool)
+                .await
+                .expect("observation count"),
+            3
+        );
+
+        let changed = miniature_migrator(
+            "SELECT 26, foreign_keys FROM pragma_foreign_keys; -- checksum changed",
+        );
+        assert!(matches!(
+            run_migrations(&path, pool, &changed, 27).await,
+            Err(StartupRecoveryReason::MigrationFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_special_migration_rolls_back_changes_and_ledger() {
+        let directory = TempDir::new().expect("temporary database directory");
+        let (path, pool) = miniature_database(&directory).await;
+        let migrator = miniature_migrator(FAILING_SPECIAL_SQL);
+
+        assert!(matches!(
+            run_migrations(&path, pool, &migrator, 0).await,
+            Err(StartupRecoveryReason::MigrationFailed)
+        ));
+
+        let pool = connect_read_write(&path)
+            .await
+            .expect("reopen failed migration database");
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("migration ledger");
+        assert_eq!(applied, vec![25]);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT label FROM parents WHERE id = 41")
+                .fetch_one(&pool)
+                .await
+                .expect("rolled-back parent data"),
+            "before"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'special_partial_change')",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("rolled-back schema check"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(&pool)
+                .await
+                .expect("integrity check"),
+            "ok"
+        );
+    }
 
     struct CoreLoopContestSource {
         manifest: ContestImportDraft,
