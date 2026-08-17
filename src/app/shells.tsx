@@ -10,6 +10,12 @@ import {
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import contestBookShell from "../assets/contest-book-shell.png";
+import contestCabinetLeft from "../assets/contest-cabinet-left.png";
+import contestCabinetCenter from "../assets/contest-cabinet-center.png";
+import contestCabinetRight from "../assets/contest-cabinet-right.png";
+import contestCabinetShelfForeground1 from "../assets/contest-cabinet-shelf-foreground-1.png";
+import contestCabinetShelfForeground2 from "../assets/contest-cabinet-shelf-foreground-2.png";
+import contestCabinetShelfForeground3 from "../assets/contest-cabinet-shelf-foreground-3.png";
 import type { FoundationStatus } from "../ipc/foundation";
 import {
   confirmKnowledgeUnderstanding,
@@ -1310,25 +1316,65 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
   );
 }
 
-function ContestShelfPrototype({ items, navigate }: { items: ContestShelfItemDto[]; navigate: Navigate }) {
+const CONTEST_CABINET_TIER_COUNT = 3;
+const CONTEST_BOOKS_PER_TIER = 4;
+const CONTEST_CABINET_CAPACITY = CONTEST_CABINET_TIER_COUNT * CONTEST_BOOKS_PER_TIER;
+const CONTEST_CABINET_SHELF_FOREGROUNDS = [
+  contestCabinetShelfForeground1,
+  contestCabinetShelfForeground2,
+  contestCabinetShelfForeground3,
+] as const;
+
+function ContestCabinetTier({ items, navigate, tier }: { items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
+  return (
+    <section aria-label={`Shelf tier ${tier}`} className="contest-cabinet__tier" data-tier={tier}>
+      <div className="contest-cabinet__back">
+        <div className="contest-shelf-books">
+          {items.map((item) => <ContestBookPrototype item={item} key={item.contestId} navigate={navigate} />)}
+        </div>
+      </div>
+      <div aria-hidden="true" className="contest-shelf">
+        <img alt="" className="contest-shelf__foreground" src={CONTEST_CABINET_SHELF_FOREGROUNDS[tier - 1]} />
+        <span className="contest-shelf__top" />
+        <span className="contest-shelf__front" />
+        <span className="contest-shelf__bottom-shadow" />
+      </div>
+    </section>
+  );
+}
+
+function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfItemDto[]; navigate: Navigate; totalCount: number }) {
+  const tiers = Array.from({ length: CONTEST_CABINET_TIER_COUNT }, (_, tier) =>
+    items.slice(tier * CONTEST_BOOKS_PER_TIER, (tier + 1) * CONTEST_BOOKS_PER_TIER));
   return (
     <section aria-labelledby="contest-cabinet-title" className="contest-cabinet-prototype">
       <div className="contest-cabinet-prototype__heading">
         <div>
-          <p className="eyebrow">Visual prototype</p>
-          <h2 id="contest-cabinet-title">Current shelf</h2>
+          <p className="eyebrow">Contest archive</p>
+          <h2 id="contest-cabinet-title">Collection cabinet</h2>
         </div>
-        <p>Front-facing hardcover study using the current filtered results.</p>
+        <p>{totalCount} {totalCount === 1 ? "contest" : "contests"} in this view</p>
       </div>
-      <div className="contest-cabinet">
-        <div aria-hidden="true" className="contest-cabinet__inset-line" />
-        <div className="contest-cabinet__back">
-          <div className="contest-shelf-books">
-            {items.map((item) => <ContestBookPrototype item={item} key={item.contestId} navigate={navigate} />)}
-          </div>
+      <div aria-label="Three-tier contest cabinet" className="contest-cabinet contest-cabinet--asset">
+        <div aria-hidden="true" className="contest-cabinet__shell">
+          <img alt="" className="contest-cabinet__shell-piece contest-cabinet__shell-piece--left" src={contestCabinetLeft} />
+          <img alt="" className="contest-cabinet__shell-piece contest-cabinet__shell-piece--center" src={contestCabinetCenter} />
+          <img alt="" className="contest-cabinet__shell-piece contest-cabinet__shell-piece--right" src={contestCabinetRight} />
         </div>
-        <div aria-hidden="true" className="contest-shelf__top" />
-        <div aria-hidden="true" className="contest-shelf__front" />
+        <div className="contest-cabinet__overlay">
+            <div aria-hidden="true" className="contest-cabinet__cornice"><span /></div>
+            <div className="contest-cabinet__body">
+              <div aria-hidden="true" className="contest-cabinet__stile contest-cabinet__stile--left" />
+              <div className="contest-cabinet__tiers">
+                {tiers.map((tierItems, index) => (
+                  <ContestCabinetTier items={tierItems} key={index} navigate={navigate} tier={index + 1} />
+                ))}
+                {items.length === 0 ? <p className="contest-cabinet__empty">No contests in this view</p> : null}
+              </div>
+              <div aria-hidden="true" className="contest-cabinet__stile contest-cabinet__stile--right" />
+            </div>
+            <div aria-hidden="true" className="contest-cabinet__plinth"><span /></div>
+        </div>
       </div>
     </section>
   );
@@ -1482,20 +1528,19 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       <details className="content-panel manual-import-panel"><summary>手动比赛导入</summary><form className="manual-import-form" onSubmit={submitManual}><p>Use explicit Codeforces Contest and Problem identities. Manual import does not guess or merge identities.</p><label>Contest ID<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>Contest title<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>Contest date<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset className="manual-problem-card" key={position}><legend>Problem {position + 1}</legend><label>Index<input aria-label={`Manual problem ${position + 1} index`} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>English title<input aria-label={`Manual problem ${position + 1} title`} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>Problem URL<input aria-label={`Manual problem ${position + 1} URL`} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>Statement text<textarea aria-label={`Manual problem ${position + 1} statement`} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">Add problem</button><button className="primary-action" disabled={importing} type="submit">Save manual Contest</button></div></form></details>
       {failed ? <section className="empty-state" role="alert"><h2>Contest Library is unavailable</h2><p>Nothing was changed. Retry after the local IPC becomes available.</p><button className="secondary-action" onClick={() => setRetryNonce((value) => value + 1)} type="button">Retry</button></section> : null}
       {loading && !failed ? <section className="empty-state" aria-busy="true"><p>Loading contests…</p></section> : null}
-      {!loading && !failed && items?.length === 0 ? <section className="empty-state"><h2>No contests in this view</h2><p>Try another Family, Series, Year, or archive filter.</p></section> : null}
-      {!loading && !failed && items?.length ? (
+      {!loading && !failed && items ? (
         <>
-          <ContestShelfPrototype items={items.slice(0, 2)} navigate={navigate} />
-          {items.slice(0, 2).some((item) => !item.archived && item.importStatus === "incomplete") ? (
+          <ContestCabinet items={items.slice(0, CONTEST_CABINET_CAPACITY)} navigate={navigate} totalCount={items.length} />
+          {items.slice(0, CONTEST_CABINET_CAPACITY).some((item) => !item.archived && item.importStatus === "incomplete") ? (
             <div aria-label="Prototype contest maintenance" className="contest-shelf-maintenance">
-              {items.slice(0, 2).filter((item) => !item.archived && item.importStatus === "incomplete").map((item) => (
+              {items.slice(0, CONTEST_CABINET_CAPACITY).filter((item) => !item.archived && item.importStatus === "incomplete").map((item) => (
                 <button className="secondary-action" disabled={importing} key={item.contestId} onClick={() => void retryMissing(item.contestId)} type="button">
                   Retry missing snapshots for {displayProblemTitle(String(item.contestId), item.title)}
                 </button>
               ))}
             </div>
           ) : null}
-          {items.length > 2 ? <section className="content-panel contest-library-remainder" aria-label="Remaining contest list"><div><p className="eyebrow">More in this view</p><h2>Remaining contests</h2></div><ul className="detail-list">{items.slice(2).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.archived ? "Archived" : item.importStatus === "complete" ? "Imported" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">Retry missing snapshots</button> : null}</li>)}</ul></section> : null}
+          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label="Remaining contest list"><div><p className="eyebrow">More in this view</p><h2>Remaining contests</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{displayProblemTitle(String(item.contestId), item.title)}</strong><span>Codeforces {item.contestId} · {item.problemCount} problems · {item.archived ? "Archived" : item.importStatus === "complete" ? "Imported" : `${item.missingSnapshotCount} snapshots missing`}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">Retry missing snapshots</button> : null}</li>)}</ul></section> : null}
         </>
       ) : null}
     </>

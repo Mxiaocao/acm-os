@@ -24,7 +24,21 @@
 
 * { box-sizing: border-box; }
 
-html { min-width: 320px; min-height: 100%; }
+html {
+  min-width: 320px;
+  min-height: 100%;
+  scrollbar-color: rgb(105 67 82 / 28%) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+html::-webkit-scrollbar { width: 6px; }
+html::-webkit-scrollbar-track { background: transparent; }
+html::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(105 67 82 / 22%);
+}
+html:hover::-webkit-scrollbar-thumb { background: rgb(105 67 82 / 38%); }
 
 .sr-only {
   position: absolute;
@@ -475,62 +489,113 @@ ul.detail-list li {
 .contest-cabinet {
   position: relative;
   isolation: isolate;
-  min-height: 386px;
-  padding: 34px 48px 50px;
-  border: 1px solid #2a2025;
-  border-radius: 4px 4px 2px 2px;
-  background:
-    linear-gradient(90deg, rgb(255 255 255 / 7%), transparent 4%, transparent 96%, rgb(255 255 255 / 5%)),
-    linear-gradient(180deg, #49343d 0%, var(--cabinet-plum) 14%, #2d252b 100%);
-  box-shadow:
-    inset 18px 0 20px rgb(17 12 15 / 42%),
-    inset -18px 0 20px rgb(17 12 15 / 42%),
-    inset 0 14px 24px rgb(16 11 14 / 36%),
-    0 22px 38px rgb(58 35 44 / 18%);
+  width: 100%;
+  padding: 7px 0 20px;
 }
-.contest-cabinet::before,
-.contest-cabinet::after {
+.contest-cabinet__cornice,
+.contest-cabinet__body,
+.contest-cabinet__plinth {
+  width: 100%;
+  margin-inline: auto;
+}
+.contest-cabinet__cornice {
+  position: relative;
+  z-index: 6;
+  height: 35px;
+  border: 1px solid #2a1d23;
+  border-radius: 3px 3px 0 0;
+  background:
+    linear-gradient(90deg, rgb(240 201 210 / 10%), transparent 7%, transparent 93%, rgb(12 8 10 / 18%)),
+    linear-gradient(180deg, #75535e 0%, #5b3d48 48%, #412e36 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(242 208 216 / 18%),
+    inset 0 -5px 8px rgb(19 12 16 / 28%),
+    0 5px 8px rgb(13 8 11 / 25%);
+}
+.contest-cabinet__cornice::after {
   content: "";
   position: absolute;
-  z-index: 2;
-  top: 12px;
-  bottom: 36px;
-  width: 27px;
-  border: 1px solid #21191e;
-  background:
-    linear-gradient(90deg, rgb(255 255 255 / 12%), transparent 22%, rgb(0 0 0 / 20%) 78%),
-    var(--cabinet-wine);
-  box-shadow: inset 0 0 0 4px rgb(255 255 255 / 3%), 0 0 12px rgb(14 10 12 / 34%);
+  right: 9px;
+  bottom: -5px;
+  left: 9px;
+  height: 8px;
+  border: 1px solid #2b1e24;
+  background: linear-gradient(180deg, #513740, #37272e);
+  box-shadow: inset 0 1px 0 rgb(224 181 191 / 10%), 0 3px 5px rgb(12 8 10 / 30%);
 }
-.contest-cabinet::before { left: 13px; }
-.contest-cabinet::after { right: 13px; transform: scaleX(-1); }
-.contest-cabinet__inset-line {
+.contest-cabinet__cornice > span {
   position: absolute;
-  z-index: 1;
-  inset: 19px 39px 44px;
-  border: 1px solid rgb(190 153 164 / 17%);
-  box-shadow: inset 0 0 0 5px rgb(10 7 9 / 16%);
-  pointer-events: none;
+  inset: 6px 20px 10px;
+  border-top: 1px solid rgb(231 190 200 / 13%);
+  border-bottom: 1px solid rgb(29 18 23 / 38%);
+  box-shadow: inset 0 4px 7px rgb(225 181 191 / 3%);
+}
+.contest-cabinet__body {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  border-right: 1px solid #22191e;
+  border-left: 1px solid #22191e;
+  background: #352930;
+  box-shadow: 0 14px 28px rgb(42 25 33 / 20%);
+}
+.contest-cabinet__stile {
+  position: relative;
+  z-index: 5;
+  border-right: 1px solid #2a1d23;
+  border-left: 1px solid #25191f;
+  background:
+    linear-gradient(90deg, #35252c 0%, #513640 34%, #64434d 76%, #795560 100%);
+  box-shadow:
+    inset 3px 0 5px rgb(10 7 9 / 30%),
+    inset -1px 0 0 rgb(236 194 204 / 14%),
+    4px 0 8px rgb(12 8 10 / 22%);
+}
+.contest-cabinet__stile--right { transform: scaleX(-1); }
+.contest-cabinet__tiers {
+  position: relative;
+  min-width: 0;
+  background: #30252c;
+}
+.contest-cabinet__tier {
+  position: relative;
+  display: grid;
+  grid-template-rows: 272px 30px;
 }
 .contest-cabinet__back {
   position: relative;
-  min-height: 302px;
-  padding: 26px 40px 0;
   overflow: hidden;
-  border: 1px solid #211a1e;
+  border: 1px solid #281d22;
+  border-bottom: 0;
   background:
-    radial-gradient(ellipse at 50% 92%, rgb(118 77 91 / 16%), transparent 56%),
-    linear-gradient(180deg, #282127 0%, #33272e 100%);
-  box-shadow: inset 0 18px 32px rgb(12 8 10 / 54%), inset 12px 0 18px rgb(12 8 10 / 28%), inset -12px 0 18px rgb(12 8 10 / 28%);
+    radial-gradient(ellipse at 50% 48%, rgb(125 84 98 / 20%), transparent 68%),
+    linear-gradient(90deg, rgb(18 12 15 / 18%), transparent 12%, transparent 88%, rgb(18 12 15 / 18%)),
+    linear-gradient(180deg, #2b2228 0%, #382a32 58%, #42303a 100%);
+  box-shadow:
+    inset 0 13px 19px rgb(10 7 9 / 38%),
+    inset 8px 0 13px rgb(10 7 9 / 22%),
+    inset -8px 0 13px rgb(10 7 9 / 22%);
 }
 .contest-shelf-books {
   position: absolute;
   z-index: 3;
-  inset: auto 54px 0;
+  inset: auto 12px 0;
   display: flex;
   align-items: end;
   justify-content: flex-start;
-  gap: 34px;
+  gap: 9px;
+}
+.contest-cabinet__empty {
+  position: absolute;
+  z-index: 2;
+  top: 119px;
+  right: 0;
+  left: 0;
+  margin: 0;
+  color: rgb(205 178 184 / 54%);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: .9rem;
+  text-align: center;
 }
 .contest-book {
   position: relative;
@@ -782,27 +847,196 @@ ul.detail-list li {
   font-weight: 650;
   letter-spacing: .1em;
 }
-.contest-shelf__top,
-.contest-shelf__front {
-  position: absolute;
+.contest-shelf {
+  position: relative;
   z-index: 5;
-  right: 29px;
-  left: 29px;
+  height: 30px;
+  pointer-events: none;
+}
+.contest-shelf__top,
+.contest-shelf__front,
+.contest-shelf__bottom-shadow {
+  position: absolute;
+  right: 0;
+  left: 0;
   pointer-events: none;
 }
 .contest-shelf__top {
-  bottom: 39px;
-  height: 15px;
-  border: 1px solid #24191e;
-  background: linear-gradient(180deg, #86606a 0%, #543942 35%, #3e2b32 100%);
-  box-shadow: 0 -4px 9px rgb(9 6 8 / 30%);
+  z-index: 3;
+  top: 0;
+  height: 9px;
+  border: 1px solid #2a1c22;
+  background: linear-gradient(180deg, #8a6670 0%, #61434d 42%, #453139 100%);
+  box-shadow: 0 -4px 7px rgb(9 6 8 / 32%);
 }
 .contest-shelf__front {
-  bottom: 18px;
-  height: 23px;
+  z-index: 2;
+  top: 8px;
+  height: 19px;
   border: 1px solid #25191f;
-  background: linear-gradient(180deg, #674751 0%, #4c343d 52%, #38272e 100%);
-  box-shadow: inset 0 1px 0 rgb(218 172 184 / 15%), 0 10px 15px rgb(22 13 17 / 28%);
+  background: linear-gradient(180deg, #684852 0%, #503740 48%, #38272e 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(226 183 193 / 13%),
+    inset 0 -3px 5px rgb(17 11 14 / 18%);
+}
+.contest-shelf__bottom-shadow {
+  z-index: 1;
+  top: 25px;
+  height: 5px;
+  background: linear-gradient(180deg, rgb(12 8 10 / 46%), transparent);
+}
+.contest-cabinet__plinth {
+  position: relative;
+  z-index: 6;
+  height: 42px;
+  border: 1px solid #241a20;
+  background:
+    linear-gradient(90deg, #3b2931 0%, transparent 4%, transparent 96%, #2f2027 100%),
+    linear-gradient(180deg, #674751 0%, #4a333c 52%, #312229 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(232 190 200 / 14%),
+    inset 0 -6px 9px rgb(15 10 12 / 24%),
+    0 14px 20px rgb(32 20 26 / 21%);
+}
+.contest-cabinet__plinth > span {
+  position: absolute;
+  inset: 8px 13px 9px;
+  border-top: 1px solid rgb(225 181 192 / 11%);
+  border-bottom: 1px solid rgb(25 16 20 / 34%);
+  background: linear-gradient(180deg, rgb(116 79 91 / 18%), rgb(41 28 34 / 14%));
+  box-shadow: inset 0 3px 5px rgb(15 10 12 / 19%);
+}
+
+/* Asset-backed cabinet: the PNG owns furniture material while the existing
+   tier DOM remains the interactive content layer. */
+.contest-cabinet--asset {
+  --cabinet-side-width: clamp(108px, 12.776%, 153px);
+  --cabinet-tier-height: 25.5%;
+  --cabinet-book-scale: .84;
+  position: relative;
+  width: calc(100% - 24px);
+  max-width: 100%;
+  min-width: 0;
+  height: 1086px;
+  margin-inline: auto;
+  padding: 0;
+  overflow: hidden;
+}
+.contest-cabinet--asset .contest-cabinet__shell {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  display: grid;
+  grid-template-columns: var(--cabinet-side-width) minmax(0, 1fr) var(--cabinet-side-width);
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  pointer-events: none;
+}
+.contest-cabinet--asset .contest-cabinet__shell-piece {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  max-width: none;
+  object-fit: fill;
+}
+.contest-cabinet--asset .contest-cabinet__shell-piece--left,
+.contest-cabinet--asset .contest-cabinet__shell-piece--center {
+  /* Bleed into the next grid track so translucent raster edges composite
+     against the adjacent slice instead of the page background. */
+  width: calc(100% + 1px);
+}
+.contest-cabinet--asset .contest-cabinet__overlay {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+}
+.contest-cabinet--asset .contest-cabinet__cornice,
+.contest-cabinet--asset .contest-cabinet__stile,
+.contest-cabinet--asset .contest-cabinet__plinth {
+  display: none;
+}
+.contest-cabinet--asset .contest-cabinet__body {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.contest-cabinet--asset .contest-cabinet__tiers {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: transparent;
+}
+.contest-cabinet--asset .contest-cabinet__tier {
+  position: absolute;
+  right: var(--cabinet-side-width);
+  left: var(--cabinet-side-width);
+  display: block;
+  height: var(--cabinet-tier-height);
+}
+.contest-cabinet--asset .contest-cabinet__tier[data-tier="1"] {
+  /* The shell PNG has a transparent tail; align its visible bottom to the
+     first shelf's top surface, not the button box bottom. */
+  --shelf-baseline-offset: 13px;
+  --shelf-foreground-bottom: -4px;
+  --shelf-foreground-height: 37px;
+  top: 9.5%;
+}
+.contest-cabinet--asset .contest-cabinet__tier[data-tier="2"] {
+  --shelf-baseline-offset: 21px;
+  --shelf-foreground-bottom: 4px;
+  --shelf-foreground-height: 37px;
+  top: 36.4%;
+}
+.contest-cabinet--asset .contest-cabinet__tier[data-tier="3"] {
+  --shelf-baseline-offset: 0px;
+  --shelf-foreground-bottom: -63px;
+  --shelf-foreground-height: 83px;
+  top: 62.7%;
+}
+.contest-cabinet--asset .contest-cabinet__back {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.contest-cabinet--asset .contest-shelf-books {
+  right: 2%;
+  bottom: var(--shelf-baseline-offset);
+  left: 2%;
+  align-items: end;
+  gap: 9px;
+}
+.contest-cabinet--asset .contest-book { zoom: var(--cabinet-book-scale); }
+.contest-cabinet--asset .contest-shelf {
+  position: absolute;
+  z-index: 4;
+  right: 0;
+  bottom: var(--shelf-foreground-bottom);
+  left: 0;
+  display: block;
+  height: var(--shelf-foreground-height);
+  pointer-events: none;
+}
+.contest-cabinet--asset .contest-shelf__foreground {
+  display: block;
+  width: calc(100% + 2px);
+  min-width: 0;
+  height: 100%;
+  object-fit: fill;
+  transform: translateX(-1px);
+}
+.contest-cabinet--asset .contest-shelf > span { display: none; }
+.contest-cabinet--asset .contest-cabinet__empty {
+  top: 42%;
+  right: 0;
+  left: 0;
 }
 .contest-shelf-maintenance { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
 .contest-library-remainder > div h2 { margin: 0; }
@@ -1122,8 +1356,7 @@ ul.detail-list li {
   .contest-library-navigation__header, .contest-placement-panel__header { align-items: stretch; flex-direction: column; }
   .contest-cabinet-prototype__heading { align-items: start; flex-direction: column; gap: 4px; }
   .contest-cabinet-prototype__heading > p { text-align: left; }
-  .contest-cabinet { min-height: 350px; padding-right: 40px; padding-left: 40px; }
-  .contest-cabinet__back { min-height: 266px; padding-right: 20px; padding-left: 20px; }
+  .contest-cabinet { padding-right: 0; padding-left: 0; }
   .contest-shelf-books { right: 34px; left: 34px; gap: 26px; }
   .contest-book { width: 162px; height: 224px; }
   .contest-book__cover { padding: 24px 17px 19px; }
@@ -1150,9 +1383,7 @@ ul.detail-list li {
   .manual-problem-card { grid-template-columns: 1fr; padding: 18px; }
   .manual-problem-card > label:last-child { grid-column: auto; }
   .manual-import-form > .action-row { align-items: stretch; }
-  .contest-cabinet { min-height: 320px; padding: 30px 31px 50px; overflow-x: auto; }
-  .contest-cabinet__inset-line { right: 28px; left: 28px; }
-  .contest-cabinet__back { min-width: 340px; min-height: 238px; }
+  .contest-cabinet { padding: 8px 0 24px; }
   .contest-shelf-books { right: 26px; left: 26px; gap: 22px; }
   .contest-book { width: 140px; height: 194px; }
   .contest-book__cover { padding: 21px 14px 17px; }

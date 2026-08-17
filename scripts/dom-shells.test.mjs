@@ -245,12 +245,15 @@ test("Contest Library uses typed All, Family, Series, Year, and archive filters"
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library D1 uses real result items for two books and keeps remaining contests accessible", { concurrency: false }, async () => {
-  const items = [
-    { contestId: 1979, title: "Codeforces Round 951 (Div. 2)", importStatus: "complete", problemCount: 7, missingSnapshotCount: 0, archived: false },
-    { contestId: 1980, title: "Educational Codeforces Round 166", importStatus: "complete", problemCount: 6, missingSnapshotCount: 0, archived: false },
-    { contestId: 1981, title: "Codeforces Round 952", importStatus: "incomplete", problemCount: 8, missingSnapshotCount: 1, archived: false },
-  ];
+test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps overflow accessible", { concurrency: false }, async () => {
+  const items = Array.from({ length: 13 }, (_, index) => ({
+    contestId: 1979 + index,
+    title: index === 0 ? "Codeforces Round 951 (Div. 2)" : index === 1 ? "Educational Codeforces Round 166" : `Codeforces Round ${953 + index}`,
+    importStatus: index === 12 ? "incomplete" : "complete",
+    problemCount: 6 + index,
+    missingSnapshotCount: index === 12 ? 1 : 0,
+    archived: false,
+  }));
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
@@ -261,8 +264,35 @@ test("Contest Library D1 uses real result items for two books and keeps remainin
   try {
     await settle();
     const books = [...view.document.querySelectorAll("button.contest-book")];
-    assert.equal(books.length, 2);
+    const cabinet = view.document.querySelector('[aria-label="Three-tier contest cabinet"]');
+    assert.ok(cabinet);
+    assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 contests in this view/);
+    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece").length, 3);
+    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece[alt='']").length, 3);
+    assert.equal(view.document.querySelector(".contest-cabinet__shell")?.getAttribute("aria-hidden"), "true");
+    assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--left")?.getAttribute("src")?.endsWith("contest-cabinet-left.png"), true);
+    assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--center")?.getAttribute("src")?.endsWith("contest-cabinet-center.png"), true);
+    assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--right")?.getAttribute("src")?.endsWith("contest-cabinet-right.png"), true);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground").length, 3);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground[alt='']").length, 3);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[0]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-1.png"), true);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[1]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-2.png"), true);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[2]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-3.png"), true);
+    assert.ok(view.document.querySelector(".contest-cabinet__overlay"));
+    assert.ok(cabinet.querySelector(".contest-cabinet__cornice"));
+    assert.equal(cabinet.querySelectorAll(".contest-cabinet__stile").length, 2);
+    assert.ok(cabinet.querySelector(".contest-cabinet__plinth"));
+    const tiers = [...cabinet.querySelectorAll(".contest-cabinet__tier")];
+    assert.equal(tiers.length, 3);
+    assert.deepEqual(tiers.map((tier) => tier.querySelectorAll("button.contest-book").length), [4, 4, 4]);
+    assert.equal(cabinet.querySelectorAll(".contest-cabinet__back").length, 3);
+    assert.equal(cabinet.querySelectorAll(".contest-shelf").length, 3);
+    assert.equal(cabinet.querySelectorAll(".contest-shelf__bottom-shadow").length, 3);
+    assert.equal(books.length, 12);
     assert.equal(books[0].dataset.contestId, "1979");
+    assert.equal(tiers[1].querySelector("button.contest-book")?.dataset.contestId, "1983");
+    assert.equal(tiers[2].querySelector("button.contest-book")?.dataset.contestId, "1987");
+    assert.equal(books[0].getAttribute("type"), "button");
     const shell = books[0].querySelector(".contest-book__shell");
     assert.ok(shell);
     assert.equal(shell.getAttribute("alt"), "");
@@ -284,11 +314,49 @@ test("Contest Library D1 uses real result items for two books and keeps remainin
     assert.equal(books[1].querySelector(".contest-book__round-number")?.textContent, "166");
     const remaining = view.document.querySelector('[aria-label="Remaining contest list"]');
     assert.ok(remaining);
-    assert.match(remaining.textContent, /Codeforces Round 952/);
+    assert.match(remaining.textContent, /Codeforces Round 965/);
     assert.ok(view.document.querySelector('[aria-label="Contest Library navigation"]'));
     assert.ok(view.document.querySelector(".contest-import-form"));
     await act(async () => books[0].click());
     assert.equal(view.window.location.pathname, "/contests/1979");
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library D2-A keeps one real contest in the first position of a complete cabinet", { concurrency: false }, async () => {
+  const item = { contestId: 2256, title: "Codeforces Round 1116 (Div. 2)", importStatus: "complete", problemCount: 7, missingSnapshotCount: 0, archived: false };
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return [item];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const tiers = [...view.document.querySelectorAll(".contest-cabinet__tier")];
+    assert.equal(tiers.length, 3);
+    assert.deepEqual(tiers.map((tier) => tier.querySelectorAll("button.contest-book").length), [1, 0, 0]);
+    assert.equal(tiers[0].querySelector("button.contest-book")?.dataset.contestId, "2256");
+    assert.equal(view.document.querySelectorAll("button.contest-book").length, 1);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library D2-A preserves all three tiers for an empty filtered result", { concurrency: false }, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const cabinet = view.document.querySelector('[aria-label="Three-tier contest cabinet"]');
+    assert.ok(cabinet);
+    assert.equal(cabinet.querySelectorAll(".contest-cabinet__tier").length, 3);
+    assert.equal(cabinet.querySelectorAll("button.contest-book").length, 0);
+    assert.equal(cabinet.querySelector(".contest-cabinet__empty")?.textContent, "No contests in this view");
+    assert.equal(view.document.querySelector(".empty-state"), null);
   } finally { await view.cleanup(); }
 });
 
