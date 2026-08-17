@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod identity;
+
+pub use identity::{
+    ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,
+};
+
 pub const BOUNDARY_NAME: &str = "acm-os-domain";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
