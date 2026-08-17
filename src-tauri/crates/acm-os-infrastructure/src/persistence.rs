@@ -422,9 +422,12 @@ impl DatabaseRuntime {
         )>,
         ReviewAttemptError,
     > {
-        let row: Option<(i64, String)> = sqlx::query_as(
-            "SELECT p.external_contest_key, p.external_problem_key \
-             FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, identities.external_problem_key \
+             FROM review_attempts ra \
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = ra.problem_id \
+              AND identities.platform = 'codeforces' \
              WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
         )
         .bind(attempt_id)
@@ -436,10 +439,8 @@ impl DatabaseRuntime {
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let (contest_id, index) = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
-        let contest = acm_os_domain::CodeforcesContestIdentity::new(
-            u64::try_from(contest_id).map_err(|_| ReviewAttemptError::IntegrityViolation)?,
-        )
-        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+        let contest = parse_codeforces_contest_identity(&contest_id)
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
         let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
             .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
         let binding = match self.read_personal_note_projection(&problem).await {
@@ -1343,12 +1344,14 @@ impl KnowledgeDetailPort for DatabaseRuntime {
             .transpose()?;
         let incoming = load_incoming_knowledge_nodes(pool, knowledge_node_id).await?;
         let outgoing = load_outgoing_knowledge_nodes(pool, knowledge_node_id).await?;
-        let problem_rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
-            "SELECT p.id, p.external_contest_key, p.external_problem_key, p.title \
+        let problem_rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT p.id, identities.external_contest_key, identities.external_problem_key, p.title \
              FROM knowledge_link_index l JOIN problems p ON CAST(l.source_id AS INTEGER) = p.id \
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
              WHERE l.source_kind = 'problem' AND l.resolution = 'resolved' \
                AND l.target_knowledge_node_id = ?1 \
-             ORDER BY p.external_contest_key, p.external_problem_key, p.id",
+             ORDER BY identities.external_contest_key, identities.external_problem_key, p.id",
         )
         .bind(knowledge_node_id)
         .fetch_all(pool)
@@ -1357,11 +1360,8 @@ impl KnowledgeDetailPort for DatabaseRuntime {
         let related_problems = problem_rows
             .into_iter()
             .map(|(problem_id, contest_id, index, title)| {
-                let contest = acm_os_domain::CodeforcesContestIdentity::new(
-                    u64::try_from(contest_id)
-                        .map_err(|_| KnowledgeIndexError::IntegrityViolation)?,
-                )
-                .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
+                let contest = parse_codeforces_contest_identity(&contest_id)
+                    .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
                 let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
                     .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
                 Ok(RelatedKnowledgeProblemProjection {
@@ -1589,10 +1589,13 @@ async fn candidate_problem_row(
     problem: &acm_os_domain::CodeforcesProblemIdentity,
 ) -> Result<(i64, String), KnowledgeCandidateError> {
     sqlx::query_as(
-        "SELECT id, identity_type FROM problems WHERE platform = 'codeforces' \
-         AND external_contest_key = ?1 AND external_problem_key = ?2",
+        "SELECT p.id, p.identity_type FROM problems p \
+         JOIN problem_external_identities identities ON identities.problem_id = p.id \
+         WHERE identities.platform = 'codeforces' \
+           AND identities.external_contest_key = ?1 \
+           AND identities.external_problem_key = ?2",
     )
-    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.contest().contest_id().to_string())
     .bind(problem.index())
     .fetch_optional(pool)
     .await
@@ -1773,14 +1776,15 @@ impl ProblemLifecyclePort for DatabaseRuntime {
         )> = sqlx::query_as(
             "SELECT p.identity_type, pls.learning_status, pls.learning_status_since_utc, \
                     rc.cycle_number, rc.stage, rc.schedule_rule_version, rc.next_due_local_date \
-             FROM problems p \
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
-             WHERE p.platform = 'codeforces' \
-               AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
+             WHERE identities.platform = 'codeforces' \
+               AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(
             self._pool
@@ -1943,13 +1947,14 @@ async fn validate_problem_lifecycle_decision_state(
 ) -> Result<i64, ProblemLifecycleError> {
     let row: Option<(i64, String, String)> = sqlx::query_as(
         "SELECT p.id, p.identity_type, pls.learning_status \
-         FROM problems p \
+         FROM problems p JOIN problem_external_identities identities \
+           ON identities.problem_id = p.id \
          LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
-         WHERE p.platform = 'codeforces' \
-           AND p.external_contest_key = ?1 \
-           AND p.external_problem_key = ?2",
+         WHERE identities.platform = 'codeforces' \
+           AND identities.external_contest_key = ?1 \
+           AND identities.external_problem_key = ?2",
     )
-    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.contest().contest_id().to_string())
     .bind(problem.index())
     .fetch_optional(&mut *connection)
     .await
@@ -2116,7 +2121,7 @@ impl TodaySnapshotPort for DatabaseRuntime {
         let rows: Vec<(
             String,
             String,
-            i64,
+            String,
             String,
             String,
             Option<String>,
@@ -2127,10 +2132,12 @@ impl TodaySnapshotPort for DatabaseRuntime {
             String,
             String,
         )> = sqlx::query_as(
-            "SELECT e.id, CAST(e.problem_id AS TEXT), p.external_contest_key, \
-                    p.external_problem_key, p.title, e.review_attempt_id, e.lane, e.reason, \
+            "SELECT e.id, CAST(e.problem_id AS TEXT), identities.external_contest_key, \
+                    identities.external_problem_key, p.title, e.review_attempt_id, e.lane, e.reason, \
                     e.planning_cost_minutes, e.position, e.entry_origin, e.entry_status \
              FROM today_plan_entries e JOIN problems p ON p.id = e.problem_id \
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
              WHERE e.today_plan_id = ?1 ORDER BY e.position",
         )
         .bind(&plan_id)
@@ -2157,8 +2164,9 @@ impl TodaySnapshotPort for DatabaseRuntime {
                     Ok(TodaySnapshotEntry {
                         entry_id,
                         problem_id,
-                        contest_id: u64::try_from(contest_id)
-                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        contest_id: parse_codeforces_contest_identity(&contest_id)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?
+                            .contest_id(),
                         problem_index,
                         problem_title,
                         review_attempt_id,
@@ -2207,12 +2215,14 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
-        let rows: Vec<(String, i64, String, String, String, String, i64, Option<String>, Option<String>, Option<String>, String)> =
+        let rows: Vec<(String, String, String, String, String, String, i64, Option<String>, Option<String>, Option<String>, String)> =
             sqlx::query_as(
-                "SELECT CAST(p.id AS TEXT), p.external_contest_key, p.external_problem_key, p.title, pls.learning_status, \
+                "SELECT CAST(p.id AS TEXT), identities.external_contest_key, identities.external_problem_key, p.title, pls.learning_status, \
                         substr(pls.learning_status_since_utc, 1, 10), pls.pinned_priority, \
                         rc.next_due_local_date, ra.id, ra.scheduled_due_local_date, fb.binding_state \
                  FROM problems p \
+                 JOIN problem_external_identities identities \
+                   ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
                  JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
@@ -2240,8 +2250,9 @@ impl TodaySnapshotPort for DatabaseRuntime {
                 )| {
                     Ok(TodayGenerationCandidate {
                         problem_id,
-                        contest_id: u64::try_from(contest_id)
-                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
+                        contest_id: parse_codeforces_contest_identity(&contest_id)
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?
+                            .contest_id(),
                         problem_index,
                         problem_title,
                         learning_status: parse_learning_status(&status)
@@ -2290,11 +2301,12 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
-        let learning_entries: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT p.external_contest_key, p.external_problem_key \
+        let learning_entries: Vec<(String, String)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, identities.external_problem_key \
              FROM today_plans tp \
              JOIN today_plan_entries e ON e.today_plan_id = tp.id \
-             JOIN problems p ON p.id = e.problem_id \
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = e.problem_id AND identities.platform = 'codeforces' \
              WHERE tp.local_date = ?1 AND e.entry_status != 'completed' \
                AND e.reason IN ('continue_learning', 'relearn', 'upsolve') \
              ORDER BY e.position",
@@ -2304,10 +2316,8 @@ impl TodaySnapshotPort for DatabaseRuntime {
         .await
         .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
         for (contest_id, index) in learning_entries {
-            let contest = acm_os_domain::CodeforcesContestIdentity::new(
-                u64::try_from(contest_id).map_err(|_| TodaySnapshotError::IntegrityViolation)?,
-            )
-            .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
+            let contest = parse_codeforces_contest_identity(&contest_id)
+                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
             let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
                 .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
             match self.read_personal_note_projection(&problem).await {
@@ -3572,12 +3582,12 @@ fn knowledge_target_matches(root: &Path, path: &Path, target: &str) -> bool {
     }
 }
 
-type ReviewAttemptRow = (String, i64, String, String, String, i64, i64, String);
+type ReviewAttemptRow = (String, String, String, String, String, i64, i64, String);
 
 #[derive(sqlx::FromRow)]
 struct ReviewHistoryRow {
     id: String,
-    contest_id: i64,
+    contest_id: String,
     problem_index: String,
     attempt_type: String,
     scheduled_due_local_date: String,
@@ -3722,8 +3732,8 @@ async fn load_review_history_item_from_pool(
     attempt_id: &str,
 ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
     let row: Option<ReviewHistoryRow> = sqlx::query_as(
-        "SELECT ra.id, p.external_contest_key AS contest_id, \
-                p.external_problem_key AS problem_index, ra.attempt_type, \
+        "SELECT ra.id, identities.external_contest_key AS contest_id, \
+                identities.external_problem_key AS problem_index, ra.attempt_type, \
                 ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                 ra.started_at_utc, ra.attempt_status, ra.judgement, ra.completed_at_utc, \
                 ra.completed_local_date, ra.final_ac, ra.first_submission_result, \
@@ -3732,6 +3742,8 @@ async fn load_review_history_item_from_pool(
                 ra.evidence_codes_json, rve.reason AS void_reason, rve.voided_at_utc \
          FROM review_attempts ra \
          JOIN problems p ON p.id = ra.problem_id \
+         JOIN problem_external_identities identities \
+           ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
          LEFT JOIN review_void_events rve ON rve.review_attempt_id = ra.id \
          WHERE ra.id = ?1",
     )
@@ -3871,10 +3883,8 @@ async fn load_review_history_item_from_pool(
 fn review_attempt_from_row(row: ReviewAttemptRow) -> Result<ReviewAttempt, ReviewAttemptError> {
     let (attempt_id, contest_id, index, attempt_type, due, started_early, rule_version, started_at) =
         row;
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(
-        u64::try_from(contest_id).map_err(|_| ReviewAttemptError::IntegrityViolation)?,
-    )
-    .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    let contest = parse_codeforces_contest_identity(&contest_id)
+        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
         .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
     let attempt_type = match attempt_type.as_str() {
@@ -3918,15 +3928,16 @@ impl ReviewAttemptPort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<Option<ReviewAttempt>, ReviewAttemptError> {
         let row: Option<ReviewAttemptRow> = sqlx::query_as(
-            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+            "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
                     ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                     ra.started_at_utc \
              FROM review_attempts ra \
-             JOIN problems p ON p.id = ra.problem_id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = ra.problem_id \
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(
             self._pool
@@ -4029,7 +4040,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
     ) -> Result<ReviewFocusView, ReviewAttemptError> {
         let row: Option<(
             String,
-            i64,
+            String,
             String,
             String,
             String,
@@ -4040,11 +4051,13 @@ impl ReviewAttemptPort for DatabaseRuntime {
             String,
             String,
         )> = sqlx::query_as(
-            "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+            "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
                     ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                     ra.started_at_utc, p.title, p.source_url, ss.sanitized_html \
              FROM review_attempts ra \
              JOIN problems p ON p.id = ra.problem_id \
+             JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
              JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
              WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
         )
@@ -4239,13 +4252,15 @@ impl ReviewAttemptPort for DatabaseRuntime {
         &self,
         attempt_id: &str,
     ) -> Result<ReviewCompletionContext, ReviewAttemptError> {
-        let row: Option<(String, i64, String, String, String, i64, i64, String, String, i64)> =
+        let row: Option<(String, String, String, String, String, i64, i64, String, String, i64)> =
             sqlx::query_as(
-                "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+                "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
                         ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                         ra.started_at_utc, pls.learning_status, rc.stage \
                  FROM review_attempts ra \
                  JOIN problems p ON p.id = ra.problem_id \
+                 JOIN problem_external_identities identities \
+                   ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
                  JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  JOIN review_cycles rc ON rc.id = ra.review_cycle_id AND rc.cycle_status = 'active' \
                  WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
@@ -4557,10 +4572,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
         let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = ?1 AND external_problem_key = ?2",
+            "SELECT COUNT(*) FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_one(pool)
         .await
@@ -4569,11 +4585,12 @@ impl ReviewAttemptPort for DatabaseRuntime {
             return Err(ReviewAttemptError::ProblemNotFound);
         }
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT ra.id FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2 ORDER BY ra.started_at_utc DESC, ra.id DESC",
+            "SELECT ra.id FROM review_attempts ra \
+             JOIN problem_external_identities identities ON identities.problem_id = ra.problem_id \
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2 ORDER BY ra.started_at_utc DESC, ra.id DESC",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_all(pool)
         .await
@@ -4603,10 +4620,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
         let problem_exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = ?1 AND external_problem_key = ?2)",
+            "SELECT EXISTS(SELECT 1 FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2)",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_one(pool)
         .await
@@ -4628,8 +4646,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
              ) SELECT p.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
                       CASE WHEN ?9 = 1 THEN ?10 ELSE NULL END, \
                       strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-               FROM problems p WHERE p.platform = 'codeforces' \
-                AND p.external_contest_key = ?1 AND p.external_problem_key = ?2 \
+               FROM problems p JOIN problem_external_identities identities \
+                 ON identities.problem_id = p.id \
+              WHERE identities.platform = 'codeforces' \
+                AND identities.external_contest_key = ?1 \
+                AND identities.external_problem_key = ?2 \
              ON CONFLICT(problem_id) DO UPDATE SET \
                  recalls_problem = excluded.recalls_problem, \
                  multiple_solutions_clear = excluded.multiple_solutions_clear, \
@@ -4647,7 +4668,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
                  ), \
                  updated_at_utc = excluded.updated_at_utc",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .bind(evidence.recalls_problem)
         .bind(evidence.multiple_solutions_clear)
@@ -4754,11 +4775,12 @@ async fn load_problem_mastery_projection(
                 pme.implementation_fluent, pme.can_adapt_or_create, \
                 pme.transfer_solved_independently, pme.historical_thoroughly_digested, \
                 pme.first_thoroughly_digested_local_date \
-         FROM problem_mastery_evidence pme JOIN problems p ON p.id = pme.problem_id \
-         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-           AND p.external_problem_key = ?2",
+         FROM problem_mastery_evidence pme \
+         JOIN problem_external_identities identities ON identities.problem_id = pme.problem_id \
+         WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+           AND identities.external_problem_key = ?2",
     )
-    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.contest().contest_id().to_string())
     .bind(problem.index())
     .fetch_optional(pool)
     .await
@@ -4798,14 +4820,15 @@ async fn load_in_progress_review_attempt_from_connection(
     problem: &acm_os_domain::CodeforcesProblemIdentity,
 ) -> Result<Option<ReviewAttempt>, ReviewAttemptError> {
     let row: Option<ReviewAttemptRow> = sqlx::query_as(
-        "SELECT ra.id, p.external_contest_key, p.external_problem_key, ra.attempt_type, \
+        "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
                 ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                 ra.started_at_utc \
-         FROM review_attempts ra JOIN problems p ON p.id = ra.problem_id \
-         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-           AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
+         FROM review_attempts ra JOIN problem_external_identities identities \
+           ON identities.problem_id = ra.problem_id \
+         WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+           AND identities.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'",
     )
-    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.contest().contest_id().to_string())
     .bind(problem.index())
     .fetch_optional(&mut *connection)
     .await
@@ -4821,14 +4844,15 @@ async fn validate_review_attempt_creation_state(
     let current: Option<(i64, String, String, String, String, Option<i64>)> = sqlx::query_as(
         "SELECT p.id, p.identity_type, pls.learning_status, rc.id, rc.next_due_local_date, \
          ss.problem_id \
-         FROM problems p \
+         FROM problems p JOIN problem_external_identities identities \
+           ON identities.problem_id = p.id \
          JOIN problem_learning_states pls ON pls.problem_id = p.id \
          JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
          LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
-         WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-           AND p.external_problem_key = ?2",
+         WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+           AND identities.external_problem_key = ?2",
     )
-    .bind(problem.contest().contest_id() as i64)
+    .bind(problem.contest().contest_id().to_string())
     .bind(problem.index())
     .fetch_optional(&mut *connection)
     .await
@@ -4899,12 +4923,12 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         let in_progress_review: i64 = sqlx::query_scalar(
             "SELECT EXISTS(\
                 SELECT 1 FROM review_attempts ra \
-                JOIN problems p ON p.id = ra.problem_id \
-                WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-                  AND p.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'\
+                JOIN problem_external_identities identities ON identities.problem_id = ra.problem_id \
+                WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+                  AND identities.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'\
              )",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_one(
             self._pool
@@ -5006,14 +5030,15 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         let row: Option<(i64, String, String, String, String)> = sqlx::query_as(
             "SELECT p.id, p.identity_type, pls.learning_status, \
                     fb.vault_relative_path, fb.content_digest \
-             FROM problems p \
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE p.platform = 'codeforces' \
-               AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
+             WHERE identities.platform = 'codeforces' \
+               AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(&mut *transaction)
         .await
@@ -5172,14 +5197,15 @@ impl PersonalNoteReadPort for DatabaseRuntime {
         )> = sqlx::query_as(
             "SELECT p.id, p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
                     fb.content_digest, fb.windows_file_key \
-             FROM problems p \
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-             WHERE p.platform = 'codeforces' \
-               AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
+             WHERE identities.platform = 'codeforces' \
+               AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(
             self._pool
@@ -5307,12 +5333,13 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
             .ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
         let row: Option<(i64, String, Option<String>, String)> = sqlx::query_as(
             "SELECT p.id, p.identity_type, ws.active_vault_path, fb.binding_state \
-             FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2",
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(pool)
         .await
@@ -5381,12 +5408,13 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
         )> = sqlx::query_as(
             "SELECT p.id, p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
                         fb.content_digest, fb.binding_state \
-                 FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id \
+                 LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-                 WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-                   AND p.external_problem_key = ?2",
+                 WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+                   AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(pool)
         .await
@@ -5506,14 +5534,15 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
             sqlx::query_as(
                 "SELECT p.id, p.identity_type, pls.learning_status, fb.vault_relative_path, \
                         fb.windows_file_key, fb.content_digest, ws.active_vault_path \
-                 FROM problems p \
+                 FROM problems p JOIN problem_external_identities identities \
+                   ON identities.problem_id = p.id \
                  LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-                 WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-                   AND p.external_problem_key = ?2 AND fb.binding_state = 'location_anomaly'",
+                 WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+                   AND identities.external_problem_key = ?2 AND fb.binding_state = 'location_anomaly'",
             )
-            .bind(problem.contest().contest_id() as i64)
+                .bind(problem.contest().contest_id().to_string())
             .bind(problem.index())
             .fetch_optional(pool)
             .await
@@ -5858,12 +5887,13 @@ impl DatabaseRuntime {
             .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
         let row: Option<(i64, i64)> = sqlx::query_as(
             "SELECT p.id, fb.id FROM problems p \
+             JOIN problem_external_identities identities ON identities.problem_id = p.id \
              JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 \
-               AND p.external_problem_key = ?2 AND fb.vault_relative_path = ?3 \
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2 AND fb.vault_relative_path = ?3 \
                AND fb.content_digest = ?4 AND fb.binding_state = 'linked'",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .bind(&expected.vault_relative_path)
         .bind(&expected.content_digest)
@@ -5901,10 +5931,11 @@ impl DatabaseRuntime {
         critical_operation_id: Option<&str>,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
         let problem_id: i64 = sqlx::query_scalar(
-            "SELECT id FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = ?1 AND external_problem_key = ?2",
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(
             self._pool
@@ -6107,13 +6138,14 @@ impl PersonalNotePort for DatabaseRuntime {
         let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT p.identity_type, fb.vault_relative_path, \
                         fb.content_digest, fb.windows_file_key \
-                 FROM problems p \
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id \
                  LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-                 WHERE p.platform = 'codeforces' \
-                   AND p.external_contest_key = ?1 \
-                   AND p.external_problem_key = ?2",
+                 WHERE identities.platform = 'codeforces' \
+                   AND identities.external_contest_key = ?1 \
+                   AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(self.personal_note_pool()?)
         .await
@@ -6179,11 +6211,12 @@ impl PersonalNotePort for DatabaseRuntime {
                 sqlx::query_as(
                     "SELECT p.identity_type, fb.vault_relative_path, fb.content_digest, \
                             fb.windows_file_key
-                     FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id
-                     WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1
-                       AND p.external_problem_key = ?2",
+                     FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id
+                     LEFT JOIN file_bindings fb ON fb.problem_id = p.id
+                     WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1
+                       AND identities.external_problem_key = ?2",
                 )
-                .bind(problem.contest().contest_id() as i64)
+                .bind(problem.contest().contest_id().to_string())
                 .bind(problem.index())
                 .fetch_optional(&mut *connection)
                 .await
@@ -6215,11 +6248,13 @@ impl PersonalNotePort for DatabaseRuntime {
             .await
             .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
         let row: Option<(i64, String)> = sqlx::query_as(
-            "SELECT id, identity_type FROM problems \
-             WHERE platform = 'codeforces' \
-               AND external_contest_key = ?1 AND external_problem_key = ?2",
+            "SELECT p.id, p.identity_type FROM problems p \
+             JOIN problem_external_identities identities ON identities.problem_id = p.id \
+             WHERE identities.platform = 'codeforces' \
+               AND identities.external_contest_key = ?1 \
+               AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(&mut *transaction)
         .await
@@ -6383,29 +6418,35 @@ impl ContestImportPort for DatabaseRuntime {
             .begin()
             .await
             .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+        let external_contest_key = draft.contest.contest_id().to_string();
         let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+            "SELECT contest_id FROM contest_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
-        .bind(draft.contest.contest_id() as i64)
+        .bind(&external_contest_key)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| ContestImportPersistenceError::Unavailable)?;
         let contest_id = match existing {
             Some(id) => {
-                let persisted_slots: Vec<(i64, String)> = sqlx::query_as(
-                    "SELECT p.external_contest_key, p.external_problem_key FROM contest_problems cp \
-                     JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+                let persisted_slots: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT identities.external_contest_key, identities.external_problem_key \
+                     FROM contest_problems cp \
+                     JOIN problem_external_identities identities \
+                       ON identities.problem_id = cp.problem_id \
+                      AND identities.platform = 'codeforces' \
+                     WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
                 )
                 .bind(id)
                 .fetch_all(&mut *transaction)
                 .await
                 .map_err(|_| ContestImportPersistenceError::Unavailable)?;
-                let incoming_slots: Vec<(i64, String)> = draft
+                let incoming_slots: Vec<(String, String)> = draft
                     .slots
                     .iter()
                     .map(|slot| {
                         (
-                            slot.problem.contest().contest_id() as i64,
+                            slot.problem.contest().contest_id().to_string(),
                             slot.problem.index().to_owned(),
                         )
                     })
@@ -6417,10 +6458,9 @@ impl ContestImportPort for DatabaseRuntime {
             }
             None => {
                 let result = sqlx::query(
-                    "INSERT INTO contests (platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
-                     VALUES ('codeforces', ?1, ?2, ?3, ?4, 'incomplete')",
+                    "INSERT INTO contests (title, source_url, starts_at_utc, import_status) \
+                     VALUES (?1, ?2, ?3, 'incomplete')",
                 )
-                .bind(draft.contest.contest_id() as i64)
                 .bind(&draft.title)
                 .bind(&draft.source_url)
                 .bind(&draft.starts_at_utc)
@@ -6428,28 +6468,53 @@ impl ContestImportPort for DatabaseRuntime {
                 .await
                 .map_err(|_| ContestImportPersistenceError::Unavailable)?;
                 let id = result.last_insert_rowid();
+                sqlx::query(
+                    "INSERT INTO contest_external_identities \
+                     (contest_id, platform, external_contest_key) \
+                     VALUES (?1, 'codeforces', ?2)",
+                )
+                .bind(id)
+                .bind(&external_contest_key)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ContestImportPersistenceError::Unavailable)?;
                 for slot in &draft.slots {
-                    sqlx::query(
-                        "INSERT INTO problems (platform, external_contest_key, external_problem_key, title, rating, source_url) \
-                         VALUES ('codeforces', ?1, ?2, ?3, ?4, ?5) \
-                         ON CONFLICT(platform, external_contest_key, external_problem_key) DO NOTHING",
+                    let problem_id: Option<i64> = sqlx::query_scalar(
+                        "SELECT problem_id FROM problem_external_identities \
+                         WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+                           AND external_problem_key = ?2",
                     )
-                    .bind(slot.problem.contest().contest_id() as i64)
+                    .bind(slot.problem.contest().contest_id().to_string())
                     .bind(slot.problem.index())
-                    .bind(&slot.title)
-                    .bind(slot.rating.map(i64::from))
-                    .bind(&slot.source_url)
-                    .execute(&mut *transaction)
+                    .fetch_optional(&mut *transaction)
                     .await
                     .map_err(|_| ContestImportPersistenceError::Unavailable)?;
-                    let problem_id: i64 = sqlx::query_scalar(
-                        "SELECT id FROM problems WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = ?2",
-                    )
-                    .bind(slot.problem.contest().contest_id() as i64)
-                    .bind(slot.problem.index())
-                    .fetch_one(&mut *transaction)
-                    .await
-                    .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                    let problem_id = if let Some(problem_id) = problem_id {
+                        problem_id
+                    } else {
+                        let result = sqlx::query(
+                            "INSERT INTO problems (title, rating, source_url) VALUES (?1, ?2, ?3)",
+                        )
+                        .bind(&slot.title)
+                        .bind(slot.rating.map(i64::from))
+                        .bind(&slot.source_url)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                        let problem_id = result.last_insert_rowid();
+                        sqlx::query(
+                            "INSERT INTO problem_external_identities \
+                             (problem_id, platform, external_contest_key, external_problem_key) \
+                             VALUES (?1, 'codeforces', ?2, ?3)",
+                        )
+                        .bind(problem_id)
+                        .bind(slot.problem.contest().contest_id().to_string())
+                        .bind(slot.problem.index())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                        problem_id
+                    };
                     sqlx::query(
                         "INSERT INTO problem_learning_states (problem_id) VALUES (?1) \
                          ON CONFLICT(problem_id) DO NOTHING",
@@ -6484,9 +6549,11 @@ impl ContestImportPort for DatabaseRuntime {
     ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
         let pool = self.contest_pool()?;
         let problem_id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM problems WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = ?2",
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2",
         )
-        .bind(snapshot.problem.contest().contest_id() as i64)
+        .bind(snapshot.problem.contest().contest_id().to_string())
         .bind(snapshot.problem.index())
         .fetch_optional(pool)
         .await
@@ -6534,10 +6601,13 @@ impl ContestImportPort for DatabaseRuntime {
 
 impl ContestReadPort for DatabaseRuntime {
     async fn list_contests(&self) -> Result<Vec<ContestShelfItem>, ContestReadError> {
-        let rows: Vec<(i64, String, String, i64, i64, Option<String>)> = sqlx::query_as(
-            "SELECT c.external_contest_key, c.title, c.import_status, COUNT(cp.problem_id), \
+        let rows: Vec<(String, String, String, i64, i64, Option<String>)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, c.title, c.import_status, COUNT(cp.problem_id), \
                     SUM(CASE WHEN cp.import_state = 'pending_snapshot' THEN 1 ELSE 0 END), c.archived_at_utc \
-             FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id \
+             FROM contests c \
+             JOIN contest_external_identities identities \
+               ON identities.contest_id = c.id AND identities.platform = 'codeforces' \
+             JOIN contest_problems cp ON cp.contest_id = c.id \
              GROUP BY c.id ORDER BY c.created_at_utc DESC",
         )
         .fetch_all(
@@ -6549,7 +6619,7 @@ impl ContestReadPort for DatabaseRuntime {
         rows.into_iter()
             .map(|(id, title, status, count, missing, archived_at)| {
                 Ok(ContestShelfItem {
-                    contest: acm_os_domain::CodeforcesContestIdentity::new(id as u64)
+                    contest: parse_codeforces_contest_identity(&id)
                         .map_err(|_| ContestReadError::Unavailable)?,
                     title,
                     import_status: match status.as_str() {
@@ -6572,19 +6642,31 @@ impl ContestReadPort for DatabaseRuntime {
         let pool = self
             .contest_pool()
             .map_err(|_| ContestReadError::Unavailable)?;
-        let row: Option<(String, String, Option<String>, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT title, source_url, starts_at_utc, import_status, facts_status, archived_at_utc FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        let row: Option<(
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT c.title, c.source_url, c.starts_at_utc, c.import_status, \
+                    c.facts_status, c.archived_at_utc \
+             FROM contests c JOIN contest_external_identities identities \
+               ON identities.contest_id = c.id \
+             WHERE identities.platform = 'codeforces' \
+               AND identities.external_contest_key = ?1",
         )
-        .bind(contest.contest_id() as i64)
+        .bind(contest.contest_id().to_string())
         .fetch_optional(pool)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
         let (title, source_url, starts_at_utc, import_status, facts_status, archived_at_utc) =
             row.ok_or(ContestReadError::NotFound)?;
         let rows: Vec<(String, String, Option<i64>, i64, String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT p.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type, cp.final_contest_result, cp.upsolve_decision, pls.learning_status FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN contests c ON c.id = cp.contest_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 ORDER BY cp.ordinal",
+            "SELECT identities.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type, cp.final_contest_result, cp.upsolve_decision, pls.learning_status FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities identities ON identities.problem_id = p.id AND identities.platform = 'codeforces' JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN contest_external_identities contest_identity ON contest_identity.contest_id = cp.contest_id AND contest_identity.platform = 'codeforces' WHERE contest_identity.external_contest_key = ?1 ORDER BY cp.ordinal",
         )
-        .bind(contest.contest_id() as i64)
+        .bind(contest.contest_id().to_string())
         .fetch_all(pool)
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
@@ -6625,8 +6707,8 @@ impl ContestReadPort for DatabaseRuntime {
             )
             .collect::<Result<Vec<_>, _>>()?;
         let correction_rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT e.id, p.external_problem_key, e.field_name, e.old_value, e.new_value, e.corrected_at_utc FROM contest_correction_events e JOIN problems p ON p.id = e.problem_id WHERE e.contest_id = (SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1) ORDER BY e.corrected_at_utc, e.id",
-        ).bind(contest.contest_id() as i64).fetch_all(pool).await.map_err(|_| ContestReadError::Unavailable)?;
+            "SELECT e.id, identities.external_problem_key, e.field_name, e.old_value, e.new_value, e.corrected_at_utc FROM contest_correction_events e JOIN problem_external_identities identities ON identities.problem_id = e.problem_id AND identities.platform = 'codeforces' WHERE e.contest_id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1) ORDER BY e.corrected_at_utc, e.id",
+        ).bind(contest.contest_id().to_string()).fetch_all(pool).await.map_err(|_| ContestReadError::Unavailable)?;
         let corrections = correction_rows
             .into_iter()
             .map(
@@ -6663,8 +6745,8 @@ impl ContestReadPort for DatabaseRuntime {
             },
             problems,
             corrections,
-            ai_analysis: sqlx::query_as::<_, (String, String, String, String)>("SELECT raw_text, parse_status, parsed_projection_json, updated_at_utc FROM contest_ai_analyses WHERE contest_id = (SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1)")
-                .bind(contest.contest_id() as i64).fetch_optional(pool).await.map_err(|_| ContestReadError::Unavailable)?
+            ai_analysis: sqlx::query_as::<_, (String, String, String, String)>("SELECT raw_text, parse_status, parsed_projection_json, updated_at_utc FROM contest_ai_analyses WHERE contest_id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1)")
+                .bind(contest.contest_id().to_string()).fetch_optional(pool).await.map_err(|_| ContestReadError::Unavailable)?
                 .map(|(raw_text, status, parsed_projection_json, updated_at_utc)| ContestAiAnalysis { raw_text, parse_status: match status.as_str() { "complete" => ContestAiParseStatus::Complete, "partial" => ContestAiParseStatus::Partial, _ => ContestAiParseStatus::Failed }, parsed_projection_json, updated_at_utc }),
             archived: archived_at_utc.is_some(),
         })
@@ -6673,11 +6755,13 @@ impl ContestReadPort for DatabaseRuntime {
     async fn list_lightweight_problems(
         &self,
     ) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
-        let rows: Vec<(i64, String, String, Option<i64>, i64, String)> = sqlx::query_as(
-            "SELECT p.external_contest_key, p.external_problem_key, p.title, p.rating, \
+        let rows: Vec<(String, String, String, Option<i64>, i64, String)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, identities.external_problem_key, p.title, p.rating, \
                     EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), \
                     p.identity_type \
-             FROM problems p ORDER BY p.external_contest_key DESC, p.external_problem_key ASC",
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
+             ORDER BY identities.external_contest_key DESC, identities.external_problem_key ASC",
         )
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
@@ -6687,7 +6771,7 @@ impl ContestReadPort for DatabaseRuntime {
                 |(contest_id, index, title, rating, snapshot, identity_type)| {
                     Ok(LightweightProblemItem {
                         problem: acm_os_domain::CodeforcesProblemIdentity::new(
-                            acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                            parse_codeforces_contest_identity(&contest_id)
                                 .map_err(|_| ContestReadError::Unavailable)?,
                             index,
                         )
@@ -6709,12 +6793,13 @@ impl ContestReadPort for DatabaseRuntime {
         let row: Option<(String, Option<i64>, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT p.title, p.rating, p.source_url, ss.sanitized_html, p.identity_type, \
                     fb.vault_relative_path, fb.content_digest, fb.windows_file_key \
-             FROM problems p \
+             FROM problems p JOIN problem_external_identities identities \
+               ON identities.problem_id = p.id \
              LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 AND p.external_problem_key = ?2",
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 AND identities.external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
@@ -6772,9 +6857,9 @@ impl ContestReadPort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<Vec<LocalStatementAsset>, ContestReadError> {
         let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
-            "SELECT a.local_ref, a.media_type, a.bytes FROM problem_statement_assets a JOIN problems p ON p.id = a.problem_id WHERE p.platform = 'codeforces' AND p.external_contest_key = ?1 AND p.external_problem_key = ?2 ORDER BY a.local_ref",
+            "SELECT a.local_ref, a.media_type, a.bytes FROM problem_statement_assets a JOIN problem_external_identities identities ON identities.problem_id = a.problem_id WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 AND identities.external_problem_key = ?2 ORDER BY a.local_ref",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
         .await
@@ -6817,9 +6902,10 @@ async fn contest_library_contest_row_id(
     contest: &acm_os_domain::CodeforcesContestIdentity,
 ) -> Result<i64, ContestLibraryError> {
     sqlx::query_scalar(
-        "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        "SELECT contest_id FROM contest_external_identities \
+         WHERE platform = 'codeforces' AND external_contest_key = ?1",
     )
-    .bind(contest.contest_id() as i64)
+    .bind(contest.contest_id().to_string())
     .fetch_optional(pool)
     .await
     .map_err(|_| ContestLibraryError::PersistenceUnavailable)?
@@ -7261,9 +7347,10 @@ impl ContestLibraryPort for DatabaseRuntime {
             .await
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
         let contest_id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+            "SELECT contest_id FROM contest_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
-        .bind(input.contest.contest_id() as i64)
+        .bind(input.contest.contest_id().to_string())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
@@ -7492,12 +7579,14 @@ impl ContestLibraryPort for DatabaseRuntime {
             }
         }
         let mut sql = String::from(
-            "SELECT c.external_contest_key, c.title, c.import_status, \
+            "SELECT identities.external_contest_key, c.title, c.import_status, \
                     (SELECT COUNT(*) FROM contest_problems problem_count WHERE problem_count.contest_id = c.id), \
                     (SELECT COUNT(*) FROM contest_problems missing_count \
                      WHERE missing_count.contest_id = c.id AND missing_count.import_state = 'pending_snapshot'), \
                     c.archived_at_utc \
-             FROM contests c WHERE c.platform = 'codeforces'",
+             FROM contests c JOIN contest_external_identities identities \
+               ON identities.contest_id = c.id AND identities.platform = 'codeforces' \
+             WHERE 1 = 1",
         );
         match archive {
             ContestLibraryArchiveFilter::All => {}
@@ -7534,7 +7623,7 @@ impl ContestLibraryPort for DatabaseRuntime {
             sql.push(')');
         }
         sql.push_str(" ORDER BY c.created_at_utc DESC, c.id DESC");
-        let mut query = sqlx::query_as::<_, (i64, String, String, i64, i64, Option<String>)>(
+        let mut query = sqlx::query_as::<_, (String, String, String, i64, i64, Option<String>)>(
             sqlx::AssertSqlSafe(sql),
         );
         if let ContestLibraryScope::Family {
@@ -7559,7 +7648,7 @@ impl ContestLibraryPort for DatabaseRuntime {
             .map(
                 |(contest_id, title, status, problem_count, missing_count, archived_at)| {
                     Ok(ContestShelfItem {
-                        contest: acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                        contest: parse_codeforces_contest_identity(&contest_id)
                             .map_err(|_| ContestLibraryError::IntegrityViolation)?,
                         title,
                         import_status: match status.as_str() {
@@ -7596,9 +7685,10 @@ impl ContestAiAnalysisPort for DatabaseRuntime {
             .as_ref()
             .ok_or(ContestAiAnalysisError::Unavailable)?;
         let contest_id: i64 = sqlx::query_scalar(
-            "SELECT id FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+            "SELECT contest_id FROM contest_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
         )
-        .bind(contest.contest_id() as i64)
+        .bind(contest.contest_id().to_string())
         .fetch_optional(pool)
         .await
         .map_err(|_| ContestAiAnalysisError::Unavailable)?
@@ -7627,10 +7717,11 @@ impl ContestManagementPort for DatabaseRuntime {
             .as_ref()
             .ok_or(ContestManagementError::Unavailable)?;
         let current_archived: bool = sqlx::query_scalar(
-            "SELECT archived_at_utc IS NOT NULL FROM contests \
-             WHERE platform = 'codeforces' AND external_contest_key = ?1",
+            "SELECT c.archived_at_utc IS NOT NULL FROM contests c \
+             JOIN contest_external_identities identities ON identities.contest_id = c.id \
+             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1",
         )
-        .bind(contest.contest_id() as i64)
+        .bind(contest.contest_id().to_string())
         .fetch_optional(pool)
         .await
         .map_err(|_| ContestManagementError::Unavailable)?
@@ -7641,8 +7732,8 @@ impl ContestManagementPort for DatabaseRuntime {
             self.ensure_daily_backup(local_date)
                 .await
                 .map_err(|_| ContestManagementError::Unavailable)?;
-            let result = sqlx::query("UPDATE contests SET archived_at_utc = CASE WHEN ?1 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE platform = 'codeforces' AND external_contest_key = ?2 AND (archived_at_utc IS NOT NULL) != ?1")
-                .bind(archived).bind(contest.contest_id() as i64).execute(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
+            let result = sqlx::query("UPDATE contests SET archived_at_utc = CASE WHEN ?1 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?2) AND (archived_at_utc IS NOT NULL) != ?1")
+                .bind(archived).bind(contest.contest_id().to_string()).execute(pool).await.map_err(|_| ContestManagementError::Unavailable)?;
             if result.rows_affected() != 1 {
                 return Err(ContestManagementError::Unavailable);
             }
@@ -7717,12 +7808,22 @@ impl ContestManagementPort for DatabaseRuntime {
             .execute(&mut *tx)
             .await
             .map_err(|_| ContestManagementError::Unavailable)?;
+        sqlx::query("DELETE FROM contest_external_identities WHERE contest_id = ?1")
+            .bind(contest_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestManagementError::Unavailable)?;
         sqlx::query("DELETE FROM contests WHERE id = ?1")
             .bind(contest_id)
             .execute(&mut *tx)
             .await
             .map_err(|_| ContestManagementError::Unavailable)?;
         for problem_id in cleanup_ids {
+            sqlx::query("DELETE FROM problem_external_identities WHERE problem_id = ?1")
+                .bind(problem_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ContestManagementError::Unavailable)?;
             sqlx::query("DELETE FROM problem_statement_assets WHERE problem_id = ?1")
                 .bind(problem_id)
                 .execute(&mut *tx)
@@ -7757,7 +7858,7 @@ async fn contest_delete_state(
     connection: &mut sqlx::SqliteConnection,
     contest: &acm_os_domain::CodeforcesContestIdentity,
 ) -> Result<(i64, Vec<i64>, ContestDeletePreview), ContestManagementError> {
-    let row: Option<(i64, String)> = sqlx::query_as("SELECT id, title FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1").bind(contest.contest_id() as i64).fetch_optional(&mut *connection).await.map_err(|_| ContestManagementError::Unavailable)?;
+    let row: Option<(i64, String)> = sqlx::query_as("SELECT c.id, c.title FROM contests c JOIN contest_external_identities identities ON identities.contest_id = c.id WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1").bind(contest.contest_id().to_string()).fetch_optional(&mut *connection).await.map_err(|_| ContestManagementError::Unavailable)?;
     let (contest_id, contest_title) = row.ok_or(ContestManagementError::NotFound)?;
     let relationship_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM contest_problems WHERE contest_id = ?1")
@@ -7783,7 +7884,7 @@ async fn contest_delete_state(
     ))
 }
 
-const CONTEST_CORRECTION_STATE_SQL: &str = "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id WHERE c.platform = 'codeforces' AND c.external_contest_key = ?1 AND p.external_problem_key = ?2";
+const CONTEST_CORRECTION_STATE_SQL: &str = "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_external_identities contest_identity ON contest_identity.contest_id = c.id AND contest_identity.platform = 'codeforces' JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities problem_identity ON problem_identity.problem_id = p.id AND problem_identity.platform = 'codeforces' WHERE contest_identity.external_contest_key = ?1 AND problem_identity.external_problem_key = ?2";
 
 impl ContestCorrectionPort for DatabaseRuntime {
     async fn correct_contest_problem_facts(
@@ -7800,7 +7901,7 @@ impl ContestCorrectionPort for DatabaseRuntime {
             .ok_or(ContestCorrectionError::Unavailable)?;
         let initial: Option<(i64, i64, String, Option<String>, String)> =
             sqlx::query_as(CONTEST_CORRECTION_STATE_SQL)
-                .bind(contest.contest_id() as i64)
+                .bind(contest.contest_id().to_string())
                 .bind(correction.problem.index())
                 .fetch_optional(pool)
                 .await
@@ -7828,7 +7929,7 @@ impl ContestCorrectionPort for DatabaseRuntime {
             .map_err(|_| ContestCorrectionError::Unavailable)?;
         let row: Option<(i64, i64, String, Option<String>, String)> =
             sqlx::query_as(CONTEST_CORRECTION_STATE_SQL)
-                .bind(contest.contest_id() as i64)
+                .bind(contest.contest_id().to_string())
                 .bind(correction.problem.index())
                 .fetch_optional(&mut *tx)
                 .await
@@ -7948,9 +8049,11 @@ async fn validate_contest_facts_state(
     problems: &[ContestProblemFactInput],
 ) -> Result<(i64, Vec<(i64, String)>), ContestFactsError> {
     let contest_row: Option<(i64, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, starts_at_utc, import_status, facts_status FROM contests WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        "SELECT c.id, c.starts_at_utc, c.import_status, c.facts_status FROM contests c \
+         JOIN contest_external_identities identities ON identities.contest_id = c.id \
+         WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1",
     )
-    .bind(contest.contest_id() as i64)
+    .bind(contest.contest_id().to_string())
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| ContestFactsError::Unavailable)?;
@@ -7964,7 +8067,11 @@ async fn validate_contest_facts_state(
     }
     acm_os_application::validate_contest_facts_input(contest, starts_at.as_deref(), problems)?;
     let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT p.id, p.external_problem_key FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+        "SELECT p.id, identities.external_problem_key FROM contest_problems cp \
+         JOIN problems p ON p.id = cp.problem_id \
+         JOIN problem_external_identities identities \
+           ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
+         WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
     )
     .bind(contest_id)
     .fetch_all(&mut *connection)
@@ -8022,9 +8129,10 @@ impl DatabaseRuntime {
         contest_id: i64,
     ) -> Result<PersistedContestImport, ContestImportPersistenceError> {
         let pool = self.contest_pool()?;
-        let missing: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT p.external_contest_key, p.external_problem_key FROM contest_problems cp \
-             JOIN problems p ON p.id = cp.problem_id LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+        let missing: Vec<(String, String)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, identities.external_problem_key FROM contest_problems cp \
+             JOIN problem_external_identities identities ON identities.problem_id = cp.problem_id AND identities.platform = 'codeforces' \
+             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = cp.problem_id \
              WHERE cp.contest_id = ?1 AND ss.problem_id IS NULL ORDER BY cp.ordinal",
         )
         .bind(contest_id)
@@ -8035,7 +8143,7 @@ impl DatabaseRuntime {
             .into_iter()
             .map(|(contest_id, index)| {
                 acm_os_domain::CodeforcesProblemIdentity::new(
-                    acm_os_domain::CodeforcesContestIdentity::new(contest_id as u64)
+                    parse_codeforces_contest_identity(&contest_id)
                         .map_err(|_| ContestImportPersistenceError::Unavailable)?,
                     index,
                 )
@@ -8069,6 +8177,16 @@ fn parse_problem_identity_type(value: &str) -> Result<ProblemIdentityType, Conte
         "personal" => Ok(ProblemIdentityType::Personal),
         _ => Err(ContestReadError::Unavailable),
     }
+}
+
+fn parse_codeforces_contest_identity(
+    external_contest_key: &str,
+) -> Result<acm_os_domain::CodeforcesContestIdentity, ()> {
+    let contest_id = external_contest_key.parse::<u64>().map_err(|_| ())?;
+    if contest_id.to_string() != external_contest_key {
+        return Err(());
+    }
+    acm_os_domain::CodeforcesContestIdentity::new(contest_id).map_err(|_| ())
 }
 
 fn parse_contest_final_result(value: &str) -> Result<ContestFinalResult, ContestReadError> {
@@ -9387,6 +9505,7 @@ async fn validate_schema_contract(
             | 23
             | 24
             | 25
+            | 26
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9519,6 +9638,9 @@ async fn validate_schema_contract(
     if schema_version >= 25 {
         validate_contest_library_contract(pool).await?;
     }
+    if schema_version >= 26 {
+        validate_external_identity_contract(pool).await?;
+    }
     Ok(())
 }
 
@@ -9568,6 +9690,21 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "table".to_owned(),
                 "problems".to_owned(),
                 "problems".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 26 {
+        expected_objects.extend([
+            (
+                "table".to_owned(),
+                "contest_external_identities".to_owned(),
+                "contest_external_identities".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_external_identities".to_owned(),
+                "problem_external_identities".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -10176,7 +10313,19 @@ async fn validate_contest_import_contract(
     pool: &SqlitePool,
     schema_version: i64,
 ) -> Result<(), StartupRecoveryReason> {
-    let contest_columns = if schema_version >= 20 {
+    let contest_columns = if schema_version >= 26 {
+        vec![
+            "id",
+            "title",
+            "source_url",
+            "starts_at_utc",
+            "import_status",
+            "created_at_utc",
+            "facts_status",
+            "facts_completed_at_utc",
+            "archived_at_utc",
+        ]
+    } else if schema_version >= 20 {
         vec![
             "id",
             "platform",
@@ -10216,7 +10365,16 @@ async fn validate_contest_import_contract(
         ]
     };
     validate_table_columns(pool, "contests", &contest_columns).await?;
-    let problem_columns = if schema_version >= 4 {
+    let problem_columns = if schema_version >= 26 {
+        vec![
+            "id",
+            "title",
+            "rating",
+            "source_url",
+            "created_at_utc",
+            "identity_type",
+        ]
+    } else if schema_version >= 4 {
         vec![
             "id",
             "platform",
@@ -10594,6 +10752,145 @@ async fn validate_knowledge_index_contract(pool: &SqlitePool) -> Result<(), Star
     }
 }
 
+async fn validate_external_identity_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "contest_external_identities",
+        &["contest_id", "platform", "external_contest_key"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "problem_external_identities",
+        &[
+            "problem_id",
+            "platform",
+            "external_contest_key",
+            "external_problem_key",
+        ],
+    )
+    .await?;
+
+    for (table, expected) in [
+        (
+            "contest_external_identities",
+            vec![
+                ("contest_id", "INTEGER", 1_i64),
+                ("platform", "TEXT", 1_i64),
+                ("external_contest_key", "TEXT", 1_i64),
+            ],
+        ),
+        (
+            "problem_external_identities",
+            vec![
+                ("problem_id", "INTEGER", 1_i64),
+                ("platform", "TEXT", 1_i64),
+                ("external_contest_key", "TEXT", 1_i64),
+                ("external_problem_key", "TEXT", 1_i64),
+            ],
+        ),
+    ] {
+        let pragma = format!("PRAGMA table_xinfo('{table}')");
+        let columns: Vec<SqliteColumnContract> =
+            sqlx::query_as(sqlx::AssertSqlSafe(pragma.as_str()))
+                .fetch_all(pool)
+                .await
+                .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        let actual = columns
+            .iter()
+            .map(|column| (column.1.as_str(), column.2.as_str(), column.3))
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    validate_external_identity_fk(
+        pool,
+        "contest_external_identities",
+        "contest_id",
+        "contests",
+    )
+    .await?;
+    validate_external_identity_fk(
+        pool,
+        "problem_external_identities",
+        "problem_id",
+        "problems",
+    )
+    .await?;
+    validate_strong_identity_unique(
+        pool,
+        "contest_external_identities",
+        &["platform", "external_contest_key"],
+    )
+    .await?;
+    validate_strong_identity_unique(
+        pool,
+        "problem_external_identities",
+        &["platform", "external_contest_key", "external_problem_key"],
+    )
+    .await
+}
+
+async fn validate_external_identity_fk(
+    pool: &SqlitePool,
+    table: &str,
+    from_column: &str,
+    parent: &str,
+) -> Result<(), StartupRecoveryReason> {
+    let pragma = format!("PRAGMA foreign_key_list('{table}')");
+    let foreign_keys: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(pragma.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if foreign_keys.len() == 1
+        && foreign_keys[0].2 == parent
+        && foreign_keys[0].3 == from_column
+        && foreign_keys[0].4 == "id"
+        && foreign_keys[0].6.eq_ignore_ascii_case("RESTRICT")
+    {
+        Ok(())
+    } else {
+        Err(StartupRecoveryReason::IntegrityCheckFailed)
+    }
+}
+
+async fn validate_strong_identity_unique(
+    pool: &SqlitePool,
+    table: &str,
+    expected_columns: &[&str],
+) -> Result<(), StartupRecoveryReason> {
+    let pragma = format!("PRAGMA index_list('{table}')");
+    let indexes: Vec<(i64, String, i64, String, i64)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(pragma.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (_, name, unique, _, partial) in indexes {
+        if unique != 1 || partial != 0 {
+            continue;
+        }
+        let index_pragma = format!("PRAGMA index_info('{name}')");
+        let columns: Vec<(i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(index_pragma.as_str()))
+                .fetch_all(pool)
+                .await
+                .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        let actual = columns
+            .iter()
+            .map(|column| column.2.as_str())
+            .collect::<Vec<_>>();
+        if actual == expected_columns {
+            return Ok(());
+        }
+    }
+    Err(StartupRecoveryReason::IntegrityCheckFailed)
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -10632,6 +10929,8 @@ async fn validate_table_columns(
         "contest_families" => "PRAGMA table_xinfo('contest_families')",
         "contest_series" => "PRAGMA table_xinfo('contest_series')",
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
+        "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
+        "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -11152,9 +11451,9 @@ mod tests {
     }
 
     #[test]
-    fn production_migrator_has_not_embedded_the_special_version() {
-        assert_eq!(supported_schema_version(), 25);
-        assert!(!MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
+    fn production_migrator_embeds_the_special_version() {
+        assert_eq!(supported_schema_version(), 26);
+        assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
     #[tokio::test]
@@ -11667,7 +11966,7 @@ mod tests {
             .expect("personal note");
         let problem_path: String = sqlx::query_scalar(
             "SELECT fb.vault_relative_path FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
-             WHERE p.external_contest_key = '1979' AND p.external_problem_key = 'A'",
+             WHERE p.id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready pool"))
         .await
@@ -12559,10 +12858,10 @@ mod tests {
             )
             .expect("problem");
             if index == "C" {
-                sqlx::query("INSERT INTO problems (platform, external_contest_key, external_problem_key, title, rating, source_url) VALUES ('codeforces', 1979, 'C', 'Problem C', 1000, 'https://codeforces.com/contest/1979/problem/C')")
-                    .execute(pool).await.expect("third problem");
-                let problem_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'C'")
-                    .fetch_one(pool).await.expect("third problem id");
+                let problem_id = sqlx::query("INSERT INTO problems (title, rating, source_url) VALUES ('Problem C', 1000, 'https://codeforces.com/contest/1979/problem/C')")
+                    .execute(pool).await.expect("third problem").last_insert_rowid();
+                sqlx::query("INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', '1979', 'C')")
+                    .bind(problem_id).execute(pool).await.expect("third problem identity");
                 sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (?1)")
                     .bind(problem_id)
                     .execute(pool)
@@ -12584,7 +12883,7 @@ mod tests {
             .expect("relations");
 
         for (position, problem) in problems_to_link.iter().enumerate() {
-            let problem_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = ?1")
+            let problem_id: i64 = sqlx::query_scalar("SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = ?1")
                 .bind(problem.index()).fetch_one(pool).await.expect("problem id");
             let cycle_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES (?1, ?2, 1, 'active', 0, 1, '2026-08-02')")
@@ -12602,7 +12901,7 @@ mod tests {
             assert_eq!(suggestion.should_suggest, position == 2);
         }
 
-        let first_id: i64 = sqlx::query_scalar("SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'A'")
+        let first_id: i64 = sqlx::query_scalar("SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'")
             .fetch_one(pool).await.expect("first problem id");
         let first_cycle: String =
             sqlx::query_scalar("SELECT id FROM review_cycles WHERE problem_id = ?1")
@@ -12952,7 +13251,115 @@ mod tests {
         .expect("record version one migration");
     }
 
+    async fn rewrite_as_schema_25(pool: &SqlitePool) {
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(pool)
+            .await
+            .expect("disable foreign keys for schema 25 fixture");
+        let mut transaction = pool.begin().await.expect("schema 25 transaction");
+        sqlx::raw_sql(
+            "CREATE TABLE _contests_schema_25 (\
+                 id INTEGER PRIMARY KEY,\
+                 platform TEXT NOT NULL CHECK (platform = 'codeforces'),\
+                 external_contest_key INTEGER NOT NULL CHECK (external_contest_key > 0),\
+                 title TEXT NOT NULL CHECK (length(title) > 0),\
+                 source_url TEXT NOT NULL CHECK (length(source_url) > 0),\
+                 starts_at_utc TEXT,\
+                 import_status TEXT NOT NULL CHECK (import_status IN ('incomplete', 'complete')),\
+                 created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
+                 facts_status TEXT NOT NULL DEFAULT 'pending' CHECK (facts_status IN ('pending', 'completed')),\
+                 facts_completed_at_utc TEXT,\
+                 archived_at_utc TEXT,\
+                 UNIQUE (platform, external_contest_key)\
+             );\
+             INSERT INTO _contests_schema_25 \
+             SELECT c.id, i.platform, CAST(i.external_contest_key AS INTEGER), c.title, c.source_url,\
+                    c.starts_at_utc, c.import_status, c.created_at_utc, c.facts_status,\
+                    c.facts_completed_at_utc, c.archived_at_utc \
+             FROM contests c JOIN contest_external_identities i ON i.contest_id = c.id;\
+             CREATE TABLE _problems_schema_25 (\
+                 id INTEGER PRIMARY KEY,\
+                 platform TEXT NOT NULL CHECK (platform = 'codeforces'),\
+                 external_contest_key INTEGER NOT NULL CHECK (external_contest_key > 0),\
+                 external_problem_key TEXT NOT NULL CHECK (length(external_problem_key) BETWEEN 1 AND 8),\
+                 title TEXT NOT NULL CHECK (length(title) > 0),\
+                 rating INTEGER CHECK (rating > 0),\
+                 source_url TEXT NOT NULL CHECK (length(source_url) > 0),\
+                 created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\
+                 identity_type TEXT NOT NULL DEFAULT 'lightweight' CHECK (identity_type IN ('lightweight', 'personal')),\
+                 UNIQUE (platform, external_contest_key, external_problem_key)\
+             );\
+             INSERT INTO _problems_schema_25 \
+             SELECT p.id, i.platform, CAST(i.external_contest_key AS INTEGER), i.external_problem_key,\
+                    p.title, p.rating, p.source_url, p.created_at_utc, p.identity_type \
+             FROM problems p JOIN problem_external_identities i ON i.problem_id = p.id;\
+             DROP TABLE contest_external_identities;\
+             DROP TABLE problem_external_identities;\
+             DROP TABLE contests;\
+             ALTER TABLE _contests_schema_25 RENAME TO contests;\
+             DROP TABLE problems;\
+             ALTER TABLE _problems_schema_25 RENAME TO problems;\
+             DELETE FROM _sqlx_migrations WHERE version = 26;\
+             UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
+        )
+        .execute(&mut *transaction)
+        .await
+        .expect("rewrite schema 25 fixture");
+        transaction
+            .commit()
+            .await
+            .expect("commit schema 25 fixture");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(pool)
+            .await
+            .expect("restore foreign keys after schema 25 fixture");
+    }
+
+    async fn schema_25_fk_sentinels(
+        pool: &SqlitePool,
+        contest_id: i64,
+        problem_id: i64,
+        cycle_id: &str,
+        attempt_id: &str,
+        plan_id: &str,
+        entry_id: &str,
+        placement_id: i64,
+    ) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT 'contest_problems.contest_id', CAST(contest_id AS TEXT) FROM contest_problems WHERE contest_id = ?1 AND problem_id = ?2 \
+             UNION ALL SELECT 'contest_problems.problem_id', CAST(problem_id AS TEXT) FROM contest_problems WHERE contest_id = ?1 AND problem_id = ?2 \
+             UNION ALL SELECT 'problem_statement_assets.problem_id', CAST(problem_id AS TEXT) FROM problem_statement_assets WHERE problem_id = ?2 AND local_ref = 'asset' \
+             UNION ALL SELECT 'file_bindings.problem_id', CAST(problem_id AS TEXT) FROM file_bindings WHERE problem_id = ?2 AND vault_relative_path = 'Problems/Legacy.md' \
+             UNION ALL SELECT 'review_cycles.problem_id', CAST(problem_id AS TEXT) FROM review_cycles WHERE id = ?3 \
+             UNION ALL SELECT 'review_attempts.problem_id', CAST(problem_id AS TEXT) FROM review_attempts WHERE id = ?4 \
+             UNION ALL SELECT 'review_attempts.review_cycle_id', review_cycle_id FROM review_attempts WHERE id = ?4 \
+             UNION ALL SELECT 'problem_mastery_evidence.problem_id', problem_id FROM problem_mastery_evidence WHERE problem_id = CAST(?2 AS TEXT) \
+             UNION ALL SELECT 'today_plan_entries.today_plan_id', today_plan_id FROM today_plan_entries WHERE id = ?6 AND today_plan_id = ?5 \
+             UNION ALL SELECT 'today_plan_entries.problem_id', CAST(problem_id AS TEXT) FROM today_plan_entries WHERE id = ?6 AND today_plan_id = ?5 \
+             UNION ALL SELECT 'today_plan_entries.review_attempt_id', review_attempt_id FROM today_plan_entries WHERE id = ?6 AND today_plan_id = ?5 \
+             UNION ALL SELECT 'knowledge_candidate_records.problem_id', CAST(problem_id AS TEXT) FROM knowledge_candidate_records WHERE problem_id = ?2 AND target_ref = 'legacy' \
+             UNION ALL SELECT 'contest_correction_events.contest_id', CAST(contest_id AS TEXT) FROM contest_correction_events WHERE id = 'legacy-correction' \
+             UNION ALL SELECT 'contest_correction_events.problem_id', CAST(problem_id AS TEXT) FROM contest_correction_events WHERE id = 'legacy-correction' \
+             UNION ALL SELECT 'contest_ai_analyses.contest_id', CAST(contest_id AS TEXT) FROM contest_ai_analyses WHERE contest_id = ?1 AND raw_text = 'legacy' \
+             UNION ALL SELECT 'contest_placements.contest_id', CAST(contest_id AS TEXT) FROM contest_placements WHERE id = ?7 \
+             UNION ALL SELECT 'contest_placements.family_id', CAST(family_id AS TEXT) FROM contest_placements WHERE id = ?7 \
+             UNION ALL SELECT 'contest_placements.series_id', COALESCE(CAST(series_id AS TEXT), 'NULL') FROM contest_placements WHERE id = ?7 \
+             ORDER BY 1",
+        )
+        .bind(contest_id)
+        .bind(problem_id)
+        .bind(cycle_id)
+        .bind(attempt_id)
+        .bind(plan_id)
+        .bind(entry_id)
+        .bind(placement_id)
+        .fetch_all(pool)
+        .await
+        .expect("schema 25 FK sentinel values")
+    }
+
     async fn rewrite_as_schema_23(pool: &SqlitePool) {
+        rewrite_as_schema_25(pool).await;
         let mut transaction = pool.begin().await.expect("schema 23 transaction");
         for statement in [
             "DROP INDEX contest_placements_by_path",
@@ -12972,6 +13379,7 @@ mod tests {
     }
 
     async fn rewrite_as_schema_24_collections(pool: &SqlitePool) {
+        rewrite_as_schema_25(pool).await;
         let mut transaction = pool.begin().await.expect("schema 24 transaction");
         for statement in [
             "DROP INDEX contest_placements_by_path",
@@ -13002,20 +13410,29 @@ mod tests {
     }
 
     async fn insert_contest_row(pool: &SqlitePool, external_key: i64) -> i64 {
-        sqlx::query(
-            "INSERT INTO contests (platform, external_contest_key, title, source_url, import_status) \
-             VALUES ('codeforces', ?1, ?2, ?3, 'complete')",
+        let id = sqlx::query(
+            "INSERT INTO contests (title, source_url, import_status) VALUES (?1, ?2, 'complete')",
         )
-        .bind(external_key)
         .bind(format!("Contest {external_key}"))
         .bind(format!("https://codeforces.com/contest/{external_key}"))
         .execute(pool)
         .await
         .expect("insert contest")
-        .last_insert_rowid()
+        .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO contest_external_identities \
+             (contest_id, platform, external_contest_key) VALUES (?1, 'codeforces', ?2)",
+        )
+        .bind(id)
+        .bind(external_key.to_string())
+        .execute(pool)
+        .await
+        .expect("insert contest identity");
+        id
     }
 
     async fn rewrite_as_legacy_m5_schema(pool: &SqlitePool) {
+        rewrite_as_schema_25(pool).await;
         let mut transaction = pool.begin().await.expect("legacy schema transaction");
         for statement in [
             "DROP INDEX contest_placements_by_path",
@@ -13076,24 +13493,491 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 25);
+        assert_eq!(ledger_count, 26);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 25);
-        validate_schema_contract(pool, 25)
+        assert_eq!(schema_generation, 26);
+        validate_schema_contract(pool, 26)
             .await
-            .expect("generation 25 schema contract");
+            .expect("generation 26 schema contract");
         verify_integrity(pool).await.expect("database integrity");
+    }
+
+    #[tokio::test]
+    async fn schema_25_external_identity_upgrade_preserves_internal_ids_and_restarts() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("schema 26 fixture manifest");
+        runtime
+            .persist_first_snapshot(&snapshot("A", "source", "<p>safe</p>"))
+            .await
+            .expect("schema 26 fixture snapshot");
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        let ids_before: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979'), \
+                    (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("internal ids before fixture downgrade");
+        sqlx::query(
+            "UPDATE contests SET title = 'S3B2 Contest Sentinel', source_url = 'https://sentinel.example/contest/1979', \
+             starts_at_utc = '2026-08-17T01:02:03Z', import_status = 'complete', \
+             created_at_utc = '2026-08-16T04:05:06Z', facts_status = 'completed', \
+             facts_completed_at_utc = '2026-08-17T07:08:09Z', archived_at_utc = '2026-08-18T10:11:12Z' \
+             WHERE id = ?1",
+        )
+        .bind(ids_before.0)
+        .execute(&pool)
+        .await
+        .expect("contest business sentinels");
+        sqlx::query(
+            "UPDATE problems SET title = 'S3B2 Problem Sentinel', rating = 2345, \
+             source_url = 'https://sentinel.example/contest/1979/problem/A', \
+             created_at_utc = '2026-08-15T01:23:45Z', identity_type = 'personal' WHERE id = ?1",
+        )
+        .bind(ids_before.1)
+        .execute(&pool)
+        .await
+        .expect("problem business sentinels");
+        let contest_business_before: (
+            i64,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT id, title, source_url, starts_at_utc, import_status, created_at_utc, \
+                    facts_status, facts_completed_at_utc, archived_at_utc FROM contests WHERE id = ?1",
+        )
+        .bind(ids_before.0)
+        .fetch_one(&pool)
+        .await
+        .expect("contest business values before migration");
+        let problem_business_before: (i64, String, Option<i64>, String, String, String) =
+            sqlx::query_as(
+                "SELECT id, title, rating, source_url, created_at_utc, identity_type FROM problems WHERE id = ?1",
+            )
+            .bind(ids_before.1)
+            .fetch_one(&pool)
+            .await
+            .expect("problem business values before migration");
+        let cycle_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789b1";
+        let attempt_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789b2";
+        let plan_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789b3";
+        let entry_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789b4";
+        sqlx::query("INSERT INTO problem_statement_assets (problem_id, local_ref, media_type, bytes) VALUES (?1, 'asset', 'text/plain', X'01')")
+            .bind(ids_before.1).execute(&pool).await.expect("legacy asset relationship");
+        sqlx::query("INSERT INTO file_bindings (problem_id, vault_relative_path, content_digest) VALUES (?1, 'Problems/Legacy.md', '0000000000000000000000000000000000000000000000000000000000000000')")
+            .bind(ids_before.1).execute(&pool).await.expect("legacy binding relationship");
+        sqlx::query("INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES (?1, ?2, 1, 'active', 0, 1, '2026-08-18')")
+            .bind(cycle_id).bind(ids_before.1).execute(&pool).await.expect("legacy cycle relationship");
+        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, started_early, judgement_rule_version) VALUES (?1, ?2, ?3, 'first_cold_start', '2026-08-18', 0, 1)")
+            .bind(attempt_id).bind(ids_before.1).bind(cycle_id).execute(&pool).await.expect("legacy attempt relationship");
+        sqlx::query("INSERT INTO problem_mastery_evidence (problem_id) VALUES (?1)")
+            .bind(ids_before.1.to_string())
+            .execute(&pool)
+            .await
+            .expect("legacy TEXT mastery relationship");
+        sqlx::query("INSERT INTO today_plans (id, local_date, budget_minutes, planned_minutes, over_budget_minutes, review_only_streak) VALUES (?1, '2026-08-18', 60, 60, 0, 0)")
+            .bind(plan_id).execute(&pool).await.expect("legacy today plan");
+        sqlx::query("INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) VALUES (?1, ?2, ?3, ?4, 'carry_in', 'continue_review', 60, 0)")
+            .bind(entry_id).bind(plan_id).bind(ids_before.1).bind(attempt_id).execute(&pool).await.expect("legacy today relationship");
+        sqlx::query("INSERT INTO knowledge_candidate_records (problem_id, fingerprint, target_ref, disposition) VALUES (?1, '1111111111111111111111111111111111111111111111111111111111111111', 'legacy', 'pending')")
+            .bind(ids_before.1).execute(&pool).await.expect("legacy candidate relationship");
+        sqlx::query("INSERT INTO contest_correction_events (id, contest_id, problem_id, field_name, old_value, new_value) VALUES ('legacy-correction', ?1, ?2, 'upsolve_decision', 'undecided', 'planned')")
+            .bind(ids_before.0).bind(ids_before.1).execute(&pool).await.expect("legacy correction relationships");
+        sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) VALUES (?1, 'legacy', 'failed', '{}')")
+            .bind(ids_before.0).execute(&pool).await.expect("legacy analysis relationship");
+        let placement_id = sqlx::query("INSERT INTO contest_placements (contest_id, family_id) VALUES (?1, (SELECT MIN(id) FROM contest_families))")
+            .bind(ids_before.0).execute(&pool).await.expect("legacy placement relationship").last_insert_rowid();
+        let child_fk_values_before = schema_25_fk_sentinels(
+            &pool,
+            ids_before.0,
+            ids_before.1,
+            cycle_id,
+            attempt_id,
+            plan_id,
+            entry_id,
+            placement_id,
+        )
+        .await;
+        assert_eq!(child_fk_values_before.len(), 18);
+        drop(runtime);
+        rewrite_as_schema_25(&pool).await;
+        validate_schema_contract(&pool, 25)
+            .await
+            .expect("real schema 25 fixture");
+        pool.close().await;
+
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(
+            upgraded.status(),
+            &StartupGateStatus::Ready { schema_version: 26 }
+        );
+        let pool = upgraded._pool.as_ref().expect("upgraded pool");
+        let ids_after: (i64, i64, String, String) = sqlx::query_as(
+            "SELECT c.contest_id, p.problem_id, c.external_contest_key, p.external_problem_key \
+             FROM contest_external_identities c JOIN problem_external_identities p \
+               ON p.platform = c.platform AND p.external_contest_key = c.external_contest_key \
+             WHERE c.platform = 'codeforces' AND c.external_contest_key = '1979' \
+               AND p.external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical identities after upgrade");
+        assert_eq!((ids_after.0, ids_after.1), ids_before);
+        assert_eq!((ids_after.2.as_str(), ids_after.3.as_str()), ("1979", "A"));
+        let contest_business_after: (
+            i64,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT id, title, source_url, starts_at_utc, import_status, created_at_utc, \
+                    facts_status, facts_completed_at_utc, archived_at_utc FROM contests WHERE id = ?1",
+        )
+        .bind(ids_before.0)
+        .fetch_one(pool)
+        .await
+        .expect("contest business values after migration");
+        let problem_business_after: (i64, String, Option<i64>, String, String, String) =
+            sqlx::query_as(
+                "SELECT id, title, rating, source_url, created_at_utc, identity_type FROM problems WHERE id = ?1",
+            )
+            .bind(ids_before.1)
+            .fetch_one(pool)
+            .await
+            .expect("problem business values after migration");
+        assert_eq!(contest_business_after, contest_business_before);
+        assert_eq!(problem_business_after, problem_business_before);
+        let child_fk_values_after = schema_25_fk_sentinels(
+            pool,
+            ids_before.0,
+            ids_before.1,
+            cycle_id,
+            attempt_id,
+            plan_id,
+            entry_id,
+            placement_id,
+        )
+        .await;
+        assert_eq!(child_fk_values_after, child_fk_values_before);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = 1"
+            )
+            .fetch_one(pool)
+            .await
+            .expect("highest successful migration"),
+            26
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 26 AND success = 1"
+            )
+            .fetch_one(pool)
+            .await
+            .expect("successful migration 26 ledger row"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(pool)
+                .await
+                .expect("foreign key state"),
+            1
+        );
+        assert!(
+            sqlx::query_as::<_, (String, i64, String, i64)>("PRAGMA foreign_key_check")
+                .fetch_all(pool)
+                .await
+                .expect("foreign key check")
+                .is_empty()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(pool)
+                .await
+                .expect("integrity check"),
+            "ok"
+        );
+        validate_schema_contract(pool, 26)
+            .await
+            .expect("schema 26 contract after migration");
+        drop(upgraded);
+        assert_eq!(
+            start_database(directory.path()).await.status(),
+            &StartupGateStatus::Ready { schema_version: 26 }
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_external_identities_are_opaque_multi_valued_and_strongly_unique() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let contest_id = sqlx::query(
+            "INSERT INTO contests (title, source_url, import_status) VALUES ('Opaque', 'local://opaque', 'complete')",
+        )
+        .execute(pool)
+        .await
+        .expect("opaque contest")
+        .last_insert_rowid();
+        sqlx::query("INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (?1, 'opaque-provider', 'abc-2026-final')")
+            .bind(contest_id).execute(pool).await.expect("opaque contest identity");
+        let problem_one =
+            sqlx::query("INSERT INTO problems (title, source_url) VALUES ('One', 'local://one')")
+                .execute(pool)
+                .await
+                .expect("problem one")
+                .last_insert_rowid();
+        let problem_two =
+            sqlx::query("INSERT INTO problems (title, source_url) VALUES ('Two', 'local://two')")
+                .execute(pool)
+                .await
+                .expect("problem two")
+                .last_insert_rowid();
+        sqlx::query("INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'opaque-provider', 'abc-2026-final', 'alpha'), (?1, 'mirror-provider', 'mirror-contest', 'problem-9')")
+            .bind(problem_one).execute(pool).await.expect("multiple problem identities");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM problem_external_identities WHERE problem_id = ?1"
+            )
+            .bind(problem_one)
+            .fetch_one(pool)
+            .await
+            .expect("identity count"),
+            2
+        );
+        assert!(sqlx::query("INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (?1, 'opaque-provider', 'abc-2026-final')")
+            .bind(contest_id).execute(pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'opaque-provider', 'abc-2026-final', 'alpha')")
+            .bind(problem_two).execute(pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn schema_25_identity_mismatch_fails_migration_and_rolls_back_atomically() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        drop(runtime);
+        rewrite_as_schema_25(&pool).await;
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, platform, external_contest_key, title, source_url, import_status) VALUES (1, 'codeforces', 100, 'One', 'local://one', 'complete');\
+              INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url) VALUES (2, 'codeforces', 200, 'A', 'Mismatch', 'local://mismatch');\
+              INSERT INTO problem_learning_states (problem_id, learning_status) VALUES (2, 'unstarted');\
+              INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) VALUES (1, 2, 1, 'pending_snapshot');",
+        )
+        .execute(&pool)
+        .await
+        .expect("mismatched schema 25 fixture");
+        validate_schema_contract(&pool, 25)
+            .await
+            .expect("valid schema 25 before rejected migration");
+        pool.close().await;
+
+        let failed = start_database(directory.path()).await;
+        assert_eq!(
+            failed.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::MigrationFailed,
+            }
+        );
+        drop(failed);
+
+        let pool = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("reopen rejected schema 25 database");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT schema_generation FROM app_metadata")
+                .fetch_one(&pool)
+                .await
+                .expect("rolled back generation"),
+            25
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = 1"
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("rolled back highest migration"),
+            25
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 26"
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("rolled back ledger"),
+            0
+        );
+        let contest_columns: Vec<SqliteColumnContract> =
+            sqlx::query_as("PRAGMA table_xinfo('contests')")
+                .fetch_all(&pool)
+                .await
+                .expect("legacy contest columns");
+        let problem_columns: Vec<SqliteColumnContract> =
+            sqlx::query_as("PRAGMA table_xinfo('problems')")
+                .fetch_all(&pool)
+                .await
+                .expect("legacy problem columns");
+        assert!(
+            contest_columns.iter().any(|column| column.1 == "platform")
+                && contest_columns
+                    .iter()
+                    .any(|column| column.1 == "external_contest_key")
+        );
+        assert!(
+            problem_columns.iter().any(|column| column.1 == "platform")
+                && problem_columns
+                    .iter()
+                    .any(|column| column.1 == "external_contest_key")
+                && problem_columns
+                    .iter()
+                    .any(|column| column.1 == "external_problem_key")
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, i64, String, i64, String, i64, i64)>(
+                "SELECT c.platform, c.external_contest_key, p.platform, p.external_contest_key, \
+                        p.external_problem_key, cp.contest_id, cp.problem_id \
+                 FROM contests c JOIN contest_problems cp ON cp.contest_id = c.id \
+                 JOIN problems p ON p.id = cp.problem_id WHERE c.id = 1 AND p.id = 2",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("legacy identity mismatch remains readable"),
+            (
+                "codeforces".to_owned(),
+                100,
+                "codeforces".to_owned(),
+                200,
+                "A".to_owned(),
+                1,
+                2,
+            )
+        );
+        validate_schema_contract(&pool, 25)
+            .await
+            .expect("schema 25 contract after rejected migration");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+                .fetch_one(&pool)
+                .await
+                .expect("integrity after rejected migration"),
+            "ok"
+        );
+        assert!(
+            sqlx::query_as::<_, (String, i64, String, i64)>("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .expect("foreign keys after rejected migration")
+                .is_empty()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .expect("foreign keys enabled after rejected migration"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_25_non_integer_external_key_fails_migration_without_silent_repair() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool").clone();
+        drop(runtime);
+        rewrite_as_schema_25(&pool).await;
+        sqlx::query("INSERT INTO contests (platform, external_contest_key, title, source_url, import_status) VALUES ('codeforces', 'abc', 'Malformed', 'local://malformed', 'complete')")
+            .execute(&pool).await.expect("malformed storage class fixture");
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("special migration FK off");
+        assert!(MIGRATOR.run_to(26, &pool).await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT typeof(external_contest_key) FROM contests")
+                .fetch_one(&pool)
+                .await
+                .expect("legacy storage remains"),
+            "text"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 26"
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("migration ledger"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_25_zero_negative_and_invalid_platform_fail_migration() {
+        for insert in [
+            "INSERT INTO contests (platform, external_contest_key, title, source_url, import_status) VALUES ('codeforces', 0, 'Zero', 'local://zero', 'complete')",
+            "INSERT INTO contests (platform, external_contest_key, title, source_url, import_status) VALUES ('codeforces', -1, 'Negative', 'local://negative', 'complete')",
+            "INSERT INTO contests (platform, external_contest_key, title, source_url, import_status) VALUES ('other', 1, 'Platform', 'local://platform', 'complete')",
+        ] {
+            let directory = TempDir::new().expect("temporary app data");
+            let runtime = start_database(directory.path()).await;
+            let pool = runtime._pool.as_ref().expect("ready pool").clone();
+            drop(runtime);
+            rewrite_as_schema_25(&pool).await;
+            sqlx::query("PRAGMA ignore_check_constraints = ON")
+                .execute(&pool)
+                .await
+                .expect("allow malformed legacy fixture");
+            sqlx::query(insert)
+                .execute(&pool)
+                .await
+                .expect("malformed legacy row");
+            sqlx::query("PRAGMA ignore_check_constraints = OFF")
+                .execute(&pool)
+                .await
+                .expect("restore check constraints");
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&pool)
+                .await
+                .expect("special migration FK off");
+            assert!(MIGRATOR.run_to(26, &pool).await.is_err());
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 26",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("migration ledger"),
+                0
+            );
+        }
     }
 
     #[tokio::test]
@@ -13103,10 +13987,14 @@ mod tests {
         let pool = runtime._pool.as_ref().expect("ready database pool").clone();
 
         sqlx::raw_sql(
-            "INSERT INTO contests (id, platform, external_contest_key, title, source_url, starts_at_utc, import_status, facts_status, facts_completed_at_utc, archived_at_utc) \
-             VALUES (41, 'codeforces', 1979, 'Preserved Contest', 'https://codeforces.com/contest/1979', '2025-08-01T00:00:00Z', 'complete', 'completed', '2025-08-01T03:00:00Z', '2026-01-01T00:00:00Z');\
-             INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url, identity_type) \
-             VALUES (51, 'codeforces', 1979, 'A', 'Preserved Problem', 'https://codeforces.com/contest/1979/problem/A', 'personal');\
+            "INSERT INTO contests (id, title, source_url, starts_at_utc, import_status, facts_status, facts_completed_at_utc, archived_at_utc) \
+             VALUES (41, 'Preserved Contest', 'https://codeforces.com/contest/1979', '2025-08-01T00:00:00Z', 'complete', 'completed', '2025-08-01T03:00:00Z', '2026-01-01T00:00:00Z');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) \
+             VALUES (41, 'codeforces', '1979');\
+             INSERT INTO problems (id, title, source_url, identity_type) \
+             VALUES (51, 'Preserved Problem', 'https://codeforces.com/contest/1979/problem/A', 'personal');\
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (51, 'codeforces', '1979', 'A');\
              INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) \
              VALUES (51, '<p>source</p>', '<p>safe</p>');\
              INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) \
@@ -13139,7 +14027,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -13189,12 +14077,15 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         let pool = runtime._pool.as_ref().expect("ready database pool").clone();
         sqlx::raw_sql(
-            "INSERT INTO contests (id, platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
-             VALUES (71, 'codeforces', 4001, 'Legacy One', 'https://codeforces.com/contest/4001', '2024-08-01T00:00:00Z', 'complete');\
-             INSERT INTO contests (id, platform, external_contest_key, title, source_url, starts_at_utc, import_status) \
-             VALUES (72, 'codeforces', 4002, 'Legacy Two', 'https://codeforces.com/contest/4002', '2026-05-01T00:00:00Z', 'complete');\
-             INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url) \
-             VALUES (81, 'codeforces', 4001, 'A', 'Legacy Problem', 'https://codeforces.com/contest/4001/problem/A');\
+            "INSERT INTO contests (id, title, source_url, starts_at_utc, import_status) \
+             VALUES (71, 'Legacy One', 'https://codeforces.com/contest/4001', '2024-08-01T00:00:00Z', 'complete');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (71, 'codeforces', '4001');\
+             INSERT INTO contests (id, title, source_url, starts_at_utc, import_status) \
+             VALUES (72, 'Legacy Two', 'https://codeforces.com/contest/4002', '2026-05-01T00:00:00Z', 'complete');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (72, 'codeforces', '4002');\
+             INSERT INTO problems (id, title, source_url) \
+             VALUES (81, 'Legacy Problem', 'https://codeforces.com/contest/4001/problem/A');\
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (81, 'codeforces', '4001', 'A');\
              INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) \
              VALUES (71, 81, 1, 'ready');\
              INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) \
@@ -13269,10 +14160,10 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 25)
+        validate_schema_contract(pool, 26)
             .await
             .expect("schema 25 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
@@ -13286,49 +14177,53 @@ mod tests {
         .await
         .expect("facts after migration");
         assert_eq!(facts_after, facts_before);
-        let contest_identities: Vec<(i64, i64)> =
-            sqlx::query_as("SELECT id, external_contest_key FROM contests ORDER BY id")
+        let contest_identities: Vec<(i64, String)> =
+            sqlx::query_as("SELECT contest_id, external_contest_key FROM contest_external_identities ORDER BY contest_id")
                 .fetch_all(pool)
                 .await
                 .expect("contest identities");
-        assert_eq!(contest_identities, [(71, 4001), (72, 4002)]);
+        assert_eq!(
+            contest_identities,
+            [(71, "4001".to_owned()), (72, "4002".to_owned())]
+        );
 
-        let placements: Vec<(i64, String, Option<String>, Option<i64>, Option<i64>)> =
+        let placements: Vec<(String, String, Option<String>, Option<i64>, Option<i64>)> =
             sqlx::query_as(
-                "SELECT c.external_contest_key, f.display_name, s.display_name, p.year, p.ordinal \
+                "SELECT identities.external_contest_key, f.display_name, s.display_name, p.year, p.ordinal \
                  FROM contest_placements p \
                  JOIN contests c ON c.id = p.contest_id \
+                 JOIN contest_external_identities identities ON identities.contest_id = c.id AND identities.platform = 'codeforces' \
                  JOIN contest_families f ON f.id = p.family_id \
                  LEFT JOIN contest_series s ON s.id = p.series_id \
-                 ORDER BY c.external_contest_key, f.display_name, s.display_name",
+                 ORDER BY identities.external_contest_key, f.display_name, s.display_name",
             )
             .fetch_all(pool)
             .await
             .expect("migrated placements");
         assert_eq!(placements.len() as i64, legacy_membership_count);
         assert!(placements.contains(&(
-            4001,
+            "4001".to_owned(),
             "Codeforces".to_owned(),
             None,
             Some(2024),
             None,
         )));
         assert!(placements.contains(&(
-            4001,
+            "4001".to_owned(),
             "杭电".to_owned(),
             Some("暑期多校".to_owned()),
             Some(2026),
             Some(1),
         )));
         assert!(placements.contains(&(
-            4002,
+            "4002".to_owned(),
             "XCPC".to_owned(),
             Some("省赛".to_owned()),
             Some(2026),
             Some(2),
         )));
         assert!(placements.contains(&(
-            4002,
+            "4002".to_owned(),
             "私人收藏 [custom_training#100]".to_owned(),
             None,
             None,
@@ -13734,13 +14629,21 @@ mod tests {
         let contest_internal = insert_contest_row(pool, 5001).await;
         let no_placement_contest = insert_contest_row(pool, 5002).await;
         sqlx::query(
-            "INSERT INTO problems (id, platform, external_contest_key, external_problem_key, title, source_url, identity_type) \
-             VALUES (601, 'codeforces', 5001, 'A', 'A', 'https://codeforces.com/contest/5001/problem/A', 'lightweight'), \
-                    (602, 'codeforces', 5001, 'B', 'B', 'https://codeforces.com/contest/5001/problem/B', 'lightweight')",
+            "INSERT INTO problems (id, title, source_url, identity_type) \
+             VALUES (601, 'A', 'https://codeforces.com/contest/5001/problem/A', 'lightweight'), \
+                    (602, 'B', 'https://codeforces.com/contest/5001/problem/B', 'lightweight')",
         )
         .execute(pool)
         .await
         .expect("problem rows");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (601, 'codeforces', '5001', 'A'), (602, 'codeforces', '5001', 'B')",
+        )
+        .execute(pool)
+        .await
+        .expect("problem identities");
         sqlx::query(
             "INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) \
              VALUES (601, 'unstarted', '2026-08-15T00:00:00Z'), (602, 'unstarted', '2026-08-15T00:00:00Z')",
@@ -14085,7 +14988,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -14120,7 +15023,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-25-"));
+            .starts_with("schema-10-to-26-"));
     }
 
     #[tokio::test]
@@ -15174,7 +16077,7 @@ mod tests {
             .expect("persist adapter snapshot");
 
         let stored: String = sqlx::query_scalar(
-            "SELECT starts_at_utc FROM contests WHERE platform = 'codeforces' AND external_contest_key = 1979",
+            "SELECT c.starts_at_utc FROM contests c JOIN contest_external_identities i ON i.contest_id = c.id WHERE i.platform = 'codeforces' AND i.external_contest_key = '1979'",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -15260,7 +16163,7 @@ mod tests {
         assert_eq!(assets[0].local_ref, "acm-os-asset://fixture");
         let stored: String = sqlx::query_scalar(
             "SELECT source_html FROM problem_statement_snapshots ss JOIN problems p ON p.id = ss.problem_id \
-             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+             WHERE p.id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(pool)
         .await
@@ -15308,8 +16211,7 @@ mod tests {
             .await
             .expect("daily backup database");
         let backed_up_identity: String = sqlx::query_scalar(
-            "SELECT identity_type FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = 1979 AND external_problem_key = 'A'",
+            "SELECT identity_type FROM problems WHERE id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(&backup_pool)
         .await
@@ -16191,17 +17093,14 @@ mod tests {
             .await
             .expect("daily backup database");
         let backed_up_identity: String = sqlx::query_scalar(
-            "SELECT identity_type FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = 1979 AND external_problem_key = 'A'",
+            "SELECT identity_type FROM problems WHERE id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(&backup_pool)
         .await
         .expect("backed up problem identity");
         assert_eq!(backed_up_identity, "personal");
         let backed_up_bindings: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
-             WHERE p.platform = 'codeforces' AND p.external_contest_key = 1979 \
-               AND p.external_problem_key = 'A'",
+            "SELECT COUNT(*) FROM file_bindings fb WHERE fb.problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(&backup_pool)
         .await
@@ -16310,8 +17209,7 @@ mod tests {
         assert_eq!(after, expected.as_bytes());
         assert_eq!(binding.content_digest, sha256_hex(&after));
         let persisted_digest: String = sqlx::query_scalar(
-            "SELECT content_digest FROM file_bindings fb JOIN problems p ON p.id = fb.problem_id \
-             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+            "SELECT content_digest FROM file_bindings fb WHERE fb.problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready pool"))
         .await
@@ -16516,7 +17414,7 @@ mod tests {
         fs::remove_file(problems.join("CF-1979-A.md")).expect("remove A note");
         sqlx::query(
             "UPDATE file_bindings SET windows_file_key = NULL \
-             WHERE problem_id = (SELECT id FROM problems WHERE external_problem_key = 'A')",
+             WHERE problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .execute(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -16631,7 +17529,7 @@ mod tests {
             .expect("binding count");
         assert_eq!(binding_count, 0);
         let identity_type: String = sqlx::query_scalar(
-            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+            "SELECT identity_type FROM problems WHERE id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(pool)
         .await
@@ -16646,7 +17544,7 @@ mod tests {
             .await
             .expect("daily backup database");
         let backed_up_identity: String = sqlx::query_scalar(
-            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+            "SELECT identity_type FROM problems WHERE id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(&backup_pool)
         .await
@@ -16681,7 +17579,7 @@ mod tests {
             Err(acm_os_application::PersonalNoteBindingRepairError::VaultUnavailable)
         );
         let identity_type: String = sqlx::query_scalar(
-            "SELECT identity_type FROM problems WHERE external_problem_key = 'A'",
+            "SELECT identity_type FROM problems WHERE id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -16781,7 +17679,7 @@ mod tests {
         fs::remove_file(problems.join("CF-1979-A.md")).expect("remove A path");
         sqlx::query(
             "UPDATE file_bindings SET windows_file_key = NULL \
-             WHERE problem_id = (SELECT id FROM problems WHERE external_problem_key = 'A')",
+             WHERE problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .execute(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -16938,7 +17836,7 @@ mod tests {
             acm_os_application::ContestUpsolveDecision::Planned
         );
         let pool = runtime._pool.as_ref().expect("pool");
-        sqlx::query("UPDATE problem_learning_states SET learning_status = 'long_term_review' WHERE problem_id = (SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'A')")
+        sqlx::query("UPDATE problem_learning_states SET learning_status = 'long_term_review' WHERE problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')")
             .execute(pool).await.expect("change live learning status");
         let refreshed = runtime
             .contest_detail(&contest)
@@ -17107,10 +18005,9 @@ mod tests {
             .expect("daily backup database");
         let backed_up: (String, String) = sqlx::query_as(
             "SELECT cp.final_contest_result, cp.upsolve_decision \
-             FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id \
-             WHERE p.external_contest_key = ?1 AND p.external_problem_key = 'A'",
+             FROM contest_problems cp WHERE cp.problem_id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = 'A')",
         )
-        .bind(contest.contest_id() as i64)
+        .bind(contest.contest_id().to_string())
         .fetch_one(&backup_pool)
         .await
         .expect("backed up contest facts");
@@ -17356,7 +18253,7 @@ mod tests {
                 == false
         );
         let pool = runtime._pool.as_ref().expect("pool");
-        sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) SELECT id, 'raw', 'failed', '{}' FROM contests WHERE external_contest_key = 1979").execute(pool).await.expect("analysis");
+        sqlx::query("INSERT INTO contest_ai_analyses (contest_id, raw_text, parse_status, parsed_projection_json) SELECT contest_id, 'raw', 'failed', '{}' FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979'").execute(pool).await.expect("analysis");
         let pure_problem =
             acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
         let preview = runtime
@@ -17418,10 +18315,9 @@ mod tests {
             .await
             .expect("daily backup database");
         let backed_up_archived: bool = sqlx::query_scalar(
-            "SELECT archived_at_utc IS NOT NULL FROM contests \
-             WHERE platform = 'codeforces' AND external_contest_key = ?1",
+            "SELECT archived_at_utc IS NOT NULL FROM contests WHERE id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1)",
         )
-        .bind(draft.contest.contest_id() as i64)
+        .bind(draft.contest.contest_id().to_string())
         .fetch_one(&backup_pool)
         .await
         .expect("backed up archive state");
@@ -17465,7 +18361,7 @@ mod tests {
             acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
         let pool = runtime._pool.as_ref().expect("pool");
         let problem_id: i64 = sqlx::query_scalar(
-            "SELECT id FROM problems WHERE external_contest_key = 1979 AND external_problem_key = 'B'",
+            "SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'B'",
         )
         .fetch_one(pool)
         .await
@@ -17801,7 +18697,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
     }
 
@@ -17867,7 +18763,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17900,7 +18796,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17930,12 +18826,12 @@ mod tests {
         let post_digest = sha256_hex(after.as_bytes());
         sqlx::query(
             "UPDATE file_bindings SET content_digest = ?1, windows_file_key = ?2 \
-             WHERE problem_id = (SELECT id FROM problems WHERE platform = 'codeforces' \
-                 AND external_contest_key = ?3 AND external_problem_key = ?4)",
+             WHERE problem_id = (SELECT problem_id FROM problem_external_identities \
+                 WHERE platform = 'codeforces' AND external_contest_key = ?3 AND external_problem_key = ?4)",
         )
         .bind(&post_digest)
         .bind(windows_file_key(&note_path))
-        .bind(problem.contest().contest_id() as i64)
+                .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .execute(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -17945,7 +18841,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -18044,12 +18940,12 @@ mod tests {
         let pool = runtime._pool.as_ref().expect("ready database pool");
         sqlx::query(
             "UPDATE file_bindings SET content_digest = ?1, windows_file_key = ?2 \
-             WHERE problem_id = (SELECT id FROM problems WHERE platform = 'codeforces' \
-                 AND external_contest_key = ?3 AND external_problem_key = ?4)",
+             WHERE problem_id = (SELECT problem_id FROM problem_external_identities \
+                 WHERE platform = 'codeforces' AND external_contest_key = ?3 AND external_problem_key = ?4)",
         )
         .bind(&post_digest)
         .bind(&post_file_key)
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .execute(pool)
         .await
@@ -18110,7 +19006,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
     }
 
@@ -18301,6 +19197,7 @@ mod tests {
         let older_pool = connect_read_write(Path::new(&backup.path))
             .await
             .expect("older candidate database");
+        rewrite_as_schema_25(&older_pool).await;
         sqlx::raw_sql(
             "DROP INDEX contest_placements_by_path;\
              DROP INDEX contest_placements_unique_identity;\
@@ -18330,7 +19227,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 25);
+        assert_eq!(preview.supported_schema_version, 26);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -18812,7 +19709,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -18904,7 +19801,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-25-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-26-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -19029,7 +19926,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 26), \
+                        CHECK (schema_generation < 27), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -19164,7 +20061,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -19198,7 +20095,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -19653,7 +20550,7 @@ mod tests {
             .await
             .expect("daily backup database");
         let backed_up_status: String = sqlx::query_scalar(
-            "SELECT facts_status FROM contests WHERE external_contest_key = 1979",
+            "SELECT facts_status FROM contests WHERE id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979')",
         )
         .fetch_one(&backup_pool)
         .await
@@ -19669,7 +20566,7 @@ mod tests {
         backup_pool.close().await;
 
         let live_status: String = sqlx::query_scalar(
-            "SELECT facts_status FROM contests WHERE external_contest_key = 1979",
+            "SELECT facts_status FROM contests WHERE id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979')",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -19770,7 +20667,7 @@ mod tests {
         let backed_up_status: String = sqlx::query_scalar(
             "SELECT pls.learning_status FROM problem_learning_states pls \
              JOIN problems p ON p.id = pls.problem_id \
-             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+             WHERE p.id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(&backup_pool)
         .await
@@ -19781,7 +20678,7 @@ mod tests {
         let live_status: String = sqlx::query_scalar(
             "SELECT pls.learning_status FROM problem_learning_states pls \
              JOIN problems p ON p.id = pls.problem_id \
-             WHERE p.external_contest_key = 1979 AND p.external_problem_key = 'A'",
+             WHERE p.id = (SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A')",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
         .await
@@ -19903,7 +20800,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 25 }
+            &StartupGateStatus::Ready { schema_version: 26 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -20300,10 +21197,10 @@ mod tests {
             .await
             .expect("later Today recall");
         let numeric_problem_id: i64 = sqlx::query_scalar(
-            "SELECT id FROM problems WHERE platform = 'codeforces' \
-             AND external_contest_key = ?1 AND external_problem_key = ?2",
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 AND external_problem_key = ?2",
         )
-        .bind(problem.contest().contest_id() as i64)
+        .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
         .fetch_one(runtime._pool.as_ref().expect("ready pool"))
         .await
