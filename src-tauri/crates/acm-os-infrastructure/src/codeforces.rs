@@ -6,6 +6,7 @@ use acm_os_application::{
     ContestProblemSlotDraft, StatementAssetDraft, StatementSnapshotDraft,
 };
 use acm_os_domain::{CodeforcesContestIdentity, CodeforcesProblemIdentity};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,19 +384,28 @@ fn manifest_from_api_json(
         });
     }
     let contest_source_url = format!("https://codeforces.com/contest/{}", contest.contest_id());
+    let starts_at_utc = api
+        .result
+        .contest
+        .start_time_seconds
+        .map(canonical_utc_timestamp)
+        .transpose()?;
     let draft = ContestImportDraft::validated(
         contest,
         api.result.contest.name,
         contest_source_url,
-        api.result
-            .contest
-            .start_time_seconds
-            .map(|seconds| seconds.to_string()),
+        starts_at_utc,
         slots,
     )
     .map_err(FixtureAdapterError::ManifestInvalid)?;
 
     Ok(draft)
+}
+
+fn canonical_utc_timestamp(seconds: i64) -> Result<String, FixtureAdapterError> {
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .ok_or(FixtureAdapterError::MetadataInvalid)
 }
 
 fn extract_problem_statement(page: &str) -> Option<&str> {
@@ -619,6 +629,7 @@ mod tests {
     fn fixture_adapter_builds_a_complete_ordered_manifest_and_local_snapshots() {
         let (draft, snapshots) =
             build_fixture_import(contest(), metadata(), &fixtures()).expect("fixture import");
+        assert_eq!(draft.starts_at_utc.as_deref(), Some("2024-03-09T16:00:00Z"));
         assert_eq!(draft.slots.len(), 2);
         assert_eq!(draft.slots[0].problem.index(), "A");
         assert_eq!(
@@ -633,6 +644,15 @@ mod tests {
             .sanitized_html
             .contains("acm-os-asset://codeforces/1979/A/1"));
         assert_eq!(snapshots[0].assets.len(), 1);
+    }
+
+    #[test]
+    fn fixture_adapter_keeps_a_missing_start_time_unassigned() {
+        let metadata = metadata().replace(",\"startTimeSeconds\":1710000000", "");
+        let (draft, _) =
+            build_fixture_import(contest(), &metadata, &fixtures()).expect("fixture import");
+
+        assert_eq!(draft.starts_at_utc, None);
     }
 
     #[test]

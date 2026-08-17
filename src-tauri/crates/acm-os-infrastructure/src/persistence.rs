@@ -11014,6 +11014,7 @@ async fn verify_and_publish_backup(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use acm_os_application::{
@@ -14890,6 +14891,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codeforces_adapter_timestamp_round_trips_through_contest_detail() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let metadata = r#"{"status":"OK","result":{"contest":{"id":1979,"name":"Round","startTimeSeconds":1710000000},"problems":[{"contestId":1979,"index":"A","name":"Alpha","rating":800}]}}"#;
+        let statements = BTreeMap::from([(
+            "A".to_owned(),
+            crate::codeforces::StatementFixture {
+                html: "<div class=\"problem-statement\"><p>Alpha</p></div>".to_owned(),
+                assets: BTreeMap::new(),
+            },
+        )]);
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let (draft, snapshots) =
+            crate::codeforces::build_fixture_import(contest.clone(), metadata, &statements)
+                .expect("adapter draft");
+
+        assert_eq!(draft.starts_at_utc.as_deref(), Some("2024-03-09T16:00:00Z"));
+        runtime
+            .persist_manifest(&draft)
+            .await
+            .expect("persist adapter manifest");
+        runtime
+            .persist_first_snapshot(&snapshots[0])
+            .await
+            .expect("persist adapter snapshot");
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT starts_at_utc FROM contests WHERE platform = 'codeforces' AND external_contest_key = 1979",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready database pool"))
+        .await
+        .expect("stored canonical timestamp");
+        assert_eq!(stored, "2024-03-09T16:00:00Z");
+
+        let detail = runtime
+            .contest_detail(&contest)
+            .await
+            .expect("contest detail");
+        assert_eq!(detail.contest_date.as_deref(), Some("2024-03-09"));
+    }
+
+    #[tokio::test]
     async fn contest_import_is_progressive_idempotent_and_preserves_first_snapshot() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
@@ -14933,14 +14976,16 @@ mod tests {
         assert_eq!(after_reimport.status, ContestImportStatus::Complete);
 
         let pool = runtime._pool.as_ref().expect("ready database pool");
-        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), (SELECT COUNT(*) FROM problems), \
-                    (SELECT COUNT(*) FROM contest_problems), (SELECT COUNT(*) FROM problem_statement_snapshots)",
+                    (SELECT COUNT(*) FROM contest_problems), \
+                    (SELECT COUNT(*) FROM problem_statement_snapshots), \
+                    (SELECT COUNT(*) FROM contest_placements)",
         )
         .fetch_one(pool)
         .await
         .expect("import counts");
-        assert_eq!(counts, (1, 2, 2, 2));
+        assert_eq!(counts, (1, 2, 2, 2, 0));
         let asset_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM problem_statement_assets")
             .fetch_one(pool)
             .await
