@@ -245,7 +245,7 @@ test("Contest Library uses typed All, Family, Series, Year, and archive filters"
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps overflow accessible", { concurrency: false }, async () => {
+test("Contest Library D2-A preserves full-mode identity navigation and keeps overflow accessible", { concurrency: false }, async () => {
   const items = Array.from({ length: 13 }, (_, index) => ({
     contestId: 1979 + index,
     title: index === 0 ? "Codeforces Round 951 (Div. 2)" : index === 1 ? "Educational Codeforces Round 166" : `Codeforces Round ${953 + index}`,
@@ -254,11 +254,16 @@ test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps ove
     missingSnapshotCount: index === 12 ? 1 : 0,
     archived: false,
   }));
-  const view = await renderApp((command) => {
+  const retryCalls = [];
+  const view = await renderApp((command, args) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
     if (command === "contest_library_list_families") return [];
     if (command === "contest_library_list_contests") return items;
+    if (command === "import_codeforces_contest") {
+      retryCalls.push(args.input.contestUrl);
+      return { importStatus: "incomplete", missingSnapshotProblems: ["A"], failedSnapshotProblems: [] };
+    }
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
@@ -354,8 +359,29 @@ test("Contest Library D2-A fills three cabinet tiers left-to-right and keeps ove
     assert.match(remaining.textContent, /Codeforces Round 965/);
     assert.ok(view.document.querySelector('[aria-label="Contest Library navigation"]'));
     assert.ok(view.document.querySelector(".contest-import-form"));
-    await act(async () => books[0].click());
-    assert.equal(view.window.location.pathname, "/contests/1979");
+
+    const retry = [...remaining.querySelectorAll("button")].find((button) => button.textContent === "Retry missing snapshots");
+    await act(async () => retry.click()); await settle();
+    assert.equal(view.window.location.pathname, "/contests");
+    assert.deepEqual(retryCalls, ["https://codeforces.com/contest/1991"]);
+
+    for (const position of [0, 3, 7, 11]) {
+      const item = items[position];
+      const book = [...view.document.querySelectorAll("button.contest-book")][position];
+      assert.equal(book.dataset.contestId, String(item.contestId));
+      assert.equal(book.getAttribute("aria-label"), `Open contest ${item.title}`);
+      await act(async () => book.click()); await settle();
+      assert.equal(view.window.location.pathname, `/contests/${item.contestId}`);
+      await act(async () => {
+        view.window.history.pushState(null, "", "/contests");
+        view.window.dispatchEvent(new view.window.PopStateEvent("popstate"));
+      });
+      await settle();
+    }
+
+    const remainderLink = view.document.querySelector('[aria-label="Remaining contest list"] button.list-link');
+    await act(async () => remainderLink.click()); await settle();
+    assert.equal(view.window.location.pathname, "/contests/1991");
   } finally { await view.cleanup(); }
 });
 
@@ -427,6 +453,49 @@ test("Contest Library Compact page count follows populated logical columns", { c
       if (count === 13) assert.ok(view.document.querySelector('[aria-label="Remaining contest list"]'));
     } finally { await view.cleanup(); }
   }
+});
+
+test("Contest Library Compact column 4 opens the real tier 1, 2, and 3 Contest identities", { concurrency: false }, async () => {
+  const items = Array.from({ length: 12 }, (_, index) => ({
+    contestId: 4101 + index,
+    title: `Codeforces Contract Round ${index + 1}`,
+    importStatus: "complete",
+    problemCount: index + 1,
+    missingSnapshotCount: 0,
+    archived: false,
+  }));
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return items;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    for (const position of [3, 7, 11]) {
+      const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
+      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+      for (let page = 1; page < 4; page += 1) {
+        await act(async () => next.click()); await settle();
+      }
+
+      const activeBooks = [...view.document.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')];
+      assert.deepEqual(activeBooks.map((book) => book.dataset.contestId), ["4104", "4108", "4112"]);
+      assert.equal(view.document.querySelectorAll('.contest-book-slot[data-compact-active="false"]').length, 9);
+
+      const item = items[position];
+      const book = activeBooks.find((candidate) => candidate.dataset.contestId === String(item.contestId));
+      assert.equal(book.getAttribute("aria-label"), `Open contest ${item.title}`);
+      await act(async () => book.click()); await settle();
+      assert.equal(view.window.location.pathname, `/contests/${item.contestId}`);
+
+      await act(async () => {
+        view.window.history.pushState(null, "", "/contests");
+        view.window.dispatchEvent(new view.window.PopStateEvent("popstate"));
+      });
+      await settle();
+    }
+  } finally { await view.cleanup(); }
 });
 
 test("Contest Library Compact page state clamps when populated column count shrinks", async () => {

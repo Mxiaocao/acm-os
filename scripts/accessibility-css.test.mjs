@@ -29,6 +29,18 @@ test("core layout has narrow-viewport fallbacks for zoomed keyboard use", async 
   assert.match(css, /\.contest-facts-list\s+li\s*\{\s*grid-template-columns:\s*1fr;/);
 });
 
+test("inactive Compact cabinet columns stay out of the interactive accessibility set", async () => {
+  const css = await readFile(new URL("../src/app/app.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/,
+  );
+  assert.match(
+    css,
+    /@container\s+contest-cabinet-presentation\s*\(min-width:\s*950px\)[\s\S]*?\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*block;/,
+  );
+});
+
 test("Tauri runtime configurations keep a restrictive content security policy", async () => {
   const config = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   const e2eConfig = JSON.parse(await readFile(new URL("../src-tauri/tauri.e2e.conf.json", import.meta.url), "utf8"));

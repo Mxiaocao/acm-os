@@ -4,6 +4,9 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 const repo = path.resolve(import.meta.dirname, "..");
+const cargoTarget = process.env.CARGO_TARGET_DIR
+  ? path.resolve(process.env.CARGO_TARGET_DIR)
+  : path.join(repo, "src-tauri", "target");
 const manual = process.argv.includes("--manual");
 const temporary = await mkdtemp(path.join(repo, ".desktop-e2e-"));
 const appData = path.join(temporary, "app-data");
@@ -69,7 +72,7 @@ try {
 }
 
 function launchApp(phase) {
-  const child = spawn(path.join(repo, "src-tauri", "target", "debug", "acm-os.exe"), [], {
+  const child = spawn(path.join(cargoTarget, "debug", "acm-os.exe"), [], {
     cwd: repo,
     env: {
       ...process.env,

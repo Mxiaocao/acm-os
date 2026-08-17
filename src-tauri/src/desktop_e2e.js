@@ -178,6 +178,21 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await waitText("Desktop E2E Contest");
       await stage("contest-imported");
 
+      const importedBook = document.querySelector("button.contest-book");
+      if (!importedBook) throw new Error("Imported ContestBook was not rendered as a native button");
+      if (importedBook.type !== "button") throw new Error(`ContestBook type was ${importedBook.type}`);
+      if (!importedBook.getAttribute("aria-label")?.includes("Desktop E2E Contest")) {
+        throw new Error(`ContestBook accessible name did not retain its Contest identity: ${importedBook.getAttribute("aria-label")}`);
+      }
+      importedBook.click();
+      await waitFor(() => window.location.pathname === "/contests/1979", "ContestBook detail navigation");
+      await waitText("Desktop E2E Contest");
+      await waitFor(
+        () => document.activeElement === document.querySelector("h1"),
+        "focused Contest Detail heading",
+      );
+      await stage("contest-book-navigation-and-detail-focus-verified");
+
       await clickText("我的题库");
       await clickText("A. Desktop E2E Problem");
       await clickText("Create my note");
