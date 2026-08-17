@@ -10,6 +10,8 @@ import {
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import contestBookShell from "../assets/contest-book-shell.png";
+import contestDisplayStandBack from "../assets/contest-display-stand-back.png";
+import contestDisplayStandFront from "../assets/contest-display-stand-front.png";
 import contestCabinetLeft from "../assets/contest-cabinet-left.png";
 import contestCabinetCenter from "../assets/contest-cabinet-center.png";
 import contestCabinetRight from "../assets/contest-cabinet-right.png";
@@ -1325,12 +1327,22 @@ const CONTEST_CABINET_SHELF_FOREGROUNDS = [
   contestCabinetShelfForeground3,
 ] as const;
 
+function ContestDisplayStand() {
+  return <>
+    <img aria-hidden="true" alt="" className="contest-display-stand contest-display-stand--rear" src={contestDisplayStandBack} />
+    <img aria-hidden="true" alt="" className="contest-display-stand contest-display-stand--front" src={contestDisplayStandFront} />
+  </>;
+}
+
 function ContestCabinetTier({ items, navigate, tier }: { items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
   return (
     <section aria-label={`Shelf tier ${tier}`} className="contest-cabinet__tier" data-tier={tier}>
       <div className="contest-cabinet__back">
         <div className="contest-shelf-books">
-          {items.map((item) => <ContestBookPrototype item={item} key={item.contestId} navigate={navigate} />)}
+          {items.map((item, index) => <div className="contest-book-slot" key={item.contestId}>
+            {tier === 1 && index === 0 ? <ContestDisplayStand /> : null}
+            <ContestBookPrototype item={item} navigate={navigate} />
+          </div>)}
         </div>
       </div>
       <div aria-hidden="true" className="contest-shelf">

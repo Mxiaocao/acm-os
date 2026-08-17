@@ -585,6 +585,29 @@ ul.detail-list li {
   justify-content: flex-start;
   gap: 9px;
 }
+.contest-book-slot {
+  position: relative;
+  width: 157.913px;
+  height: 218.4px;
+  flex: 0 0 157.913px;
+}
+.contest-book-slot > .contest-book { z-index: 1; }
+.contest-display-stand {
+  position: absolute;
+  top: 127.76px;
+  left: 50%;
+  width: 168px;
+  height: auto;
+  max-width: none;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+.contest-display-stand--rear {
+  z-index: 0;
+}
+.contest-display-stand--front {
+  z-index: 2;
+}
 .contest-cabinet__empty {
   position: absolute;
   z-index: 2;

@@ -338,6 +338,12 @@ test("Contest Library D2-A keeps one real contest in the first position of a com
     assert.deepEqual(tiers.map((tier) => tier.querySelectorAll("button.contest-book").length), [1, 0, 0]);
     assert.equal(tiers[0].querySelector("button.contest-book")?.dataset.contestId, "2256");
     assert.equal(view.document.querySelectorAll("button.contest-book").length, 1);
+    assert.equal(tiers[0].querySelectorAll(".contest-book-slot").length, 1);
+    assert.equal(tiers[0].querySelectorAll(".contest-display-stand").length, 2);
+    assert.equal(tiers[0].querySelector(".contest-display-stand--rear")?.getAttribute("src")?.endsWith("contest-display-stand-back.png"), true);
+    assert.equal(tiers[0].querySelector(".contest-display-stand--front")?.getAttribute("src")?.endsWith("contest-display-stand-front.png"), true);
+    assert.equal(tiers[1].querySelector(".contest-display-stand"), null);
+    assert.equal(tiers[2].querySelector(".contest-display-stand"), null);
   } finally { await view.cleanup(); }
 });
 
