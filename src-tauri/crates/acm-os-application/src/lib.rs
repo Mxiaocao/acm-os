@@ -1958,7 +1958,7 @@ pub enum PersonalNoteReadState {
 pub trait PersonalNoteReadPort {
     async fn read_personal_note_projection(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<PersonalNoteReadState, PersonalNoteReadError>;
 }
 

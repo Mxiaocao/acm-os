@@ -1621,7 +1621,7 @@ pub async fn transition_problem_lifecycle(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ProblemLifecycleCommandInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let problem = codeforces_problem_lifecycle_identity(input.contest_id, input.index)?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let action = parse_problem_lifecycle_action(&input.action)?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::transition_problem_lifecycle(database.inner(), &problem, action, today)
@@ -1630,7 +1630,7 @@ pub async fn transition_problem_lifecycle(
         .map_err(acm_os_application::ProblemLifecycleError::code)
 }
 
-fn codeforces_problem_lifecycle_identity(
+fn codeforces_problem_identity(
     contest_id: u64,
     index: String,
 ) -> Result<acm_os_domain::ProblemIdentity, &'static str> {
@@ -1950,10 +1950,7 @@ pub async fn personal_note_projection(
     input: LightweightProblemDetailInput,
 ) -> Result<PersonalNoteReadStateDto, &'static str> {
     use acm_os_application::PersonalNoteReadPort;
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     database
         .read_personal_note_projection(&problem)
         .await
@@ -2025,10 +2022,7 @@ pub async fn open_personal_note_in_obsidian(
     };
     use tauri_plugin_opener::OpenerExt;
 
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let state = database
         .read_personal_note_projection(&problem)
         .await
@@ -4341,18 +4335,18 @@ mod tests {
     };
 
     #[test]
-    fn lifecycle_ipc_converts_legacy_codeforces_input_to_generic_identity() {
-        let problem = super::codeforces_problem_lifecycle_identity(1979, "A".to_owned())
+    fn codeforces_problem_identity_preserves_legacy_ipc_compatibility() {
+        let problem = super::codeforces_problem_identity(1979, "A".to_owned())
             .expect("legacy IPC identity");
         assert_eq!(problem.contest().platform().as_str(), "codeforces");
         assert_eq!(problem.contest().external_contest_key().as_str(), "1979");
         assert_eq!(problem.external_problem_key(), "A");
         assert_eq!(
-            super::codeforces_problem_lifecycle_identity(0, "A".to_owned()),
+            super::codeforces_problem_identity(0, "A".to_owned()),
             Err("invalid_problem_identity")
         );
         assert_eq!(
-            super::codeforces_problem_lifecycle_identity(1979, "a".to_owned()),
+            super::codeforces_problem_identity(1979, "a".to_owned()),
             Err("invalid_problem_identity")
         );
     }

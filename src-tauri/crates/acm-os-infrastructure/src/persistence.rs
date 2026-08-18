@@ -443,7 +443,8 @@ impl DatabaseRuntime {
             .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
         let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
             .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-        let binding = match self.read_personal_note_projection(&problem).await {
+        let generic_problem = generic_problem_identity(&problem);
+        let binding = match self.read_personal_note_projection(&generic_problem).await {
             Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
             Ok(PersonalNoteReadState::LocationAnomaly { .. })
             | Ok(PersonalNoteReadState::VaultUnavailable { .. })
@@ -2337,7 +2338,8 @@ impl TodaySnapshotPort for DatabaseRuntime {
                 .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
             let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
                 .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
-            match self.read_personal_note_projection(&problem).await {
+            let generic_problem = generic_problem_identity(&problem);
+            match self.read_personal_note_projection(&generic_problem).await {
                 Ok(PersonalNoteReadState::Ready { .. })
                 | Ok(PersonalNoteReadState::LocationAnomaly { .. })
                 | Ok(PersonalNoteReadState::VaultUnavailable { .. })
@@ -4911,7 +4913,8 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
-        let binding = match self.read_personal_note_projection(problem).await {
+        let generic_problem = generic_problem_identity(problem);
+        let binding = match self.read_personal_note_projection(&generic_problem).await {
             Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
             Ok(PersonalNoteReadState::LocationAnomaly { .. }) => {
                 return Err(PersonalNoteDeletionError::LocationAnomaly)
@@ -5203,7 +5206,7 @@ fn map_lifecycle_to_deletion_error(error: ProblemLifecycleError) -> PersonalNote
 impl PersonalNoteReadPort for DatabaseRuntime {
     async fn read_personal_note_projection(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
         let row: Option<(
             i64,
@@ -5219,12 +5222,13 @@ impl PersonalNoteReadPort for DatabaseRuntime {
                ON identities.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-             WHERE identities.platform = 'codeforces' \
-               AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2",
+             WHERE identities.platform = ?1 \
+               AND identities.external_contest_key = ?2 \
+               AND identities.external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(
             self._pool
                 .as_ref()
@@ -5299,9 +5303,10 @@ impl PersonalNoteReadPort for DatabaseRuntime {
         // Disk bytes are always read and digested before this cache is consulted.
         let content_digest = resolved.content_digest.clone();
         let cache_key = format!(
-            "codeforces:{}:{}:{}",
-            problem.contest().contest_id(),
-            problem.index(),
+            "{}:{}:{}:{}",
+            problem.contest().platform().as_str(),
+            problem.contest().external_contest_key().as_str(),
+            problem.external_problem_key(),
             resolved.relative_path
         );
         {
@@ -5752,8 +5757,9 @@ impl PersonalNotePatchPort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
         target: &PrerequisiteLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let generic_problem = generic_problem_identity(problem);
         let state = self
-            .read_personal_note_projection(problem)
+            .read_personal_note_projection(&generic_problem)
             .await
             .map_err(map_personal_note_read_to_patch_error)?;
         let expected = match state {
@@ -5814,8 +5820,9 @@ impl PersonalNotePatchPort for DatabaseRuntime {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
         target: &ExtraProblemLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let generic_problem = generic_problem_identity(problem);
         let state = self
-            .read_personal_note_projection(problem)
+            .read_personal_note_projection(&generic_problem)
             .await
             .map_err(map_personal_note_read_to_patch_error)?;
         let expected = match state {
@@ -12339,7 +12346,7 @@ mod tests {
     async fn problem_knowledge_relations_only_come_from_a_unique_prerequisite_section() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("read personal note")
         {
@@ -12554,7 +12561,7 @@ mod tests {
     async fn knowledge_detail_projects_fresh_neighbors_understanding_and_related_problems() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("read personal note")
         {
@@ -12631,7 +12638,7 @@ mod tests {
     async fn knowledge_candidates_preserve_user_disposition_without_creating_authority() {
         let (_directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("read personal note")
         {
@@ -13007,7 +13014,7 @@ mod tests {
         assert_eq!(accepted.knowledge_node_id, target.knowledge_node_id);
 
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("fresh problem note")
         {
@@ -13046,7 +13053,7 @@ mod tests {
         .await
         .expect("save accepted intent");
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("read note")
         {
@@ -13116,7 +13123,7 @@ mod tests {
             .await
             .expect("register candidate");
         let binding = match runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("read note")
         {
@@ -13225,6 +13232,61 @@ mod tests {
         assert_eq!(
             runtime.load_problem_lifecycle(&other_contest).await,
             Err(ProblemLifecycleError::ProblemNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_note_read_resolves_generic_alias_without_changing_note_authority() {
+        let (_directory, runtime, _vault, _problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' \
+               AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (\
+                problem_id, platform, external_contest_key, external_problem_key\
+             ) VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("generic external identity");
+
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("generic problem identity");
+        let codeforces_state = runtime
+            .read_personal_note_projection(&generic_problem_identity(&codeforces_problem))
+            .await
+            .expect("Codeforces alias note state");
+        let atcoder_state = runtime
+            .read_personal_note_projection(&atcoder_problem)
+            .await
+            .expect("AtCoder alias note state");
+        assert_eq!(atcoder_state, codeforces_state);
+
+        let other_contest = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc401").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("separate strong identity");
+        assert_eq!(
+            runtime.read_personal_note_projection(&other_contest).await,
+            Err(PersonalNoteReadError::ProblemNotFound)
         );
     }
 
@@ -16053,7 +16115,7 @@ mod tests {
             .expect("complete learning entry");
         fs::rename(&vault, &offline).expect("make vault unavailable after completion");
         runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("project unavailable after completion");
         let completed = load_or_generate_today_snapshot(&runtime, second_day, 1)
@@ -16133,7 +16195,7 @@ mod tests {
         let offline = directory.path().join("vault-offline-review");
         fs::rename(&vault, &offline).expect("make vault unavailable");
         runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("project unavailable binding");
         let reconciled = load_or_generate_today_snapshot(&runtime, due, 30)
@@ -16428,7 +16490,7 @@ mod tests {
         )
         .expect("external note edit");
         runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("refresh note binding");
         let marked_on = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("date");
@@ -17129,7 +17191,7 @@ mod tests {
             b"# User-owned title\n\n## \xe9\xa2\x98\xe8\xa7\xa3\n\nMy durable explanation.\n";
         fs::write(&note_path, user_markdown).expect("external user edit");
         runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("refresh binding evidence");
         let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
@@ -17251,7 +17313,7 @@ mod tests {
             .expect("create personal note");
 
         let cached = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("initial projection");
         fs::write(
@@ -17261,7 +17323,7 @@ mod tests {
         .expect("external edit without watcher event");
 
         let fresh = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("fresh projection");
         let PersonalNoteReadState::Ready {
@@ -17288,7 +17350,7 @@ mod tests {
         let before = "\u{feff}# Custom title\r\n\r\n## 前置知识\r\nkeep\r\n\r\n## 题解\r\n\r\n### Mine\r\nbody\r\n\r\n## 额外题目\r\n\r\n## User section\r\ndo not touch\r\n";
         fs::write(&note, before.as_bytes()).expect("custom note fixture");
         runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("refresh external edit");
 
@@ -17364,7 +17426,7 @@ mod tests {
             .expect("external edit after rename");
 
         let state = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("file-key relocation");
         let PersonalNoteReadState::Ready {
@@ -17395,7 +17457,7 @@ mod tests {
             .expect("remove file-key evidence");
 
         let state = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("digest relocation");
         let PersonalNoteReadState::Ready {
@@ -17422,7 +17484,7 @@ mod tests {
             .expect("remove file-key evidence");
 
         let state = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("location anomaly state");
         assert!(matches!(
@@ -17463,7 +17525,7 @@ mod tests {
             .expect("remove deterministic evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("location anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17485,7 +17547,7 @@ mod tests {
         .expect("manual rebind");
         assert_eq!(binding.vault_relative_path, "Recovered/manual-choice.md");
         let state = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("rebound projection");
         let PersonalNoteReadState::Ready { projection, .. } = state else {
@@ -17515,7 +17577,7 @@ mod tests {
         .expect("remove A evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem_a)
+                .read_personal_note_projection(&generic_problem_identity(&problem_a))
                 .await
                 .expect("A anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17557,7 +17619,7 @@ mod tests {
             .expect("remove problem evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("problem anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17594,7 +17656,7 @@ mod tests {
             .expect("remove deterministic evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("location anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17662,7 +17724,7 @@ mod tests {
             .expect("remove deterministic evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("location anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17692,7 +17754,7 @@ mod tests {
             .expect("remove deterministic evidence");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("location anomaly"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -17710,7 +17772,7 @@ mod tests {
         fs::rename(&vault, &offline).expect("make vault unavailable");
 
         let state = runtime
-            .read_personal_note_projection(&problem)
+            .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
             .expect("vault unavailable state");
         assert!(matches!(
@@ -17732,7 +17794,7 @@ mod tests {
         fs::rename(&offline, &vault).expect("restore vault");
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem)
+                .read_personal_note_projection(&generic_problem_identity(&problem))
                 .await
                 .expect("restored vault read"),
             PersonalNoteReadState::Ready { .. }
@@ -17754,7 +17816,9 @@ mod tests {
             .expect("invalid binding fixture");
 
         assert_eq!(
-            runtime.read_personal_note_projection(&problem).await,
+            runtime
+                .read_personal_note_projection(&generic_problem_identity(&problem))
+                .await,
             Err(PersonalNoteReadError::BindingUnavailable)
         );
     }
@@ -17781,7 +17845,7 @@ mod tests {
 
         assert!(matches!(
             runtime
-                .read_personal_note_projection(&problem_a)
+                .read_personal_note_projection(&generic_problem_identity(&problem_a))
                 .await
                 .expect("occupied relocation state"),
             PersonalNoteReadState::LocationAnomaly { .. }
@@ -19071,7 +19135,7 @@ mod tests {
         target: &str,
     ) -> (String, PersonalNoteBinding) {
         let binding = match runtime
-            .read_personal_note_projection(problem)
+            .read_personal_note_projection(&generic_problem_identity(problem))
             .await
             .expect("read personal note")
         {
