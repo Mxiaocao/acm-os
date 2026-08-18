@@ -7884,7 +7884,7 @@ async fn contest_delete_state(
     ))
 }
 
-const CONTEST_CORRECTION_STATE_SQL: &str = "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_external_identities contest_identity ON contest_identity.contest_id = c.id AND contest_identity.platform = 'codeforces' JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities problem_identity ON problem_identity.problem_id = p.id AND problem_identity.platform = 'codeforces' WHERE contest_identity.external_contest_key = ?1 AND problem_identity.external_problem_key = ?2";
+const CONTEST_CORRECTION_STATE_SQL: &str = "SELECT c.id, p.id, c.facts_status, cp.final_contest_result, cp.upsolve_decision FROM contests c JOIN contest_external_identities contest_identity ON contest_identity.contest_id = c.id AND contest_identity.platform = 'codeforces' JOIN contest_problems cp ON cp.contest_id = c.id JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities problem_identity ON problem_identity.problem_id = p.id AND problem_identity.platform = 'codeforces' AND problem_identity.external_contest_key = contest_identity.external_contest_key WHERE contest_identity.external_contest_key = ?1 AND problem_identity.external_problem_key = ?2";
 
 impl ContestCorrectionPort for DatabaseRuntime {
     async fn correct_contest_problem_facts(
@@ -17931,6 +17931,165 @@ mod tests {
                 .await,
             Err(ContestCorrectionError::NoChange)
         );
+    }
+
+    #[tokio::test]
+    async fn contest_correction_requires_a_matching_strong_identity_tuple() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("pool");
+
+        for (id, external_key) in [(100_i64, "100"), (200_i64, "200")] {
+            sqlx::query(
+                "INSERT INTO contests (id, title, source_url, import_status, facts_status, facts_completed_at_utc) \
+                 VALUES (?1, ?2, ?3, 'complete', 'completed', '2026-08-10T12:00:00Z')",
+            )
+            .bind(id)
+            .bind(format!("Contest {external_key}"))
+            .bind(format!("https://codeforces.com/contest/{external_key}"))
+            .execute(pool)
+            .await
+            .expect("contest fixture");
+            sqlx::query(
+                "INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) \
+                 VALUES (?1, 'codeforces', ?2)",
+            )
+            .bind(id)
+            .bind(external_key)
+            .execute(pool)
+            .await
+            .expect("contest identity fixture");
+        }
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url) \
+             VALUES (300, 'Shared internal problem X', 'https://codeforces.com/problemset/problem/100/A')",
+        )
+        .execute(pool)
+        .await
+        .expect("problem fixture");
+        for (external_contest_key, external_problem_key) in [("100", "A"), ("200", "B")] {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                 (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (300, 'codeforces', ?1, ?2)",
+            )
+            .bind(external_contest_key)
+            .bind(external_problem_key)
+            .execute(pool)
+            .await
+            .expect("problem identity fixture");
+        }
+        sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (300)")
+            .execute(pool)
+            .await
+            .expect("learning state fixture");
+        sqlx::query(
+            "INSERT INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) \
+             VALUES (300, '<p>source</p>', '<p>safe</p>')",
+        )
+        .execute(pool)
+        .await
+        .expect("snapshot fixture");
+        for contest_id in [100_i64, 200_i64] {
+            sqlx::query(
+                "INSERT INTO contest_problems \
+                 (contest_id, problem_id, ordinal, import_state, final_contest_result, upsolve_decision) \
+                 VALUES (?1, 300, 1, 'ready', 'wrong_answer', 'planned')",
+            )
+            .bind(contest_id)
+            .execute(pool)
+            .await
+            .expect("contest problem fixture");
+        }
+
+        let contest_100 = acm_os_domain::CodeforcesContestIdentity::new(100).expect("contest 100");
+        runtime
+            .correct_contest_problem_facts(
+                &contest_100,
+                &ContestProblemCorrectionInput {
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                        contest_100.clone(),
+                        "A",
+                    )
+                    .expect("100/A"),
+                    final_contest_result: ContestFinalResult::Accepted,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                },
+            )
+            .await
+            .expect("real 100/A identity is correctable");
+        let state_after_valid: (String, String) = sqlx::query_as(
+            "SELECT final_contest_result, upsolve_decision FROM contest_problems \
+             WHERE contest_id = 100 AND problem_id = 300",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("100/A state");
+        let events_after_valid: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_correction_events")
+                .fetch_one(pool)
+                .await
+                .expect("correction event count");
+        assert_eq!(
+            state_after_valid,
+            ("accepted".to_owned(), "not_planned".to_owned())
+        );
+        assert_eq!(events_after_valid, 2);
+
+        let fabricated = runtime
+            .correct_contest_problem_facts(
+                &contest_100,
+                &ContestProblemCorrectionInput {
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                        contest_100.clone(),
+                        "B",
+                    )
+                    .expect("fabricated 100/B"),
+                    final_contest_result: ContestFinalResult::TimeLimitExceeded,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+                },
+            )
+            .await;
+        assert_eq!(fabricated, Err(ContestCorrectionError::NotFound));
+        let state_after_fabricated: (String, String) = sqlx::query_as(
+            "SELECT final_contest_result, upsolve_decision FROM contest_problems \
+             WHERE contest_id = 100 AND problem_id = 300",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("100/A state after fabricated request");
+        let events_after_fabricated: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contest_correction_events")
+                .fetch_one(pool)
+                .await
+                .expect("correction event count after fabricated request");
+        assert_eq!(state_after_fabricated, state_after_valid);
+        assert_eq!(events_after_fabricated, events_after_valid);
+
+        let contest_200 = acm_os_domain::CodeforcesContestIdentity::new(200).expect("contest 200");
+        runtime
+            .correct_contest_problem_facts(
+                &contest_200,
+                &ContestProblemCorrectionInput {
+                    problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                        contest_200.clone(),
+                        "B",
+                    )
+                    .expect("200/B"),
+                    final_contest_result: ContestFinalResult::Accepted,
+                    upsolve_decision: acm_os_application::ContestUpsolveDecision::NotPlanned,
+                },
+            )
+            .await
+            .expect("real 200/B identity is correctable");
+        let state_200: (String, String) = sqlx::query_as(
+            "SELECT final_contest_result, upsolve_decision FROM contest_problems \
+             WHERE contest_id = 200 AND problem_id = 300",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("200/B state");
+        assert_eq!(state_200, ("accepted".to_owned(), "not_planned".to_owned()));
     }
 
     async fn persist_completed_contest_for_backup_test(
