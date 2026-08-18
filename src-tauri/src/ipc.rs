@@ -2247,7 +2247,8 @@ pub async fn register_knowledge_candidate(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: KnowledgeCandidateRegisterInput,
 ) -> Result<KnowledgeCandidateDto, &'static str> {
-    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    let problem_index = input.index.clone();
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::register_knowledge_candidate(
         database.inner(),
         &problem,
@@ -2255,7 +2256,7 @@ pub async fn register_knowledge_candidate(
         &input.target_ref,
     )
     .await
-    .map(|item| knowledge_candidate_dto(item, &[]))
+    .map(|item| knowledge_candidate_read_dto(item, input.contest_id, &problem_index, &[]))
     .map_err(knowledge_candidate_error_code)
 }
 
