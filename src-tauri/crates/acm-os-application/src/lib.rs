@@ -2121,20 +2121,20 @@ impl PersonalNotePatchError {
 pub trait PersonalNotePatchPort {
     async fn add_prerequisite_link(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         target: &PrerequisiteLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
 
     async fn add_extra_problem_link(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         target: &ExtraProblemLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
 }
 
 pub async fn add_prerequisite_link<P: PersonalNotePatchPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     target: impl Into<String>,
 ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
     let target = PrerequisiteLinkTarget::parse(target)?;
@@ -2143,7 +2143,7 @@ pub async fn add_prerequisite_link<P: PersonalNotePatchPort>(
 
 pub async fn add_extra_problem_link<P: PersonalNotePatchPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     target: impl Into<String>,
 ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
     let target = ExtraProblemLinkTarget::parse(target)?;
@@ -3860,7 +3860,7 @@ mod tests {
     impl PersonalNotePatchPort for RecordingPatchPort {
         async fn add_prerequisite_link(
             &self,
-            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _problem: &acm_os_domain::ProblemIdentity,
             _target: &PrerequisiteLinkTarget,
         ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
             Err(PersonalNotePatchError::PersistenceUnavailable)
@@ -3868,7 +3868,7 @@ mod tests {
 
         async fn add_extra_problem_link(
             &self,
-            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _problem: &acm_os_domain::ProblemIdentity,
             target: &ExtraProblemLinkTarget,
         ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
             assert_eq!(target.as_str(), "CF-2000-A");
@@ -3886,8 +3886,11 @@ mod tests {
         let port = RecordingPatchPort {
             calls: Cell::new(0),
         };
-        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
-            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+        let problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest"),
+            ),
             "A",
         )
         .expect("problem");

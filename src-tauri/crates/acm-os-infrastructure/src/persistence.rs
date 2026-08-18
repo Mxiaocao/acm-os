@@ -1535,9 +1535,14 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         if target.knowledge_node_id != knowledge_node_id {
             return Err(KnowledgeCandidateError::IntegrityViolation);
         }
-        acm_os_application::add_prerequisite_link(self, problem, candidate.target_ref.clone())
-            .await
-            .map_err(map_patch_to_candidate_error)?;
+        let generic_problem = generic_problem_identity(problem);
+        acm_os_application::add_prerequisite_link(
+            self,
+            &generic_problem,
+            candidate.target_ref.clone(),
+        )
+        .await
+        .map_err(map_patch_to_candidate_error)?;
         self.rebuild_knowledge_relations()
             .await
             .map_err(map_knowledge_to_candidate_error)?;
@@ -4929,6 +4934,15 @@ fn deletion_recovery_identity_key(problem: &acm_os_domain::ProblemIdentity) -> S
     )
 }
 
+fn patch_recovery_identity_key(problem: &acm_os_domain::ProblemIdentity) -> String {
+    format!(
+        "{}:{}:{}",
+        deletion_recovery_identity_component(problem.contest().platform().as_str()),
+        deletion_recovery_identity_component(problem.contest().external_contest_key().as_str()),
+        deletion_recovery_identity_component(problem.external_problem_key())
+    )
+}
+
 impl PersonalNoteDeletionPort for DatabaseRuntime {
     async fn prepare_personal_note_deletion(
         &self,
@@ -5771,12 +5785,11 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
 impl PersonalNotePatchPort for DatabaseRuntime {
     async fn add_prerequisite_link(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         target: &PrerequisiteLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
-        let generic_problem = generic_problem_identity(problem);
         let state = self
-            .read_personal_note_projection(&generic_problem)
+            .read_personal_note_projection(problem)
             .await
             .map_err(map_personal_note_read_to_patch_error)?;
         let expected = match state {
@@ -5799,11 +5812,7 @@ impl PersonalNotePatchPort for DatabaseRuntime {
             .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
         let active_vault = configuration.active_vault_path().to_owned();
         let relative_path = expected.vault_relative_path.clone();
-        let recovery_key = format!(
-            "codeforces:{}:{}",
-            problem.contest().contest_id(),
-            problem.index()
-        );
+        let recovery_key = patch_recovery_identity_key(problem);
         let operation_id = self
             .begin_prerequisite_patch_operation(problem, &expected, target.as_str())
             .await?;
@@ -5834,12 +5843,11 @@ impl PersonalNotePatchPort for DatabaseRuntime {
 
     async fn add_extra_problem_link(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         target: &ExtraProblemLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
-        let generic_problem = generic_problem_identity(problem);
         let state = self
-            .read_personal_note_projection(&generic_problem)
+            .read_personal_note_projection(problem)
             .await
             .map_err(map_personal_note_read_to_patch_error)?;
         let expected = match state {
@@ -5862,11 +5870,7 @@ impl PersonalNotePatchPort for DatabaseRuntime {
             .ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
         let active_vault = configuration.active_vault_path().to_owned();
         let relative_path = expected.vault_relative_path.clone();
-        let recovery_key = format!(
-            "codeforces:{}:{}",
-            problem.contest().contest_id(),
-            problem.index()
-        );
+        let recovery_key = patch_recovery_identity_key(problem);
         let target = target.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             crate::safe_patch::add_extra_problem_link(
@@ -5919,7 +5923,7 @@ impl DatabaseRuntime {
 
     async fn begin_prerequisite_patch_operation(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         expected: &PersonalNoteBinding,
         target: &str,
     ) -> Result<String, PersonalNotePatchError> {
@@ -5931,12 +5935,13 @@ impl DatabaseRuntime {
             "SELECT p.id, fb.id FROM problems p \
              JOIN problem_external_identities identities ON identities.problem_id = p.id \
              JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2 AND fb.vault_relative_path = ?3 \
-               AND fb.content_digest = ?4 AND fb.binding_state = 'linked'",
+             WHERE identities.platform = ?1 AND identities.external_contest_key = ?2 \
+               AND identities.external_problem_key = ?3 AND fb.vault_relative_path = ?4 \
+               AND fb.content_digest = ?5 AND fb.binding_state = 'linked'",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .bind(&expected.vault_relative_path)
         .bind(&expected.content_digest)
         .fetch_optional(pool)
@@ -5967,18 +5972,19 @@ impl DatabaseRuntime {
 
     async fn commit_patch_outcome(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         expected: &PersonalNoteBinding,
         outcome: crate::safe_patch::SafePatchOutcome,
         critical_operation_id: Option<&str>,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
         let problem_id: i64 = sqlx::query_scalar(
             "SELECT problem_id FROM problem_external_identities \
-             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
-               AND external_problem_key = ?2",
+             WHERE platform = ?1 AND external_contest_key = ?2 \
+               AND external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(
             self._pool
                 .as_ref()
@@ -6056,15 +6062,17 @@ impl DatabaseRuntime {
             .await
             .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
         let old_cache_key = format!(
-            "codeforces:{}:{}:{}",
-            problem.contest().contest_id(),
-            problem.index(),
+            "{}:{}:{}:{}",
+            problem.contest().platform().as_str(),
+            problem.contest().external_contest_key().as_str(),
+            problem.external_problem_key(),
             expected.vault_relative_path
         );
         let new_cache_key = format!(
-            "codeforces:{}:{}:{}",
-            problem.contest().contest_id(),
-            problem.index(),
+            "{}:{}:{}:{}",
+            problem.contest().platform().as_str(),
+            problem.contest().external_contest_key().as_str(),
+            problem.external_problem_key(),
             resolved.relative_path
         );
         let mut cache = self
@@ -12927,7 +12935,11 @@ mod tests {
             problems_to_link.push(problem);
         }
         for problem in &problems_to_link {
-            acm_os_application::add_prerequisite_link(&runtime, problem, "Reevaluation".to_owned())
+            acm_os_application::add_prerequisite_link(
+                &runtime,
+                &generic_problem_identity(problem),
+                "Reevaluation".to_owned(),
+            )
                 .await
                 .expect("formal prerequisite link");
         }
@@ -17355,6 +17367,39 @@ mod tests {
         assert_eq!(deletion_recovery_identity_key(&legacy), "codeforces:1979:A");
     }
 
+    #[test]
+    fn patch_recovery_identity_encoding_is_injective_and_legacy_compatible() {
+        let identity = |platform: &str, contest: &str, problem: &str| {
+            acm_os_domain::ProblemIdentity::new(
+                acm_os_domain::ContestIdentity::new(
+                    acm_os_domain::PlatformKey::new(platform).expect("platform"),
+                    acm_os_domain::ExternalContestKey::new(contest).expect("contest"),
+                ),
+                problem,
+            )
+            .expect("problem")
+        };
+        let tuple_a = identity("p", "a:b", "c");
+        let tuple_b = identity("p", "a", "b:c");
+        let literal_escape = identity("p", "%3A", "c");
+        let literal_separator = identity("p", ":", "c");
+        let legacy = identity("codeforces", "1979", "A");
+
+        assert_eq!(patch_recovery_identity_key(&tuple_a), "p:a%3Ab:c");
+        assert_eq!(patch_recovery_identity_key(&tuple_b), "p:a:b%3Ac");
+        assert_ne!(
+            patch_recovery_identity_key(&tuple_a),
+            patch_recovery_identity_key(&tuple_b)
+        );
+        assert_eq!(patch_recovery_identity_key(&literal_escape), "p:%253A:c");
+        assert_eq!(patch_recovery_identity_key(&literal_separator), "p:%3A:c");
+        assert_ne!(
+            patch_recovery_identity_key(&literal_escape),
+            patch_recovery_identity_key(&literal_separator)
+        );
+        assert_eq!(patch_recovery_identity_key(&legacy), "codeforces:1979:A");
+    }
+
     #[tokio::test]
     async fn delete_personal_note_resolves_generic_alias_and_separates_strong_tuple() {
         let (directory, runtime, _vault, problems, codeforces_problem) =
@@ -17528,7 +17573,11 @@ mod tests {
             .await
             .expect("refresh external edit");
 
-        let binding = add_extra_problem_link(&runtime, &problem, "CF-2000-A")
+        let binding = add_extra_problem_link(
+            &runtime,
+            &generic_problem_identity(&problem),
+            "CF-2000-A",
+        )
             .await
             .expect("safe semantic patch");
         let after = fs::read(&note).expect("patched note");
@@ -17561,6 +17610,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patch_resolves_generic_alias_and_wrong_tuple_has_zero_mutation() {
+        let (directory, runtime, _vault, problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let note = problems.join("CF-1979-A.md");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+                (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("generic alias");
+        let identity = |contest: &str| {
+            acm_os_domain::ProblemIdentity::new(
+                acm_os_domain::ContestIdentity::new(
+                    acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                    acm_os_domain::ExternalContestKey::new(contest).expect("contest"),
+                ),
+                "A",
+            )
+            .expect("problem")
+        };
+        let alias = identity("abc400");
+        let wrong_tuple = identity("abc401");
+        let before_bytes = fs::read(&note).expect("note before wrong tuple");
+        let before_binding: (String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT vault_relative_path, content_digest, windows_file_key, binding_state \
+             FROM file_bindings WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("binding before wrong tuple");
+
+        assert_eq!(
+            add_extra_problem_link(&runtime, &wrong_tuple, "CF-2000-A").await,
+            Err(PersonalNotePatchError::ProblemNotFound)
+        );
+        assert_eq!(fs::read(&note).expect("unchanged note"), before_bytes);
+        let after_binding: (String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT vault_relative_path, content_digest, windows_file_key, binding_state \
+             FROM file_bindings WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("binding after wrong tuple");
+        assert_eq!(after_binding, before_binding);
+        let critical_operations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM critical_operations")
+                .fetch_one(pool)
+                .await
+                .expect("critical operation count");
+        assert_eq!(critical_operations, 0);
+        assert!(!directory.path().join("markdown-recovery").exists());
+        assert!(!directory.path().join("backups/daily").exists());
+
+        let patched = add_extra_problem_link(&runtime, &alias, "CF-2000-A")
+            .await
+            .expect("patch through generic alias");
+        let codeforces_identity = generic_problem_identity(&codeforces_problem);
+        let codeforces_read = runtime
+            .read_personal_note_projection(&codeforces_identity)
+            .await
+            .expect("read through Codeforces alias");
+        let PersonalNoteReadState::Ready {
+            binding: codeforces_binding,
+            ..
+        } = codeforces_read
+        else {
+            panic!("Codeforces alias must resolve the patched note");
+        };
+        assert_eq!(codeforces_binding, patched);
+        assert!(
+            fs::read_to_string(&note)
+                .expect("patched note")
+                .contains("[[CF-2000-A]]")
+        );
+    }
+
+    #[tokio::test]
     async fn safe_patch_rejects_ambiguous_or_invalid_markdown_without_writing() {
         let (directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
         let note = problems.join("CF-1979-A.md");
@@ -17568,7 +17708,12 @@ mod tests {
         fs::write(&note, ambiguous).expect("ambiguous note");
 
         assert_eq!(
-            add_extra_problem_link(&runtime, &problem, "CF-2000-A").await,
+            add_extra_problem_link(
+                &runtime,
+                &generic_problem_identity(&problem),
+                "CF-2000-A",
+            )
+            .await,
             Err(PersonalNotePatchError::TargetSectionAmbiguous)
         );
         assert_eq!(
@@ -17579,7 +17724,12 @@ mod tests {
 
         fs::write(&note, [0xff, 0xfe, 0xfd]).expect("invalid utf-8 note");
         assert_eq!(
-            add_extra_problem_link(&runtime, &problem, "CF-2000-B").await,
+            add_extra_problem_link(
+                &runtime,
+                &generic_problem_identity(&problem),
+                "CF-2000-B",
+            )
+            .await,
             Err(PersonalNotePatchError::InvalidUtf8)
         );
         assert_eq!(
@@ -19317,7 +19467,7 @@ mod tests {
             other => panic!("expected ready personal note, got {other:?}"),
         };
         let operation_id = runtime
-            .begin_prerequisite_patch_operation(problem, &binding, target)
+            .begin_prerequisite_patch_operation(&generic_problem_identity(problem), &binding, target)
             .await
             .expect("begin critical operation");
         (operation_id, binding)
@@ -19471,7 +19621,7 @@ mod tests {
 
         let binding = acm_os_application::add_prerequisite_link(
             &runtime,
-            &problem,
+            &generic_problem_identity(&problem),
             "Segment Tree".to_owned(),
         )
         .await
@@ -19523,7 +19673,7 @@ mod tests {
 
         let committed = runtime
             .commit_patch_outcome(
-                &problem,
+                &generic_problem_identity(&problem),
                 &binding,
                 crate::safe_patch::SafePatchOutcome {
                     relative_path: binding.vault_relative_path.clone(),
@@ -19558,7 +19708,7 @@ mod tests {
         assert_eq!(
             acm_os_application::add_prerequisite_link(
                 &runtime,
-                &problem,
+                &generic_problem_identity(&problem),
                 "Segment Tree".to_owned(),
             )
             .await,
