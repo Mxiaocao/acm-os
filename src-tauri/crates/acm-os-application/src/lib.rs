@@ -3390,6 +3390,14 @@ pub struct KnowledgeCandidateProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCandidateReadProjection {
+    pub problem: acm_os_domain::ProblemIdentity,
+    pub fingerprint: String,
+    pub target_ref: String,
+    pub disposition: KnowledgeCandidateDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedKnowledgeCandidateProjection {
     pub knowledge_node_id: String,
     pub target_ref: String,
@@ -3410,8 +3418,8 @@ pub enum KnowledgeCandidateError {
 pub trait KnowledgeCandidatePort {
     async fn list_knowledge_candidates(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
-    ) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError>;
+        problem: &acm_os_domain::ProblemIdentity,
+    ) -> Result<Vec<KnowledgeCandidateReadProjection>, KnowledgeCandidateError>;
 
     async fn register_knowledge_candidate(
         &self,
@@ -3452,8 +3460,8 @@ pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(
 
 pub async fn list_knowledge_candidates<P: KnowledgeCandidatePort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
-) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError> {
+    problem: &acm_os_domain::ProblemIdentity,
+) -> Result<Vec<KnowledgeCandidateReadProjection>, KnowledgeCandidateError> {
     port.list_knowledge_candidates(problem).await
 }
 

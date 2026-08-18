@@ -1385,13 +1385,14 @@ impl KnowledgeDetailPort for DatabaseRuntime {
 impl KnowledgeCandidatePort for DatabaseRuntime {
     async fn list_knowledge_candidates(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
-    ) -> Result<Vec<KnowledgeCandidateProjection>, KnowledgeCandidateError> {
+        problem: &acm_os_domain::ProblemIdentity,
+    ) -> Result<Vec<acm_os_application::KnowledgeCandidateReadProjection>, KnowledgeCandidateError>
+    {
         let pool = self
             ._pool
             .as_ref()
             .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
-        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        let (problem_id, identity_type) = candidate_problem_row_generic(pool, problem).await?;
         if identity_type != "personal" {
             return Err(KnowledgeCandidateError::NotPersonal);
         }
@@ -1408,7 +1409,7 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
         rows.into_iter()
             .map(|(fingerprint, target_ref, disposition)| {
-                Ok(KnowledgeCandidateProjection {
+                Ok(acm_os_application::KnowledgeCandidateReadProjection {
                     problem: problem.clone(),
                     fingerprint,
                     target_ref,
@@ -1588,6 +1589,26 @@ fn map_patch_to_candidate_error(error: PersonalNotePatchError) -> KnowledgeCandi
         PersonalNotePatchError::NotPersonal => KnowledgeCandidateError::NotPersonal,
         _ => KnowledgeCandidateError::IntegrityViolation,
     }
+}
+
+async fn candidate_problem_row_generic(
+    pool: &SqlitePool,
+    problem: &acm_os_domain::ProblemIdentity,
+) -> Result<(i64, String), KnowledgeCandidateError> {
+    sqlx::query_as(
+        "SELECT p.id, p.identity_type FROM problems p \
+         JOIN problem_external_identities identities ON identities.problem_id = p.id \
+         WHERE identities.platform = ?1 \
+           AND identities.external_contest_key = ?2 \
+           AND identities.external_problem_key = ?3",
+    )
+    .bind(problem.contest().platform().as_str())
+    .bind(problem.contest().external_contest_key().as_str())
+    .bind(problem.external_problem_key())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+    .ok_or(KnowledgeCandidateError::ProblemNotFound)
 }
 
 async fn candidate_problem_row(
@@ -12721,10 +12742,13 @@ mod tests {
                 .expect("repeat candidate");
         assert_eq!(repeated.disposition, KnowledgeCandidateDisposition::Ignored);
         assert_eq!(repeated.target_ref, "Segment Trees");
-        let listed = list_knowledge_candidates(&runtime, &problem)
+        let listed = list_knowledge_candidates(&runtime, &generic_problem_identity(&problem))
             .await
             .expect("list candidates");
-        assert_eq!(listed, vec![repeated]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].fingerprint, repeated.fingerprint);
+        assert_eq!(listed[0].target_ref, repeated.target_ref);
+        assert_eq!(listed[0].disposition, repeated.disposition);
 
         assert_eq!(
             fs::read(&note_path).expect("unchanged markdown"),
@@ -12757,6 +12781,78 @@ mod tests {
         assert_eq!(
             register_knowledge_candidate(&runtime, &problem, "bad", "Graphs").await,
             Err(KnowledgeCandidateError::InvalidFingerprint)
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_candidate_read_resolves_generic_aliases_to_one_internal_authority() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("generic alias");
+
+        let fingerprint = "ef".repeat(32);
+        register_knowledge_candidate(&runtime, &problem, &fingerprint, "Segment Tree")
+            .await
+            .expect("candidate authority");
+        let atcoder = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("atcoder problem");
+        let listed = list_knowledge_candidates(&runtime, &atcoder)
+            .await
+            .expect("generic candidate read");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].problem, atcoder);
+        assert_eq!(listed[0].fingerprint, fingerprint);
+        assert_eq!(
+            listed[0].disposition,
+            KnowledgeCandidateDisposition::Pending
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM knowledge_candidate_records WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_one(pool)
+            .await
+            .expect("candidate authority count"),
+            1
+        );
+
+        let wrong = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc401").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("wrong problem");
+        assert_eq!(
+            list_knowledge_candidates(&runtime, &wrong).await,
+            Err(KnowledgeCandidateError::ProblemNotFound)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_candidate_records")
+                .fetch_one(pool)
+                .await
+                .expect("candidate row count"),
+            1
         );
     }
 
@@ -13056,10 +13152,12 @@ mod tests {
         let markdown =
             fs::read_to_string(vault.join(binding.vault_relative_path)).expect("patched markdown");
         assert!(markdown.contains("## 前置知识\n- [[Segment Tree]]"));
-        assert!(list_knowledge_candidates(&runtime, &problem)
-            .await
-            .expect("remaining candidates")
-            .is_empty());
+        assert!(
+            list_knowledge_candidates(&runtime, &generic_problem_identity(&problem))
+                .await
+                .expect("remaining candidates")
+                .is_empty()
+        );
         let detail = load_knowledge_detail(&runtime, &target.knowledge_node_id)
             .await
             .expect("knowledge detail");
@@ -13110,7 +13208,7 @@ mod tests {
             .into_iter()
             .find(|node| node.display_name == "Fenwick Tree")
             .expect("new real node");
-        let listed = list_knowledge_candidates(&runtime, &problem)
+        let listed = list_knowledge_candidates(&runtime, &generic_problem_identity(&problem))
             .await
             .expect("candidate remains listed");
         assert_eq!(listed.len(), 1);

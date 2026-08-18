@@ -2226,8 +2226,9 @@ pub async fn knowledge_candidates(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
 ) -> Result<Vec<KnowledgeCandidateDto>, &'static str> {
-    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
-    let items = acm_os_application::list_knowledge_candidates(database.inner(), &problem)
+    let problem_index = input.index.clone();
+    let generic_problem = codeforces_problem_identity(input.contest_id, input.index)?;
+    let items = acm_os_application::list_knowledge_candidates(database.inner(), &generic_problem)
         .await
         .map_err(knowledge_candidate_error_code)?;
     let index = acm_os_application::rebuild_knowledge_index(database.inner())
@@ -2235,7 +2236,9 @@ pub async fn knowledge_candidates(
         .map_err(knowledge_index_error_code)?;
     Ok(items
         .into_iter()
-        .map(|item| knowledge_candidate_dto(item, &index.nodes))
+        .map(|item| {
+            knowledge_candidate_read_dto(item, input.contest_id, &problem_index, &index.nodes)
+        })
         .collect())
 }
 
@@ -2307,6 +2310,28 @@ fn knowledge_candidate_problem(
         .map_err(|_| "invalid_problem_identity")?;
     acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
         .map_err(|_| "invalid_problem_identity")
+}
+
+fn knowledge_candidate_read_dto(
+    value: acm_os_application::KnowledgeCandidateReadProjection,
+    contest_id: u64,
+    problem_index: &str,
+    nodes: &[acm_os_application::KnowledgeNodeProjection],
+) -> KnowledgeCandidateDto {
+    knowledge_candidate_dto(
+        acm_os_application::KnowledgeCandidateProjection {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                acm_os_domain::CodeforcesContestIdentity::new(contest_id)
+                    .expect("validated contest"),
+                problem_index.to_owned(),
+            )
+            .expect("validated problem"),
+            fingerprint: value.fingerprint,
+            target_ref: value.target_ref,
+            disposition: value.disposition,
+        },
+        nodes,
+    )
 }
 
 fn knowledge_candidate_dto(
