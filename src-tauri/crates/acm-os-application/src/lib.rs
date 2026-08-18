@@ -902,12 +902,12 @@ impl ProblemLifecycleError {
 pub trait ProblemLifecyclePort {
     async fn load_problem_lifecycle(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
 
     async fn commit_problem_lifecycle_decision(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         decision: acm_os_domain::ProblemLifecycleDecision,
         first_due: Option<acm_os_domain::LocalDate>,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
@@ -915,7 +915,7 @@ pub trait ProblemLifecyclePort {
 
 pub async fn transition_problem_lifecycle<P: ProblemLifecyclePort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     action: acm_os_domain::ProblemLifecycleAction,
     today: acm_os_domain::LocalDate,
 ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
@@ -1205,8 +1205,18 @@ pub async fn start_or_resume_review<P: ProblemLifecyclePort + ReviewAttemptPort>
     if let Some(attempt) = port.load_in_progress_review_attempt(problem).await? {
         return Ok(attempt);
     }
+    let generic_problem = acm_os_domain::ProblemIdentity::new(
+        acm_os_domain::ContestIdentity::new(
+            acm_os_domain::PlatformKey::new(problem.contest().platform())
+                .expect("codeforces platform"),
+            acm_os_domain::ExternalContestKey::new(problem.contest().contest_id().to_string())
+                .expect("validated contest id"),
+        ),
+        problem.index(),
+    )
+    .expect("validated problem identity");
     let lifecycle =
-        port.load_problem_lifecycle(problem)
+        port.load_problem_lifecycle(&generic_problem)
             .await
             .map_err(|error| match error {
                 ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,

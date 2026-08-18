@@ -1621,16 +1621,34 @@ pub async fn transition_problem_lifecycle(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ProblemLifecycleCommandInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_lifecycle_identity(input.contest_id, input.index)?;
     let action = parse_problem_lifecycle_action(&input.action)?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::transition_problem_lifecycle(database.inner(), &problem, action, today)
         .await
         .map(problem_lifecycle_state_dto)
         .map_err(acm_os_application::ProblemLifecycleError::code)
+}
+
+fn codeforces_problem_lifecycle_identity(
+    contest_id: u64,
+    index: String,
+) -> Result<acm_os_domain::ProblemIdentity, &'static str> {
+    let legacy_contest = acm_os_domain::CodeforcesContestIdentity::new(contest_id)
+        .map_err(|_| "invalid_problem_identity")?;
+    let legacy_problem = acm_os_domain::CodeforcesProblemIdentity::new(legacy_contest, index)
+        .map_err(|_| "invalid_problem_identity")?;
+    let platform = acm_os_domain::PlatformKey::new(legacy_problem.contest().platform())
+        .map_err(|_| "invalid_problem_identity")?;
+    let contest_key = acm_os_domain::ExternalContestKey::new(
+        legacy_problem.contest().contest_id().to_string(),
+    )
+    .map_err(|_| "invalid_problem_identity")?;
+    acm_os_domain::ProblemIdentity::new(
+        acm_os_domain::ContestIdentity::new(platform, contest_key),
+        legacy_problem.index(),
+    )
+    .map_err(|_| "invalid_problem_identity")
 }
 
 #[tauri::command]
@@ -4321,6 +4339,23 @@ mod tests {
         PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
         StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
     };
+
+    #[test]
+    fn lifecycle_ipc_converts_legacy_codeforces_input_to_generic_identity() {
+        let problem = super::codeforces_problem_lifecycle_identity(1979, "A".to_owned())
+            .expect("legacy IPC identity");
+        assert_eq!(problem.contest().platform().as_str(), "codeforces");
+        assert_eq!(problem.contest().external_contest_key().as_str(), "1979");
+        assert_eq!(problem.external_problem_key(), "A");
+        assert_eq!(
+            super::codeforces_problem_lifecycle_identity(0, "A".to_owned()),
+            Err("invalid_problem_identity")
+        );
+        assert_eq!(
+            super::codeforces_problem_lifecycle_identity(1979, "a".to_owned()),
+            Err("invalid_problem_identity")
+        );
+    }
 
     #[test]
     fn serializes_ready_startup_contract() {

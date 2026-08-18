@@ -1763,7 +1763,7 @@ fn resolved_binding(resolved: &ResolvedNoteFile) -> PersonalNoteBinding {
 impl ProblemLifecyclePort for DatabaseRuntime {
     async fn load_problem_lifecycle(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
         let row: Option<(
             String,
@@ -1780,12 +1780,13 @@ impl ProblemLifecyclePort for DatabaseRuntime {
                ON identities.problem_id = p.id \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
-             WHERE identities.platform = 'codeforces' \
-               AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2",
+             WHERE identities.platform = ?1 \
+               AND identities.external_contest_key = ?2 \
+               AND identities.external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(
             self._pool
                 .as_ref()
@@ -1835,7 +1836,7 @@ impl ProblemLifecyclePort for DatabaseRuntime {
 
     async fn commit_problem_lifecycle_decision(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         decision: acm_os_domain::ProblemLifecycleDecision,
         first_due: Option<acm_os_domain::LocalDate>,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
@@ -1940,9 +1941,24 @@ impl ProblemLifecyclePort for DatabaseRuntime {
     }
 }
 
+fn generic_problem_identity(
+    problem: &acm_os_domain::CodeforcesProblemIdentity,
+) -> acm_os_domain::ProblemIdentity {
+    acm_os_domain::ProblemIdentity::new(
+        acm_os_domain::ContestIdentity::new(
+            acm_os_domain::PlatformKey::new(problem.contest().platform())
+                .expect("codeforces platform"),
+            acm_os_domain::ExternalContestKey::new(problem.contest().contest_id().to_string())
+                .expect("validated contest id"),
+        ),
+        problem.index(),
+    )
+    .expect("validated problem identity")
+}
+
 async fn validate_problem_lifecycle_decision_state(
     connection: &mut sqlx::SqliteConnection,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     decision: acm_os_domain::ProblemLifecycleDecision,
 ) -> Result<i64, ProblemLifecycleError> {
     let row: Option<(i64, String, String)> = sqlx::query_as(
@@ -1950,12 +1966,13 @@ async fn validate_problem_lifecycle_decision_state(
          FROM problems p JOIN problem_external_identities identities \
            ON identities.problem_id = p.id \
          LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
-         WHERE identities.platform = 'codeforces' \
-           AND identities.external_contest_key = ?1 \
-           AND identities.external_problem_key = ?2",
+         WHERE identities.platform = ?1 \
+           AND identities.external_contest_key = ?2 \
+           AND identities.external_problem_key = ?3",
     )
-    .bind(problem.contest().contest_id().to_string())
-    .bind(problem.index())
+    .bind(problem.contest().platform().as_str())
+    .bind(problem.contest().external_contest_key().as_str())
+    .bind(problem.external_problem_key())
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
@@ -4458,8 +4475,9 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .commit()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let generic_problem = generic_problem_identity(&context.attempt.problem);
         let lifecycle = self
-            .load_problem_lifecycle(&context.attempt.problem)
+            .load_problem_lifecycle(&generic_problem)
             .await
             .map_err(|error| match error {
                 ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
@@ -6827,13 +6845,14 @@ impl ContestReadPort for DatabaseRuntime {
         if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
             return Err(ContestReadError::Unavailable);
         }
-        let lifecycle =
-            self.load_problem_lifecycle(problem)
-                .await
-                .map_err(|error| match error {
-                    ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
-                    _ => ContestReadError::Unavailable,
-                })?;
+        let generic_problem = generic_problem_identity(problem);
+        let lifecycle = self
+            .load_problem_lifecycle(&generic_problem)
+            .await
+            .map_err(|error| match error {
+                ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
+                _ => ContestReadError::Unavailable,
+            })?;
         if lifecycle.identity_type != identity_type {
             return Err(ContestReadError::Unavailable);
         }
@@ -11379,13 +11398,13 @@ mod tests {
         register_knowledge_candidate, reorder_today_snapshot, resolve_knowledge_identity_conflict,
         reveal_review_help, review_focus, review_help_drawer, review_history,
         search_knowledge_index, set_knowledge_candidate_disposition, start_or_resume_review,
-        transition_problem_lifecycle, update_problem_mastery_evidence, void_review,
-        weekly_acm_budget_for_date, ContestImportDraft, ContestImportPort, ContestImportSource,
-        ContestImportSourceError, ContestImportStatus, ContestProblemSlotDraft, ContestReadPort,
-        PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
-        ProblemIdentityType, ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason,
-        StartupGateStatus, StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft,
-        SubmissionFact, TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
+        update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
+        ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
+        ContestImportStatus, ContestProblemSlotDraft, ContestReadPort, PersonalNoteError,
+        PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType,
+        ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason, StartupGateStatus,
+        StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft, SubmissionFact,
+        TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
         WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
         WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
     };
@@ -11411,6 +11430,16 @@ mod tests {
     const POST_SPECIAL_SQL: &str = "\
         INSERT INTO migration_observations SELECT 27, foreign_keys FROM pragma_foreign_keys;\
         CREATE TABLE post_special_marker (id INTEGER PRIMARY KEY);";
+
+    async fn transition_problem_lifecycle(
+        runtime: &DatabaseRuntime,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        action: acm_os_domain::ProblemLifecycleAction,
+        today: acm_os_domain::LocalDate,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        let problem = generic_problem_identity(problem);
+        acm_os_application::transition_problem_lifecycle(runtime, &problem, action, today).await
+    }
     const FAILING_SPECIAL_SQL: &str = "\
         CREATE TABLE special_partial_change (id INTEGER PRIMARY KEY);\
         UPDATE parents SET label = 'partially changed';\
@@ -13132,6 +13161,71 @@ mod tests {
                 .expect("remove fixture setup backup");
         }
         (directory, runtime, vault, problems, problem)
+    }
+
+    #[tokio::test]
+    async fn problem_lifecycle_resolves_generic_non_numeric_strong_identity() {
+        let (_directory, runtime, _vault, _problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' \
+               AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (\
+                problem_id, platform, external_contest_key, external_problem_key\
+             ) VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("generic external identity");
+
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("generic problem identity");
+        let state = acm_os_application::transition_problem_lifecycle(
+            &runtime,
+            &atcoder_problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::LocalDate::parse_iso("2026-08-18").expect("date"),
+        )
+        .await
+        .expect("generic lifecycle transition");
+        assert_eq!(
+            state.learning_status,
+            acm_os_domain::LearningStatus::UpsolvePending
+        );
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&generic_problem_identity(&codeforces_problem))
+                .await
+                .expect("same internal problem lifecycle"),
+            state
+        );
+
+        let other_contest = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc401").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("separate strong identity");
+        assert_eq!(
+            runtime.load_problem_lifecycle(&other_contest).await,
+            Err(ProblemLifecycleError::ProblemNotFound)
+        );
     }
 
     async fn review_ready_fixture() -> (
@@ -15657,7 +15751,7 @@ mod tests {
             acm_os_domain::TodayCandidateReason::Upsolve
         );
         let lifecycle_before = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("lifecycle");
         let upsolve_completed = complete_today_entry(
@@ -15683,7 +15777,7 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem)
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
                 .await
                 .expect("lifecycle"),
             lifecycle_before
@@ -15706,7 +15800,7 @@ mod tests {
             acm_os_domain::TodayCandidateReason::ContinueLearning
         );
         let learning_before = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("learning lifecycle");
         complete_today_entry(
@@ -15718,7 +15812,7 @@ mod tests {
         .expect("complete learning entry");
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem)
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
                 .await
                 .expect("learning lifecycle"),
             learning_before
@@ -15742,7 +15836,7 @@ mod tests {
             acm_os_domain::TodayCandidateReason::Relearn
         );
         let relearn_before = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("relearn lifecycle");
         let completed = complete_today_entry(
@@ -15754,7 +15848,7 @@ mod tests {
         .expect("complete relearn entry");
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem)
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
                 .await
                 .expect("relearn lifecycle"),
             relearn_before
@@ -15899,7 +15993,7 @@ mod tests {
             .await
             .expect("upsolve plan");
         let lifecycle_before = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("lifecycle");
 
@@ -15911,7 +16005,7 @@ mod tests {
         assert_eq!(unavailable.entries[0].status, TodayEntryStatus::Unavailable);
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem)
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
                 .await
                 .expect("lifecycle"),
             lifecycle_before
@@ -15986,7 +16080,7 @@ mod tests {
             acm_os_domain::TodayCandidateReason::Relearn
         );
         let relearn_lifecycle = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("relearn lifecycle");
         fs::rename(&vault, &offline).expect("make relearn note unavailable");
@@ -16007,7 +16101,7 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem)
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
                 .await
                 .expect("relearn lifecycle"),
             relearn_lifecycle
@@ -16256,7 +16350,7 @@ mod tests {
         let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
 
         let initial = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("initial lifecycle");
         assert_eq!(
@@ -16307,7 +16401,7 @@ mod tests {
         drop(runtime);
         let restarted = start_database(directory.path()).await;
         let restored = restarted
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("restored lifecycle");
         assert_eq!(
@@ -16768,7 +16862,7 @@ mod tests {
         );
         assert!(!directory2.path().join("backups/daily").exists());
         let before = runtime2
-            .load_problem_lifecycle(&problem2)
+            .load_problem_lifecycle(&generic_problem_identity(&problem2))
             .await
             .expect("before void");
         let voided = void_review(&runtime2, &mistaken.attempt_id, "Opened the wrong problem")
@@ -16801,7 +16895,7 @@ mod tests {
         assert_eq!(backed_up_void_events, 0);
         backup_pool.close().await;
         let after = runtime2
-            .load_problem_lifecycle(&problem2)
+            .load_problem_lifecycle(&generic_problem_identity(&problem2))
             .await
             .expect("after void");
         assert_eq!(before, after);
@@ -16935,7 +17029,7 @@ mod tests {
         assert!(early.started_early);
         assert_eq!(early.scheduled_due_local_date.to_iso_string(), "2026-08-14");
         let lifecycle = runtime
-            .load_problem_lifecycle(&problem)
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
             .await
             .expect("lifecycle preserved");
         assert_eq!(
@@ -21106,7 +21200,7 @@ mod tests {
         .await
         .expect("second candidate");
         let lifecycle_before = runtime
-            .load_problem_lifecycle(&problem_b)
+            .load_problem_lifecycle(&generic_problem_identity(&problem_b))
             .await
             .expect("lifecycle before");
         let review_facts_before: (i64, i64) = sqlx::query_as(
@@ -21155,7 +21249,7 @@ mod tests {
         assert_eq!(accepted.over_budget_minutes, 0);
         assert_eq!(
             runtime
-                .load_problem_lifecycle(&problem_b)
+                .load_problem_lifecycle(&generic_problem_identity(&problem_b))
                 .await
                 .expect("lifecycle after"),
             lifecycle_before
