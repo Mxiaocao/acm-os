@@ -4908,13 +4908,33 @@ async fn validate_review_attempt_creation_state(
     Ok((problem_id, review_cycle_id))
 }
 
+fn deletion_recovery_identity_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '%' => encoded.push_str("%25"),
+            ':' => encoded.push_str("%3A"),
+            _ => encoded.push(character),
+        }
+    }
+    encoded
+}
+
+fn deletion_recovery_identity_key(problem: &acm_os_domain::ProblemIdentity) -> String {
+    format!(
+        "{}:{}:{}",
+        deletion_recovery_identity_component(problem.contest().platform().as_str()),
+        deletion_recovery_identity_component(problem.contest().external_contest_key().as_str()),
+        deletion_recovery_identity_component(problem.external_problem_key())
+    )
+}
+
 impl PersonalNoteDeletionPort for DatabaseRuntime {
     async fn prepare_personal_note_deletion(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
-        let generic_problem = generic_problem_identity(problem);
-        let binding = match self.read_personal_note_projection(&generic_problem).await {
+        let binding = match self.read_personal_note_projection(problem).await {
             Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
             Ok(PersonalNoteReadState::LocationAnomaly { .. }) => {
                 return Err(PersonalNoteDeletionError::LocationAnomaly)
@@ -4945,12 +4965,13 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
             "SELECT EXISTS(\
                 SELECT 1 FROM review_attempts ra \
                 JOIN problem_external_identities identities ON identities.problem_id = ra.problem_id \
-                WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-                  AND identities.external_problem_key = ?2 AND ra.attempt_status = 'in_progress'\
+                WHERE identities.platform = ?1 AND identities.external_contest_key = ?2 \
+                  AND identities.external_problem_key = ?3 AND ra.attempt_status = 'in_progress'\
              )",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_one(
             self._pool
                 .as_ref()
@@ -4983,12 +5004,7 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
             .recovery_root
             .as_ref()
             .ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
-        let recovery_key = format!(
-            "{}:{}:{}",
-            problem.contest().platform(),
-            problem.contest().contest_id(),
-            problem.index()
-        );
+        let recovery_key = deletion_recovery_identity_key(problem);
         let bucket = recovery_root
             .join("deleted-personal-notes")
             .join(sha256_hex(recovery_key.as_bytes()));
@@ -5037,7 +5053,7 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
 
     async fn commit_personal_note_deletion(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         prepared: &PreparedPersonalNoteDeletion,
     ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
         let pool = self
@@ -5055,12 +5071,13 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
                ON identities.problem_id = p.id \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE identities.platform = 'codeforces' \
-               AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2",
+             WHERE identities.platform = ?1 \
+               AND identities.external_contest_key = ?2 \
+               AND identities.external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
@@ -16558,7 +16575,7 @@ mod tests {
             Err(ProblemLifecycleError::InvalidTransition)
         );
         assert_eq!(
-            delete_personal_note(&runtime, &problem).await,
+            delete_personal_note(&runtime, &generic_problem_identity(&problem)).await,
             Err(PersonalNoteDeletionError::ReviewInProgress)
         );
         assert!(note_path.exists());
@@ -17040,7 +17057,7 @@ mod tests {
         )
         .await
         .expect("completed review");
-        delete_personal_note(&runtime, &problem)
+        delete_personal_note(&runtime, &generic_problem_identity(&problem))
             .await
             .expect("delete after completion");
         assert!(!problems.join("CF-1979-A.md").exists());
@@ -17207,7 +17224,7 @@ mod tests {
         fs::remove_dir_all(directory.path().join("backups/daily"))
             .expect("remove lifecycle backup");
 
-        let deleted = delete_personal_note(&runtime, &problem)
+        let deleted = delete_personal_note(&runtime, &generic_problem_identity(&problem))
             .await
             .expect("delete personal note");
         assert_eq!(deleted.identity_type, ProblemIdentityType::Lightweight);
@@ -17274,12 +17291,169 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deletion_recovery_identity_encoding_is_injective_and_legacy_compatible() {
+        let tuple_a = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("p").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("a:b").expect("contest key"),
+            ),
+            "c",
+        )
+        .expect("problem identity");
+        let tuple_b = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("p").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("a").expect("contest key"),
+            ),
+            "b:c",
+        )
+        .expect("problem identity");
+        let literal_escape = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("p").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("%3A").expect("contest key"),
+            ),
+            "c",
+        )
+        .expect("problem identity");
+        let literal_separator = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("p").expect("platform"),
+                acm_os_domain::ExternalContestKey::new(":").expect("contest key"),
+            ),
+            "c",
+        )
+        .expect("problem identity");
+        let legacy = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("codeforces").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("1979").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("problem identity");
+
+        assert_ne!(
+            deletion_recovery_identity_key(&tuple_a),
+            deletion_recovery_identity_key(&tuple_b)
+        );
+        assert_eq!(deletion_recovery_identity_key(&tuple_a), "p:a%3Ab:c");
+        assert_eq!(deletion_recovery_identity_key(&tuple_b), "p:a:b%3Ac");
+        assert_ne!(
+            deletion_recovery_identity_key(&literal_escape),
+            deletion_recovery_identity_key(&literal_separator)
+        );
+        assert_eq!(
+            deletion_recovery_identity_key(&literal_escape),
+            "p:%253A:c"
+        );
+        assert_eq!(
+            deletion_recovery_identity_key(&literal_separator),
+            "p:%3A:c"
+        );
+        assert_eq!(deletion_recovery_identity_key(&legacy), "codeforces:1979:A");
+    }
+
+    #[tokio::test]
+    async fn delete_personal_note_resolves_generic_alias_and_separates_strong_tuple() {
+        let (directory, runtime, _vault, problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let note_path = problems.join("CF-1979-A.md");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' \
+               AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (\
+                problem_id, platform, external_contest_key, external_problem_key\
+             ) VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("generic external identity");
+
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("generic problem identity");
+        let other_contest = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc401").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("separate strong identity");
+        let codeforces_problem = generic_problem_identity(&codeforces_problem);
+
+        assert_eq!(
+            runtime
+                .read_personal_note_projection(&atcoder_problem)
+                .await
+                .expect("AtCoder alias note state"),
+            runtime
+                .read_personal_note_projection(&codeforces_problem)
+                .await
+                .expect("Codeforces alias note state")
+        );
+        assert_eq!(
+            delete_personal_note(&runtime, &other_contest).await,
+            Err(PersonalNoteDeletionError::ProblemNotFound)
+        );
+        assert!(note_path.exists());
+        let unchanged: (String, i64) = sqlx::query_as(
+            "SELECT p.identity_type, COUNT(fb.problem_id) \
+             FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             WHERE p.id = ?1 GROUP BY p.id",
+        )
+        .bind(problem_id)
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("unchanged note authority");
+        assert_eq!(unchanged, ("personal".to_owned(), 1));
+        assert!(!directory.path().join("backups/daily").exists());
+
+        delete_personal_note(&runtime, &atcoder_problem)
+            .await
+            .expect("delete through generic alias");
+        assert!(!note_path.exists());
+        assert_eq!(
+            runtime
+                .read_personal_note_projection(&codeforces_problem)
+                .await,
+            Err(PersonalNoteReadError::NotPersonal)
+        );
+        let deleted: (String, i64, i64) = sqlx::query_as(
+            "SELECT p.identity_type, COUNT(fb.problem_id), COUNT(identities.problem_id) \
+             FROM problems p \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             JOIN problem_external_identities identities ON identities.problem_id = p.id \
+             WHERE p.id = ?1 GROUP BY p.id",
+        )
+        .bind(problem_id)
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("deleted note authority");
+        assert_eq!(deleted, ("lightweight".to_owned(), 0, 2));
+    }
+
     #[tokio::test]
     async fn delete_personal_note_refuses_vault_unavailable_without_downgrade() {
         let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
         fs::rename(&vault, vault.with_extension("offline")).expect("make vault unavailable");
 
-        let result = delete_personal_note(&runtime, &problem).await;
+        let result = delete_personal_note(&runtime, &generic_problem_identity(&problem)).await;
         assert_eq!(result, Err(PersonalNoteDeletionError::VaultUnavailable));
         assert!(!directory.path().join("backups/daily").exists());
         let detail = runtime
@@ -20813,7 +20987,7 @@ mod tests {
             Some(reached)
         );
 
-        delete_personal_note(&runtime, &problem)
+        delete_personal_note(&runtime, &generic_problem_identity(&problem))
             .await
             .expect("delete personal note");
         let history = review_history(&runtime, &problem)

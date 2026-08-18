@@ -2293,12 +2293,12 @@ impl PersonalNoteDeletionError {
 pub trait PersonalNoteDeletionPort {
     async fn prepare_personal_note_deletion(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError>;
 
     async fn commit_personal_note_deletion(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         prepared: &PreparedPersonalNoteDeletion,
     ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError>;
 
@@ -2310,7 +2310,7 @@ pub trait PersonalNoteDeletionPort {
 
 pub async fn delete_personal_note<P: PersonalNoteDeletionPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
 ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
     let prepared = port.prepare_personal_note_deletion(problem).await?;
     match port.commit_personal_note_deletion(problem, &prepared).await {
@@ -3529,7 +3529,7 @@ mod tests {
     impl PersonalNoteDeletionPort for FailingPersonalNoteDeletionCommit {
         async fn prepare_personal_note_deletion(
             &self,
-            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _problem: &acm_os_domain::ProblemIdentity,
         ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
             Ok(PreparedPersonalNoteDeletion {
                 vault_relative_path: "Problems/CF-1979-A.md".to_owned(),
@@ -3540,7 +3540,7 @@ mod tests {
 
         async fn commit_personal_note_deletion(
             &self,
-            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _problem: &acm_os_domain::ProblemIdentity,
             _prepared: &PreparedPersonalNoteDeletion,
         ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
             Err(PersonalNoteDeletionError::PersistenceUnavailable)
@@ -3753,8 +3753,14 @@ mod tests {
         let port = FailingPersonalNoteDeletionCommit {
             restored: Cell::new(false),
         };
-        let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest_identity(), "A")
-            .expect("problem");
+        let problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("problem");
         assert_eq!(
             run_ready(delete_personal_note(&port, &problem)),
             Err(PersonalNoteDeletionError::PersistenceUnavailable)

@@ -1934,10 +1934,7 @@ pub async fn delete_personal_note(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::delete_personal_note(database.inner(), &problem)
         .await
         .map(problem_lifecycle_state_dto)
