@@ -5374,7 +5374,7 @@ impl PersonalNoteReadPort for DatabaseRuntime {
 impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
     async fn personal_note_relocation_candidates(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<
         Vec<acm_os_application::PersonalNoteRelocationCandidate>,
         acm_os_application::PersonalNoteBindingRepairError,
@@ -5390,11 +5390,12 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
              FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2",
+             WHERE identities.platform = ?1 AND identities.external_contest_key = ?2 \
+               AND identities.external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(pool)
         .await
         .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
@@ -5443,7 +5444,7 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
 
     async fn rebind_personal_note(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         vault_relative_path: &str,
     ) -> Result<PersonalNoteBinding, acm_os_application::PersonalNoteBindingRepairError> {
         use acm_os_application::PersonalNoteBindingRepairError;
@@ -5465,11 +5466,12 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
                  FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id \
                  LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-                 WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-                   AND identities.external_problem_key = ?2",
+                 WHERE identities.platform = ?1 AND identities.external_contest_key = ?2 \
+                   AND identities.external_problem_key = ?3",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
         .fetch_optional(pool)
         .await
         .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
@@ -5576,7 +5578,7 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
 
     async fn confirm_personal_note_deleted(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<ProblemLifecycleState, acm_os_application::PersonalNoteBindingRepairError> {
         use acm_os_application::PersonalNoteBindingRepairError;
 
@@ -5593,11 +5595,12 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
                  LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-                 WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-                   AND identities.external_problem_key = ?2 AND fb.binding_state = 'location_anomaly'",
+                 WHERE identities.platform = ?1 AND identities.external_contest_key = ?2 \
+                   AND identities.external_problem_key = ?3 AND fb.binding_state = 'location_anomaly'",
             )
-                .bind(problem.contest().contest_id().to_string())
-            .bind(problem.index())
+                .bind(problem.contest().platform().as_str())
+            .bind(problem.contest().external_contest_key().as_str())
+            .bind(problem.external_problem_key())
             .fetch_optional(pool)
             .await
             .map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
@@ -17831,7 +17834,11 @@ mod tests {
     async fn manual_rebind_requires_location_anomaly_and_revalidates_selected_markdown() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
         assert_eq!(
-            acm_os_application::personal_note_relocation_candidates(&runtime, &problem).await,
+            acm_os_application::personal_note_relocation_candidates(
+                &runtime,
+                &generic_problem_identity(&problem),
+            )
+            .await,
             Err(acm_os_application::PersonalNoteBindingRepairError::LocationAnomalyRequired)
         );
         let original = problems.join("CF-1979-A.md");
@@ -17856,7 +17863,10 @@ mod tests {
         ));
 
         let candidates =
-            acm_os_application::personal_note_relocation_candidates(&runtime, &problem)
+            acm_os_application::personal_note_relocation_candidates(
+                &runtime,
+                &generic_problem_identity(&problem),
+            )
                 .await
                 .expect("relocation candidates");
         assert!(candidates.iter().any(|candidate| {
@@ -17864,7 +17874,7 @@ mod tests {
         }));
         let binding = acm_os_application::rebind_personal_note(
             &runtime,
-            &problem,
+            &generic_problem_identity(&problem),
             "Recovered/manual-choice.md",
         )
         .await
@@ -17878,6 +17888,274 @@ mod tests {
             panic!("manual rebind must restore ready state");
         };
         assert_eq!(projection.solution_routes[0].name, "Restored route");
+    }
+
+    #[tokio::test]
+    async fn generic_alias_repair_preserves_one_internal_note_authority() {
+        let (_directory, runtime, vault, problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("atcoder alias");
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest"),
+            ),
+            "A",
+        )
+        .expect("alias identity");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove original");
+        let selected = vault.join("Recovered/alias-choice.md");
+        fs::create_dir_all(selected.parent().expect("candidate parent")).expect("parent");
+        fs::write(&selected, "# Alias repair\n").expect("candidate");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(pool)
+            .await
+            .expect("remove file key");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&generic_problem_identity(&codeforces_problem))
+                .await
+                .expect("anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let candidates = acm_os_application::personal_note_relocation_candidates(
+            &runtime,
+            &atcoder_problem,
+        )
+        .await
+        .expect("atcoder relocation candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == "Recovered/alias-choice.md" && !candidate.occupied
+        }));
+        let binding = acm_os_application::rebind_personal_note(
+            &runtime,
+            &atcoder_problem,
+            "Recovered/alias-choice.md",
+        )
+        .await
+        .expect("alias repair");
+        assert_eq!(binding.vault_relative_path, "Recovered/alias-choice.md");
+        let PersonalNoteReadState::Ready { binding, .. } = runtime
+            .read_personal_note_projection(&generic_problem_identity(&codeforces_problem))
+            .await
+            .expect("codeforces alias read")
+        else {
+            panic!("expected repaired note");
+        };
+        assert_eq!(binding.vault_relative_path, "Recovered/alias-choice.md");
+        let binding_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings")
+            .fetch_one(pool)
+            .await
+            .expect("binding count");
+        assert_eq!(binding_count, 1);
+    }
+
+    #[tokio::test]
+    async fn generic_alias_confirm_deleted_updates_the_shared_internal_problem() {
+        let (_directory, runtime, _vault, problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("internal problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("atcoder alias");
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest"),
+            ),
+            "A",
+        )
+        .expect("alias identity");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove original note");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(pool)
+            .await
+            .expect("remove deterministic evidence");
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&generic_problem_identity(&codeforces_problem))
+                .await
+                .expect("location anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let lifecycle = acm_os_application::confirm_personal_note_deleted(
+            &runtime,
+            &atcoder_problem,
+        )
+        .await
+        .expect("confirm deleted through alias");
+        assert_eq!(lifecycle.identity_type, ProblemIdentityType::Lightweight);
+        assert_eq!(lifecycle.learning_status, acm_os_domain::LearningStatus::Unstarted);
+        let stored_identity_type: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("shared problem identity type");
+        assert_eq!(stored_identity_type, "lightweight");
+        let binding_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("shared binding count");
+        assert_eq!(binding_count, 0);
+        let alias_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM problem_external_identities WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("alias count");
+        assert_eq!(alias_count, 2);
+    }
+
+    #[tokio::test]
+    async fn wrong_generic_repair_tuple_performs_zero_mutation() {
+        let (directory, runtime, vault, problems, codeforces_problem) =
+            personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        fs::remove_file(problems.join("CF-1979-A.md")).expect("remove bound note");
+        sqlx::query("UPDATE file_bindings SET windows_file_key = NULL")
+            .execute(pool)
+            .await
+            .expect("remove deterministic evidence");
+        let codeforces_identity = generic_problem_identity(&codeforces_problem);
+        assert!(matches!(
+            runtime
+                .read_personal_note_projection(&codeforces_identity)
+                .await
+                .expect("real target anomaly"),
+            PersonalNoteReadState::LocationAnomaly { .. }
+        ));
+        let binding_state: String = sqlx::query_scalar("SELECT binding_state FROM file_bindings")
+            .fetch_one(pool)
+            .await
+            .expect("real target binding state");
+        assert_eq!(binding_state, "location_anomaly");
+        let sentinel = vault.join("Recovered/wrong-tuple-sentinel.md");
+        fs::create_dir_all(sentinel.parent().expect("sentinel parent")).expect("sentinel parent");
+        fs::write(&sentinel, "# Wrong tuple sentinel\n").expect("sentinel file");
+        let sentinel_bytes = fs::read(&sentinel).expect("sentinel bytes before");
+        let before_binding: (String, String, String) = sqlx::query_as(
+            "SELECT vault_relative_path, content_digest, binding_state FROM file_bindings",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("binding before");
+        let before_lifecycle: (String, String) = sqlx::query_as(
+            "SELECT p.identity_type, pls.learning_status FROM problems p \
+             JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             WHERE p.id = (SELECT problem_id FROM file_bindings)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("lifecycle before");
+        let backup_directory = directory.path().join("backups/daily");
+        let before_backup_count = if backup_directory.exists() {
+            files_under(&backup_directory).len()
+        } else {
+            0
+        };
+        let wrong = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("codeforces").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("1980").expect("contest"),
+            ),
+            "A",
+        )
+        .expect("wrong tuple");
+        assert_eq!(
+            acm_os_application::personal_note_relocation_candidates(&runtime, &wrong).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::ProblemNotFound)
+        );
+        assert_eq!(
+            acm_os_application::rebind_personal_note(
+                &runtime,
+                &wrong,
+                "Recovered/wrong-tuple-sentinel.md",
+            )
+            .await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::ProblemNotFound)
+        );
+        assert_eq!(
+            acm_os_application::confirm_personal_note_deleted(&runtime, &wrong).await,
+            Err(acm_os_application::PersonalNoteBindingRepairError::LocationAnomalyRequired)
+        );
+        let after_binding: (String, String, String) = sqlx::query_as(
+            "SELECT vault_relative_path, content_digest, binding_state FROM file_bindings",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("binding after");
+        let after_lifecycle: (String, String) = sqlx::query_as(
+            "SELECT p.identity_type, pls.learning_status FROM problems p \
+             JOIN problem_learning_states pls ON pls.problem_id = p.id \
+             WHERE p.id = (SELECT problem_id FROM file_bindings)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("lifecycle after");
+        let after_sentinel_bytes = fs::read(&sentinel).expect("sentinel bytes after");
+        assert_eq!(after_binding, before_binding);
+        assert_eq!(after_lifecycle, before_lifecycle);
+        assert_eq!(after_sentinel_bytes, sentinel_bytes);
+        let after_binding_state: String = sqlx::query_scalar(
+            "SELECT binding_state FROM file_bindings",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("real target binding state after");
+        assert_eq!(after_binding_state, "location_anomaly");
+        let sentinel_binding_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_bindings WHERE vault_relative_path = ?1",
+        )
+        .bind("Recovered/wrong-tuple-sentinel.md")
+        .fetch_one(pool)
+        .await
+        .expect("sentinel binding count");
+        assert_eq!(sentinel_binding_count, 0);
+        assert_eq!(
+            if backup_directory.exists() {
+                files_under(&backup_directory).len()
+            } else {
+                0
+            },
+            before_backup_count
+        );
     }
 
     #[tokio::test]
@@ -17907,7 +18185,10 @@ mod tests {
             PersonalNoteReadState::LocationAnomaly { .. }
         ));
         let candidates =
-            acm_os_application::personal_note_relocation_candidates(&runtime, &problem_a)
+            acm_os_application::personal_note_relocation_candidates(
+                &runtime,
+                &generic_problem_identity(&problem_a),
+            )
                 .await
                 .expect("relocation candidates");
         assert!(candidates.iter().any(|candidate| {
@@ -17916,7 +18197,7 @@ mod tests {
         assert_eq!(
             acm_os_application::rebind_personal_note(
                 &runtime,
-                &problem_a,
+                &generic_problem_identity(&problem_a),
                 "Problems/CF-1979-B.md",
             )
             .await,
@@ -17954,14 +18235,22 @@ mod tests {
                 .await
                 .expect("knowledge binding");
         let candidates =
-            acm_os_application::personal_note_relocation_candidates(&runtime, &problem)
+            acm_os_application::personal_note_relocation_candidates(
+                &runtime,
+                &generic_problem_identity(&problem),
+            )
                 .await
                 .expect("relocation candidates");
         assert!(candidates.iter().any(|candidate| {
             candidate.vault_relative_path == knowledge_path && candidate.occupied
         }));
         assert_eq!(
-            acm_os_application::rebind_personal_note(&runtime, &problem, &knowledge_path).await,
+            acm_os_application::rebind_personal_note(
+                &runtime,
+                &generic_problem_identity(&problem),
+                &knowledge_path,
+            )
+            .await,
             Err(acm_os_application::PersonalNoteBindingRepairError::CandidateOccupied)
         );
     }
@@ -17990,7 +18279,10 @@ mod tests {
                 .expect("remove anomaly fixture backup");
         }
 
-        let lifecycle = acm_os_application::confirm_personal_note_deleted(&runtime, &problem)
+        let lifecycle = acm_os_application::confirm_personal_note_deleted(
+            &runtime,
+            &generic_problem_identity(&problem),
+        )
             .await
             .expect("confirm missing note deleted");
         assert_eq!(lifecycle.identity_type, ProblemIdentityType::Lightweight);
@@ -18055,7 +18347,11 @@ mod tests {
         ));
         fs::rename(&vault, directory.path().join("vault-offline")).expect("take vault offline");
         assert_eq!(
-            acm_os_application::confirm_personal_note_deleted(&runtime, &problem).await,
+            acm_os_application::confirm_personal_note_deleted(
+                &runtime,
+                &generic_problem_identity(&problem),
+            )
+            .await,
             Err(acm_os_application::PersonalNoteBindingRepairError::VaultUnavailable)
         );
         let identity_type: String = sqlx::query_scalar(
@@ -18084,7 +18380,11 @@ mod tests {
             PersonalNoteReadState::LocationAnomaly { .. }
         ));
         assert_eq!(
-            acm_os_application::confirm_personal_note_deleted(&runtime, &problem).await,
+            acm_os_application::confirm_personal_note_deleted(
+                &runtime,
+                &generic_problem_identity(&problem),
+            )
+            .await,
             Err(acm_os_application::PersonalNoteBindingRepairError::ReviewInProgress)
         );
     }

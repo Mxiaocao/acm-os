@@ -2001,31 +2001,31 @@ impl PersonalNoteBindingRepairError {
 pub trait PersonalNoteBindingRepairPort {
     async fn personal_note_relocation_candidates(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError>;
 
     async fn rebind_personal_note(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         vault_relative_path: &str,
     ) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError>;
 
     async fn confirm_personal_note_deleted(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError>;
 }
 
 pub async fn personal_note_relocation_candidates<P: PersonalNoteBindingRepairPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
 ) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError> {
     port.personal_note_relocation_candidates(problem).await
 }
 
 pub async fn rebind_personal_note<P: PersonalNoteBindingRepairPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     vault_relative_path: impl AsRef<str>,
 ) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError> {
     port.rebind_personal_note(problem, vault_relative_path.as_ref())
@@ -2034,7 +2034,7 @@ pub async fn rebind_personal_note<P: PersonalNoteBindingRepairPort>(
 
 pub async fn confirm_personal_note_deleted<P: PersonalNoteBindingRepairPort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
 ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError> {
     port.confirm_personal_note_deleted(problem).await
 }

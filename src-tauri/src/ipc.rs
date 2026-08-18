@@ -1960,10 +1960,7 @@ pub async fn personal_note_relocation_candidates(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
 ) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::personal_note_relocation_candidates(&*database, &problem)
         .await
         .map(|candidates| {
@@ -1983,10 +1980,7 @@ pub async fn rebind_personal_note(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: RebindPersonalNoteInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::rebind_personal_note(&*database, &problem, input.vault_relative_path)
         .await
         .map(personal_note_binding_dto)
@@ -1998,10 +1992,7 @@ pub async fn confirm_personal_note_deleted(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
-        .map_err(|_| "invalid_problem_identity")?;
-    let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
-        .map_err(|_| "invalid_problem_identity")?;
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::confirm_personal_note_deleted(&*database, &problem)
         .await
         .map(problem_lifecycle_state_dto)
