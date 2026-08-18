@@ -6664,7 +6664,7 @@ impl ContestReadPort for DatabaseRuntime {
         let (title, source_url, starts_at_utc, import_status, facts_status, archived_at_utc) =
             row.ok_or(ContestReadError::NotFound)?;
         let rows: Vec<(String, String, Option<i64>, i64, String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT identities.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type, cp.final_contest_result, cp.upsolve_decision, pls.learning_status FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities identities ON identities.problem_id = p.id AND identities.platform = 'codeforces' JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN contest_external_identities contest_identity ON contest_identity.contest_id = cp.contest_id AND contest_identity.platform = 'codeforces' WHERE contest_identity.external_contest_key = ?1 ORDER BY cp.ordinal",
+            "SELECT identities.external_problem_key, p.title, p.rating, EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), p.identity_type, cp.final_contest_result, cp.upsolve_decision, pls.learning_status FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_external_identities identities ON identities.problem_id = p.id AND identities.platform = 'codeforces' JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN contest_external_identities contest_identity ON contest_identity.contest_id = cp.contest_id AND contest_identity.platform = 'codeforces' WHERE contest_identity.external_contest_key = ?1 AND identities.external_contest_key = contest_identity.external_contest_key ORDER BY cp.ordinal",
         )
         .bind(contest.contest_id().to_string())
         .fetch_all(pool)
@@ -17788,6 +17788,85 @@ mod tests {
             .await
             .expect("pending problem detail");
         assert_eq!(pending.statement, StatementReadState::Pending);
+    }
+
+    #[tokio::test]
+    async fn contest_detail_projects_only_problem_identity_in_requested_contest_namespace() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("pool");
+
+        for (id, external_key) in [(100_i64, "100"), (200_i64, "200")] {
+            sqlx::query(
+                "INSERT INTO contests (id, title, source_url, import_status, facts_status, facts_completed_at_utc) \
+                 VALUES (?1, ?2, ?3, 'complete', 'completed', '2026-08-10T12:00:00Z')",
+            )
+            .bind(id)
+            .bind(format!("Contest {external_key}"))
+            .bind(format!("https://codeforces.com/contest/{external_key}"))
+            .execute(pool)
+            .await
+            .expect("contest fixture");
+            sqlx::query(
+                "INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) \
+                 VALUES (?1, 'codeforces', ?2)",
+            )
+            .bind(id)
+            .bind(external_key)
+            .execute(pool)
+            .await
+            .expect("contest identity fixture");
+        }
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url) \
+             VALUES (300, 'Shared internal problem X', 'https://codeforces.com/problemset/problem/100/A')",
+        )
+        .execute(pool)
+        .await
+        .expect("problem fixture");
+        for (external_contest_key, external_problem_key) in [("100", "A"), ("200", "B")] {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                 (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (300, 'codeforces', ?1, ?2)",
+            )
+            .bind(external_contest_key)
+            .bind(external_problem_key)
+            .execute(pool)
+            .await
+            .expect("problem identity fixture");
+        }
+        sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (300)")
+            .execute(pool)
+            .await
+            .expect("learning state fixture");
+        for contest_id in [100_i64, 200_i64] {
+            sqlx::query(
+                "INSERT INTO contest_problems \
+                 (contest_id, problem_id, ordinal, import_state, final_contest_result, upsolve_decision) \
+                 VALUES (?1, 300, 1, 'ready', 'wrong_answer', 'planned')",
+            )
+            .bind(contest_id)
+            .execute(pool)
+            .await
+            .expect("contest problem fixture");
+        }
+
+        let contest_100 = acm_os_domain::CodeforcesContestIdentity::new(100).expect("contest 100");
+        let detail_100 = runtime
+            .contest_detail(&contest_100)
+            .await
+            .expect("contest 100 detail");
+        assert_eq!(detail_100.problems.len(), 1);
+        assert_eq!(detail_100.problems[0].problem.problem.index(), "A");
+
+        let contest_200 = acm_os_domain::CodeforcesContestIdentity::new(200).expect("contest 200");
+        let detail_200 = runtime
+            .contest_detail(&contest_200)
+            .await
+            .expect("contest 200 detail");
+        assert_eq!(detail_200.problems.len(), 1);
+        assert_eq!(detail_200.problems[0].problem.problem.index(), "B");
     }
 
     #[tokio::test]
