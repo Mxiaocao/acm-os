@@ -2290,6 +2290,18 @@ pub async fn accept_existing_knowledge_candidate(
     input: KnowledgeCandidateAcceptInput,
 ) -> Result<AcceptedKnowledgeCandidateDto, &'static str> {
     let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    let problem = acm_os_domain::ProblemIdentity::new(
+        acm_os_domain::ContestIdentity::new(
+            acm_os_domain::PlatformKey::new(problem.contest().platform())
+                .map_err(|_| "invalid_problem_identity")?,
+            acm_os_domain::ExternalContestKey::new(
+                problem.contest().contest_id().to_string(),
+            )
+            .map_err(|_| "invalid_problem_identity")?,
+        ),
+        problem.index(),
+    )
+    .map_err(|_| "invalid_problem_identity")?;
     acm_os_application::accept_existing_knowledge_candidate(
         database.inner(),
         &problem,

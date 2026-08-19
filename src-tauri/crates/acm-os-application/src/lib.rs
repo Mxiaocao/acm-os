@@ -3437,7 +3437,7 @@ pub trait KnowledgeCandidatePort {
 
     async fn accept_existing_knowledge_candidate(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         fingerprint: &str,
         knowledge_node_id: &str,
     ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError>;
@@ -3445,7 +3445,7 @@ pub trait KnowledgeCandidatePort {
 
 pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     fingerprint: &str,
     knowledge_node_id: &str,
 ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {

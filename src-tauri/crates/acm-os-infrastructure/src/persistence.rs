@@ -20,7 +20,7 @@ use acm_os_application::{
     ContestSeries, ContestShelfItem, CreateContestPlacement, CreatedPersonalNoteFile,
     ExtraProblemLinkTarget, KnowledgeBindingRepairError, KnowledgeBindingRepairPort,
     KnowledgeCandidateDisposition, KnowledgeCandidateError, KnowledgeCandidatePort,
-    KnowledgeCandidateProjection, KnowledgeDetailPort, KnowledgeDetailProjection,
+    KnowledgeDetailPort, KnowledgeDetailProjection,
     KnowledgeIndexError, KnowledgeIndexPort, KnowledgeIndexProjection, KnowledgeLinkProjection,
     KnowledgeLinkResolution, KnowledgeLocationState, KnowledgeNodeProjection,
     KnowledgeRelationPort, KnowledgeRelocationCandidate, KnowledgeUnderstandingPort,
@@ -1505,7 +1505,7 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
 
     async fn accept_existing_knowledge_candidate(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         fingerprint: &str,
         knowledge_node_id: &str,
     ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
@@ -1513,12 +1513,13 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
-        let (problem_id, identity_type) = candidate_problem_row(pool, problem).await?;
+        let (problem_id, identity_type) = candidate_problem_row_generic(pool, problem).await?;
         if identity_type != "personal" {
             return Err(KnowledgeCandidateError::NotPersonal);
         }
-        let candidate = load_candidate_projection(pool, problem, problem_id, fingerprint).await?;
-        if candidate.disposition == KnowledgeCandidateDisposition::Ignored {
+        let (_candidate_fingerprint, target_ref, disposition) =
+            load_candidate_content(pool, problem_id, fingerprint).await?;
+        if disposition == KnowledgeCandidateDisposition::Ignored {
             return Err(KnowledgeCandidateError::IntegrityViolation);
         }
         let index = self
@@ -1528,7 +1529,7 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         let matches = index
             .nodes
             .iter()
-            .filter(|node| candidate_target_matches(&candidate.target_ref, node))
+            .filter(|node| candidate_target_matches(&target_ref, node))
             .collect::<Vec<_>>();
         let [target] = matches.as_slice() else {
             return Err(KnowledgeCandidateError::IntegrityViolation);
@@ -1536,11 +1537,10 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         if target.knowledge_node_id != knowledge_node_id {
             return Err(KnowledgeCandidateError::IntegrityViolation);
         }
-        let generic_problem = generic_problem_identity(problem);
         acm_os_application::add_prerequisite_link(
             self,
-            &generic_problem,
-            candidate.target_ref.clone(),
+            problem,
+            target_ref.clone(),
         )
         .await
         .map_err(map_patch_to_candidate_error)?;
@@ -1561,7 +1561,7 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         }
         Ok(AcceptedKnowledgeCandidateProjection {
             knowledge_node_id: knowledge_node_id.to_owned(),
-            target_ref: candidate.target_ref,
+            target_ref,
         })
     }
 }
@@ -1611,31 +1611,11 @@ async fn candidate_problem_row_generic(
     .ok_or(KnowledgeCandidateError::ProblemNotFound)
 }
 
-async fn candidate_problem_row(
+async fn load_candidate_content(
     pool: &SqlitePool,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
-) -> Result<(i64, String), KnowledgeCandidateError> {
-    sqlx::query_as(
-        "SELECT p.id, p.identity_type FROM problems p \
-         JOIN problem_external_identities identities ON identities.problem_id = p.id \
-         WHERE identities.platform = 'codeforces' \
-           AND identities.external_contest_key = ?1 \
-           AND identities.external_problem_key = ?2",
-    )
-    .bind(problem.contest().contest_id().to_string())
-    .bind(problem.index())
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
-    .ok_or(KnowledgeCandidateError::ProblemNotFound)
-}
-
-async fn load_candidate_projection(
-    pool: &SqlitePool,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
     problem_id: i64,
     fingerprint: &str,
-) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+) -> Result<(String, String, KnowledgeCandidateDisposition), KnowledgeCandidateError> {
     let row: Option<(String, String, String)> = sqlx::query_as(
         "SELECT fingerprint, target_ref, disposition FROM knowledge_candidate_records \
          WHERE problem_id = ?1 AND fingerprint = ?2",
@@ -1647,12 +1627,11 @@ async fn load_candidate_projection(
     .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
     let (fingerprint, target_ref, disposition) =
         row.ok_or(KnowledgeCandidateError::CandidateNotFound)?;
-    Ok(KnowledgeCandidateProjection {
-        problem: problem.clone(),
+    Ok((
         fingerprint,
         target_ref,
-        disposition: parse_candidate_disposition(&disposition)?,
-    })
+        parse_candidate_disposition(&disposition)?,
+    ))
 }
 
 async fn load_candidate_read_projection(
@@ -13337,7 +13316,7 @@ mod tests {
     async fn first_candidate_disposition_change_uses_pre_mutation_daily_backup() {
         let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
         let pool = runtime._pool.as_ref().expect("ready pool");
-        let (problem_id, _) = candidate_problem_row(pool, &problem)
+        let (problem_id, _) = candidate_problem_row_generic(pool, &generic_problem_identity(&problem))
             .await
             .expect("personal problem");
         let fingerprint = "c3".repeat(32);
@@ -13546,6 +13525,32 @@ mod tests {
     #[tokio::test]
     async fn accepting_existing_knowledge_candidate_patches_markdown_then_verifies_relation() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'atcoder', 'abc400', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("atcoder alias");
+        let atcoder_problem = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc400").expect("contest"),
+            ),
+            "A",
+        )
+        .expect("generic problem");
         let knowledge = problems.parent().expect("vault").join("Knowledge");
         fs::write(knowledge.join("Segment Tree.md"), "# Segment Tree\n")
             .expect("knowledge markdown");
@@ -13568,13 +13573,14 @@ mod tests {
 
         let accepted = accept_existing_knowledge_candidate(
             &runtime,
-            &problem,
+            &atcoder_problem,
             &fingerprint,
             &target.knowledge_node_id,
         )
         .await
         .expect("accept existing node");
         assert_eq!(accepted.knowledge_node_id, target.knowledge_node_id);
+        assert_eq!(accepted.target_ref, "Segment Tree");
 
         let binding = match runtime
             .read_personal_note_projection(&generic_problem_identity(&problem))
@@ -13586,6 +13592,7 @@ mod tests {
         };
         let markdown =
             fs::read_to_string(vault.join(binding.vault_relative_path)).expect("patched markdown");
+        assert_eq!(markdown.matches("- [[Segment Tree]]").count(), 1);
         assert!(markdown.contains("## 前置知识\n- [[Segment Tree]]"));
         assert!(
             list_knowledge_candidates(&runtime, &generic_problem_identity(&problem))
@@ -13600,6 +13607,189 @@ mod tests {
             .related_problems
             .iter()
             .any(|item| item.problem == problem));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_one(pool)
+            .await
+            .expect("binding count"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM knowledge_candidate_records \
+                 WHERE problem_id = ?1 AND fingerprint = ?2",
+            )
+            .bind(problem_id)
+            .bind(&fingerprint)
+            .fetch_one(pool)
+            .await
+            .expect("candidate count"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM knowledge_link_index \
+                 WHERE source_kind = 'problem' AND source_id = ?1 \
+                   AND target_knowledge_node_id = ?2 AND resolution = 'resolved'",
+            )
+            .bind(problem_id.to_string())
+            .bind(&target.knowledge_node_id)
+            .fetch_one(pool)
+            .await
+            .expect("exact relation count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_wrong_generic_tuple_has_zero_mutation() {
+        let (directory, runtime, vault, _problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let fingerprint = "ad".repeat(32);
+        register_knowledge_candidate(
+            &runtime,
+            &generic_problem_identity(&problem),
+            &fingerprint,
+            "Fenwick Tree",
+        )
+        .await
+        .expect("candidate");
+        let binding = match runtime
+            .read_personal_note_projection(&generic_problem_identity(&problem))
+            .await
+            .expect("binding")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready note, got {other:?}"),
+        };
+        let note_path = vault.join(&binding.vault_relative_path);
+        let before_markdown = fs::read(&note_path).expect("markdown");
+        let before_binding_path = binding.vault_relative_path.clone();
+        let before_digest = binding.content_digest.clone();
+        let recovery_directory = directory.path().join("markdown-recovery");
+        let backup_directory = directory.path().join("backups/daily");
+        let before_recovery = if recovery_directory.exists() {
+            files_under(&recovery_directory)
+        } else {
+            Vec::new()
+        };
+        let before_backups = if backup_directory.exists() {
+            files_under(&backup_directory)
+        } else {
+            Vec::new()
+        };
+        let before_lifecycle = runtime
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
+            .await
+            .expect("lifecycle before");
+        let before_candidate: (String, String) = sqlx::query_as(
+            "SELECT fingerprint, disposition FROM knowledge_candidate_records \
+             WHERE fingerprint = ?1",
+        )
+        .bind(&fingerprint)
+        .fetch_one(pool)
+        .await
+        .expect("candidate before");
+        let before_relations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_link_index")
+            .fetch_one(pool)
+            .await
+            .expect("relations");
+        let before_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM critical_operations")
+            .fetch_one(pool)
+            .await
+            .expect("operations");
+        let before_knowledge_nodes: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_nodes")
+                .fetch_one(pool)
+                .await
+                .expect("knowledge nodes");
+        let wrong = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("atcoder").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("abc401").expect("contest"),
+            ),
+            "A",
+        )
+        .expect("wrong problem");
+        assert_eq!(
+            accept_existing_knowledge_candidate(
+                &runtime,
+                &wrong,
+                &fingerprint,
+                "missing-node",
+            )
+            .await,
+            Err(KnowledgeCandidateError::ProblemNotFound)
+        );
+        assert_eq!(fs::read(note_path).expect("unchanged markdown"), before_markdown);
+        let after_binding = match runtime
+            .read_personal_note_projection(&generic_problem_identity(&problem))
+            .await
+            .expect("binding after")
+        {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            other => panic!("expected ready note, got {other:?}"),
+        };
+        assert_eq!(after_binding.vault_relative_path, before_binding_path);
+        assert_eq!(after_binding.content_digest, before_digest);
+        assert_eq!(
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT fingerprint, disposition FROM knowledge_candidate_records \
+                 WHERE fingerprint = ?1",
+            )
+            .bind(&fingerprint)
+            .fetch_one(pool)
+            .await
+            .expect("candidate after"),
+            before_candidate
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_link_index")
+                .fetch_one(pool)
+                .await
+                .expect("relations after"),
+            before_relations
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM critical_operations")
+                .fetch_one(pool)
+                .await
+                .expect("operations after"),
+            before_operations
+        );
+        assert_eq!(
+            if recovery_directory.exists() {
+                files_under(&recovery_directory)
+            } else {
+                Vec::new()
+            },
+            before_recovery
+        );
+        assert_eq!(
+            if backup_directory.exists() {
+                files_under(&backup_directory)
+            } else {
+                Vec::new()
+            },
+            before_backups
+        );
+        assert_eq!(
+            runtime
+                .load_problem_lifecycle(&generic_problem_identity(&problem))
+                .await
+                .expect("lifecycle after"),
+            before_lifecycle
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM knowledge_nodes")
+                .fetch_one(pool)
+                .await
+                .expect("knowledge nodes after"),
+            before_knowledge_nodes
+        );
     }
 
     #[tokio::test]
@@ -13660,7 +13850,7 @@ mod tests {
 
         accept_existing_knowledge_candidate(
             &runtime,
-            &problem,
+            &generic_problem_identity(&problem),
             &fingerprint,
             &target.knowledge_node_id,
         )
@@ -13709,7 +13899,13 @@ mod tests {
         let before = fs::read(&note_path).expect("before markdown");
 
         assert_eq!(
-            accept_existing_knowledge_candidate(&runtime, &problem, &fingerprint, &target_id).await,
+            accept_existing_knowledge_candidate(
+                &runtime,
+                &generic_problem_identity(&problem),
+                &fingerprint,
+                &target_id,
+            )
+            .await,
             Err(KnowledgeCandidateError::IntegrityViolation)
         );
         assert_eq!(fs::read(note_path).expect("unchanged markdown"), before);
