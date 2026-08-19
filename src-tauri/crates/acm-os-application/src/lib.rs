@@ -3430,10 +3430,10 @@ pub trait KnowledgeCandidatePort {
 
     async fn set_knowledge_candidate_disposition(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         fingerprint: &str,
         disposition: KnowledgeCandidateDisposition,
-    ) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError>;
+    ) -> Result<KnowledgeCandidateReadProjection, KnowledgeCandidateError>;
 
     async fn accept_existing_knowledge_candidate(
         &self,
@@ -3479,10 +3479,10 @@ pub async fn register_knowledge_candidate<P: KnowledgeCandidatePort>(
 
 pub async fn set_knowledge_candidate_disposition<P: KnowledgeCandidatePort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     fingerprint: &str,
     disposition: KnowledgeCandidateDisposition,
-) -> Result<KnowledgeCandidateProjection, KnowledgeCandidateError> {
+) -> Result<KnowledgeCandidateReadProjection, KnowledgeCandidateError> {
     let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
     port.set_knowledge_candidate_disposition(problem, &fingerprint, disposition)
         .await

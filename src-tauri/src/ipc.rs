@@ -2265,7 +2265,8 @@ pub async fn set_knowledge_candidate_disposition(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: KnowledgeCandidateDispositionInput,
 ) -> Result<KnowledgeCandidateDto, &'static str> {
-    let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
+    let problem_index = input.index.clone();
+    let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let disposition = match input.disposition.as_str() {
         "pending" => acm_os_application::KnowledgeCandidateDisposition::Pending,
         "acceptedIntent" => acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent,
@@ -2279,7 +2280,7 @@ pub async fn set_knowledge_candidate_disposition(
         disposition,
     )
     .await
-    .map(|item| knowledge_candidate_dto(item, &[]))
+    .map(|item| knowledge_candidate_read_dto(item, input.contest_id, &problem_index, &[]))
     .map_err(knowledge_candidate_error_code)
 }
 
