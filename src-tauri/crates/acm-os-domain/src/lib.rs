@@ -2,6 +2,12 @@
 
 pub const BOUNDARY_NAME: &str = "acm-os-domain";
 
+mod identity;
+
+pub use identity::{
+    ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CodeforcesContestIdentity {
     contest_id: u64,

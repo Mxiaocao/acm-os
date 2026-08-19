@@ -6,6 +6,10 @@ use std::path::{Component, Path};
 
 pub const BOUNDARY_NAME: &str = "acm-os-application";
 
+pub use acm_os_domain::{
+    ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,
+};
+
 /// The canonical, adapter-validated import contract.  It deliberately has no
 /// network or database details: adapters produce it and persistence consumes
 /// it after identity validation.
@@ -3120,7 +3124,7 @@ pub trait KnowledgeCandidatePort {
 
     async fn accept_existing_knowledge_candidate(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem: &acm_os_domain::ProblemIdentity,
         fingerprint: &str,
         knowledge_node_id: &str,
     ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError>;
@@ -3128,7 +3132,7 @@ pub trait KnowledgeCandidatePort {
 
 pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(
     port: &P,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    problem: &acm_os_domain::ProblemIdentity,
     fingerprint: &str,
     knowledge_node_id: &str,
 ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
