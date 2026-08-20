@@ -9585,6 +9585,7 @@ async fn validate_schema_contract(
             | 24
             | 25
             | 26
+            | 27
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9718,7 +9719,7 @@ async fn validate_schema_contract(
         validate_contest_library_contract(pool).await?;
     }
     if schema_version >= 26 {
-        validate_external_identity_contract(pool).await?;
+        validate_external_identity_contract(pool, schema_version).await?;
     }
     Ok(())
 }
@@ -10047,6 +10048,14 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "contest_series".to_owned(),
             ),
         ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 27 {
+        expected_objects.push((
+            "index".to_owned(),
+            "problem_external_identities_one_key_per_problem_contest".to_owned(),
+            "problem_external_identities".to_owned(),
+        ));
         expected_objects.sort();
     }
     expected_objects
@@ -10833,6 +10842,7 @@ async fn validate_knowledge_index_contract(pool: &SqlitePool) -> Result<(), Star
 
 async fn validate_external_identity_contract(
     pool: &SqlitePool,
+    schema_version: i64,
 ) -> Result<(), StartupRecoveryReason> {
     validate_table_columns(
         pool,
@@ -10911,7 +10921,16 @@ async fn validate_external_identity_contract(
         "problem_external_identities",
         &["platform", "external_contest_key", "external_problem_key"],
     )
-    .await
+    .await?;
+    if schema_version >= 27 {
+        validate_strong_identity_unique(
+            pool,
+            "problem_external_identities",
+            &["problem_id", "platform", "external_contest_key"],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn validate_external_identity_fk(
@@ -11500,6 +11519,38 @@ mod tests {
         let problem = generic_problem_identity(problem);
         acm_os_application::transition_problem_lifecycle(runtime, &problem, action, today).await
     }
+
+    async fn s0_migrate_from_version(
+        directory: &TempDir,
+        version: i64,
+    ) -> (PathBuf, SqlitePool) {
+        let path = directory.path().join("s0.sqlite3");
+        let pool = connect_read_write(&path)
+            .await
+            .expect("s0 database connection");
+        MIGRATOR
+            .run_to(version, &pool)
+            .await
+            .expect("s0 fixture migration");
+        (path, pool)
+    }
+
+    async fn resolve_problem_id_by_identity(
+        connection: &mut sqlx::SqliteConnection,
+        problem: &acm_os_domain::ProblemIdentity,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = ?1 AND external_contest_key = ?2 \
+               AND external_problem_key = ?3",
+        )
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
+        .fetch_optional(&mut *connection)
+        .await
+    }
+
     const FAILING_SPECIAL_SQL: &str = "\
         CREATE TABLE special_partial_change (id INTEGER PRIMARY KEY);\
         UPDATE parents SET label = 'partially changed';\
@@ -11541,7 +11592,7 @@ mod tests {
 
     #[test]
     fn production_migrator_embeds_the_special_version() {
-        assert_eq!(supported_schema_version(), 26);
+        assert_eq!(supported_schema_version(), 27);
         assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
@@ -11685,6 +11736,220 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
+    }
+
+    async fn insert_schema26_problem(pool: &SqlitePool, id: i64) {
+        sqlx::query("INSERT INTO problems (id, title, source_url) VALUES (?1, ?2, ?3)")
+            .bind(id)
+            .bind(format!("problem-{id}"))
+            .bind(format!("https://example.test/problem/{id}"))
+            .execute(pool)
+            .await
+            .expect("schema 26 problem");
+        sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (?1)")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("schema 26 learning state");
+    }
+
+    async fn insert_identity(
+        pool: &SqlitePool,
+        problem_id: i64,
+        platform: &str,
+        contest: &str,
+        problem_key: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(problem_id)
+        .bind(platform)
+        .bind(contest)
+        .bind(problem_key)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn i3_t1_schema26_to_27_preserves_legal_identity_and_restart() {
+        let directory = TempDir::new().expect("temporary app data");
+        let (path, pool) = s0_migrate_from_version(&directory, 26).await;
+        insert_schema26_problem(&pool, 1).await;
+        insert_identity(&pool, 1, "codeforces", "1234", "A")
+            .await
+            .expect("legal identity");
+        pool.close().await;
+        fs::rename(&path, directory.path().join(DATABASE_FILENAME)).expect("canonical fixture");
+
+        let pool = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("canonical fixture pool");
+        let runtime_pool = run_migrations(
+            &directory.path().join(DATABASE_FILENAME),
+            pool,
+            &MIGRATOR,
+            26,
+        )
+        .await
+        .expect("migration 27");
+        assert_eq!(
+            inspect_schema_version(&runtime_pool)
+                .await
+                .expect("version"),
+            27
+        );
+        validate_schema_contract(&runtime_pool, 27)
+            .await
+            .expect("schema 27 contract");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM problem_external_identities \
+                 WHERE problem_id = 1 AND platform = 'codeforces' \
+                   AND external_contest_key = '1234' AND external_problem_key = 'A'",
+            )
+            .fetch_one(&runtime_pool)
+            .await
+            .expect("identity count"),
+            1
+        );
+        runtime_pool.close().await;
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.status(),
+            &StartupGateStatus::Ready { schema_version: 27 }
+        );
+    }
+
+    #[tokio::test]
+    async fn i3_t2_same_problem_contest_different_key_is_rejected() {
+        let directory = TempDir::new().expect("temporary app data");
+        let (_path, pool) = s0_migrate_from_version(&directory, 26).await;
+        insert_schema26_problem(&pool, 1).await;
+        let pool = run_migrations(&directory.path().join("s0.sqlite3"), pool, &MIGRATOR, 26)
+            .await
+            .expect("migration 27");
+        insert_identity(&pool, 1, "codeforces", "1234", "A")
+            .await
+            .expect("first identity");
+        assert!(insert_identity(&pool, 1, "codeforces", "1234", "B")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn i3_t3_conflicting_schema26_rows_fail_closed_without_repair() {
+        let directory = TempDir::new().expect("temporary app data");
+        let (path, pool) = s0_migrate_from_version(&directory, 26).await;
+        insert_schema26_problem(&pool, 1).await;
+        insert_identity(&pool, 1, "codeforces", "1234", "A")
+            .await
+            .expect("first conflicting identity");
+        insert_identity(&pool, 1, "codeforces", "1234", "B")
+            .await
+            .expect("second conflicting identity");
+        let migration = run_migrations(&path, pool, &MIGRATOR, 26).await;
+        assert!(matches!(
+            migration,
+            Err(StartupRecoveryReason::MigrationFailed)
+        ));
+
+        let inspection = connect_read_only(&path)
+            .await
+            .expect("inspect failed migration");
+        assert_eq!(
+            inspect_schema_version(&inspection).await.expect("version"),
+            26
+        );
+        let preserved_tuples: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT problem_id, platform, external_contest_key, external_problem_key \
+             FROM problem_external_identities \
+             WHERE problem_id = 1 AND platform = 'codeforces' \
+               AND external_contest_key = '1234' \
+             ORDER BY external_problem_key",
+        )
+        .fetch_all(&inspection)
+        .await
+        .expect("preserved conflict tuples");
+        assert_eq!(
+            preserved_tuples,
+            vec![
+                (
+                    1,
+                    "codeforces".to_owned(),
+                    "1234".to_owned(),
+                    "A".to_owned(),
+                ),
+                (
+                    1,
+                    "codeforces".to_owned(),
+                    "1234".to_owned(),
+                    "B".to_owned(),
+                ),
+            ]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("schema generation"),
+            26
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 27 AND success = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("migration ledger"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn i3_t4_t5_t6_legal_identity_combinations_remain_allowed() {
+        let directory = TempDir::new().expect("temporary app data");
+        let (path, pool) = s0_migrate_from_version(&directory, 26).await;
+        insert_schema26_problem(&pool, 1).await;
+        insert_schema26_problem(&pool, 2).await;
+        let pool = run_migrations(&path, pool, &MIGRATOR, 26)
+            .await
+            .expect("migration 27");
+
+        insert_identity(&pool, 1, "codeforces", "1234", "A")
+            .await
+            .expect("base identity");
+        insert_identity(&pool, 1, "codeforces", "5678", "B")
+            .await
+            .expect("different contest");
+        insert_identity(&pool, 1, "atcoder", "1234", "C")
+            .await
+            .expect("different platform");
+        insert_identity(&pool, 2, "codeforces", "1234", "B")
+            .await
+            .expect("different canonical problem");
+    }
+
+    #[tokio::test]
+    async fn i3_t7_existing_external_triplet_unique_is_preserved() {
+        let directory = TempDir::new().expect("temporary app data");
+        let (path, pool) = s0_migrate_from_version(&directory, 26).await;
+        insert_schema26_problem(&pool, 1).await;
+        insert_schema26_problem(&pool, 2).await;
+        let pool = run_migrations(&path, pool, &MIGRATOR, 26)
+            .await
+            .expect("migration 27");
+        insert_identity(&pool, 1, "codeforces", "1234", "A")
+            .await
+            .expect("first identity");
+        assert!(insert_identity(&pool, 2, "codeforces", "1234", "A")
+            .await
+            .is_err());
     }
 
     struct CoreLoopContestSource {
@@ -14226,7 +14491,7 @@ mod tests {
              ALTER TABLE _contests_schema_25 RENAME TO contests;\
              DROP TABLE problems;\
              ALTER TABLE _problems_schema_25 RENAME TO problems;\
-             DELETE FROM _sqlx_migrations WHERE version = 26;\
+             DELETE FROM _sqlx_migrations WHERE version IN (26, 27);\
              UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
         )
         .execute(&mut *transaction)
@@ -14397,7 +14662,7 @@ mod tests {
             "INSERT INTO today_plan_entries (id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position) SELECT id, today_plan_id, problem_id, review_attempt_id, lane, reason, planning_cost_minutes, position FROM today_plan_entries_current",
             "DROP TABLE today_plan_entries_current",
             "CREATE INDEX today_plan_entries_by_plan ON today_plan_entries(today_plan_id, position)",
-            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)",
+            "DELETE FROM _sqlx_migrations WHERE version IN (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)",
             "UPDATE app_metadata SET schema_generation = 10 WHERE singleton = 1",
         ] {
             sqlx::query(statement)
@@ -14420,23 +14685,23 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 26);
+        assert_eq!(ledger_count, 27);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 26);
-        validate_schema_contract(pool, 26)
+        assert_eq!(schema_generation, 27);
+        validate_schema_contract(pool, 27)
             .await
-            .expect("generation 26 schema contract");
+            .expect("generation 27 schema contract");
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -14557,7 +14822,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
         let ids_after: (i64, i64, String, String) = sqlx::query_as(
@@ -14619,7 +14884,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("highest successful migration"),
-            26
+            27
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -14651,13 +14916,13 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
-        validate_schema_contract(pool, 26)
+        validate_schema_contract(pool, 27)
             .await
-            .expect("schema 26 contract after migration");
+            .expect("schema 27 contract after migration");
         drop(upgraded);
         assert_eq!(
             start_database(directory.path()).await.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
     }
 
@@ -14954,7 +15219,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -15087,12 +15352,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 26)
+        validate_schema_contract(pool, 27)
             .await
-            .expect("schema 25 contract");
+            .expect("schema 27 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
         let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), \
@@ -15915,7 +16180,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -15950,7 +16215,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-26-"));
+            .starts_with("schema-10-to-27-"));
     }
 
     #[tokio::test]
@@ -19391,6 +19656,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requested_problem_alias_is_echoed_and_duplicate_contest_alias_is_rejected() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem A id");
+        let duplicate = sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'codeforces', '1979', 'A2')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect_err("duplicate contest alias");
+
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let problem_a =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "A").expect("problem A");
+        let detail_a = runtime
+            .lightweight_problem_detail(&problem_a)
+            .await
+            .expect("requested alias A");
+        assert_eq!(detail_a.problem, problem_a);
+        let resolved_a: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("resolved A");
+        assert_eq!(resolved_a, problem_id);
+        assert!(duplicate.to_string().contains("UNIQUE constraint"));
+    }
+
+    #[tokio::test]
+    #[ignore = "Shared alias projection regression is outside Contest S4 semantics"]
+    async fn reverse_alias_projections_fail_closed_without_authority_context() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        sqlx::query(
+            "INSERT INTO contest_external_identities \
+             (contest_id, platform, external_contest_key) \
+             SELECT contest_id, 'codeforces', '1979-alt' \
+             FROM contest_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979'",
+        )
+        .execute(pool)
+        .await
+        .expect("second contest alias");
+        assert_eq!(
+            runtime.list_contests().await,
+            Err(ContestReadError::Unavailable)
+        );
+
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem A id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (?1, 'codeforces', '1980', 'A')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("cross-contest codeforces alias");
+        assert_eq!(
+            runtime.list_lightweight_problems().await,
+            Err(ContestReadError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Shared alias projection regression is outside Contest S4 semantics"]
+    async fn problem_selector_aliases_resolve_to_one_canonical_problem_id() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             SELECT problem_id, 'mirror', 'round-1979', 'problem-a' \
+             FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .execute(pool)
+        .await
+        .expect("insert problem alias");
+
+        let codeforces = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("codeforces").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("1979").expect("contest key"),
+            ),
+            "A",
+        )
+        .expect("codeforces selector");
+        let mirror = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("mirror").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("round-1979").expect("contest key"),
+            ),
+            "problem-a",
+        )
+        .expect("mirror selector");
+        let mut connection = pool.acquire().await.expect("connection");
+        let first = resolve_problem_id_by_identity(&mut connection, &codeforces)
+            .await
+            .expect("codeforces resolution")
+            .expect("codeforces problem");
+        let second = resolve_problem_id_by_identity(&mut connection, &mirror)
+            .await
+            .expect("mirror resolution")
+            .expect("mirror problem");
+        let missing = acm_os_domain::ProblemIdentity::new(
+            acm_os_domain::ContestIdentity::new(
+                acm_os_domain::PlatformKey::new("mirror").expect("platform"),
+                acm_os_domain::ExternalContestKey::new("missing-round").expect("contest key"),
+            ),
+            "missing-problem",
+        )
+        .expect("missing selector");
+        assert_eq!(
+            resolve_problem_id_by_identity(&mut connection, &missing)
+                .await
+                .expect("missing resolution"),
+            None
+        );
+        assert_eq!(first, second);
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT (SELECT COUNT(*) FROM problems), \
+                        (SELECT COUNT(*) FROM problem_external_identities)",
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .expect("canonical problem counts"),
+            (2, 3)
+        );
+    }
+
+    #[tokio::test]
     async fn completed_contest_snapshot_keeps_result_separate_from_live_learning_status() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
@@ -20456,7 +20890,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
     }
 
@@ -20522,7 +20956,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -20555,7 +20989,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -20600,7 +21034,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -20765,7 +21199,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
     }
 
@@ -20975,7 +21409,7 @@ mod tests {
                  updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
              );\
              UPDATE app_metadata SET schema_generation = 22 WHERE singleton = 1;\
-             DELETE FROM _sqlx_migrations WHERE version IN (23, 24, 25);",
+             DELETE FROM _sqlx_migrations WHERE version IN (23, 24, 25, 26, 27);",
         )
         .execute(&older_pool)
         .await
@@ -20986,7 +21420,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 26);
+        assert_eq!(preview.supported_schema_version, 27);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -21468,7 +21902,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -21560,7 +21994,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-26-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-27-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -21685,7 +22119,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 27), \
+                        CHECK (schema_generation < 28), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -21820,7 +22254,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -21854,7 +22288,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -22559,7 +22993,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 26 }
+            &StartupGateStatus::Ready { schema_version: 27 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
