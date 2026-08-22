@@ -6785,7 +6785,7 @@ impl ContestReadPort for DatabaseRuntime {
             )
             .collect::<Result<Vec<_>, _>>()?;
         let correction_rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT e.id, identities.external_problem_key, e.field_name, e.old_value, e.new_value, e.corrected_at_utc FROM contest_correction_events e JOIN problem_external_identities identities ON identities.problem_id = e.problem_id AND identities.platform = 'codeforces' WHERE e.contest_id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1) ORDER BY e.corrected_at_utc, e.id",
+            "SELECT e.id, identities.external_problem_key, e.field_name, e.old_value, e.new_value, e.corrected_at_utc FROM contest_correction_events e JOIN problem_external_identities identities ON identities.problem_id = e.problem_id AND identities.platform = 'codeforces' AND identities.external_contest_key = ?1 WHERE e.contest_id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = ?1) ORDER BY e.corrected_at_utc, e.id",
         ).bind(contest.contest_id().to_string()).fetch_all(pool).await.map_err(|_| ContestReadError::Unavailable)?;
         let corrections = correction_rows
             .into_iter()
@@ -19605,6 +19605,14 @@ mod tests {
             .await
             .expect("problem identity fixture");
         }
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (300, 'atcoder', 'abc999', 'F')",
+        )
+        .execute(pool)
+        .await
+        .expect("cross-platform problem identity fixture");
         sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (300)")
             .execute(pool)
             .await
@@ -19620,6 +19628,14 @@ mod tests {
             .await
             .expect("contest problem fixture");
         }
+        sqlx::query(
+            "INSERT INTO contest_correction_events \
+             (id, contest_id, problem_id, field_name, old_value, new_value) \
+             VALUES ('correction-100', 100, 300, 'upsolve_decision', 'undecided', 'planned')",
+        )
+        .execute(pool)
+        .await
+        .expect("correction event fixture");
 
         let contest_100 = acm_os_domain::CodeforcesContestIdentity::new(100).expect("contest 100");
         let detail_100 = runtime
@@ -19628,6 +19644,8 @@ mod tests {
             .expect("contest 100 detail");
         assert_eq!(detail_100.problems.len(), 1);
         assert_eq!(detail_100.problems[0].problem.problem.index(), "A");
+        assert_eq!(detail_100.corrections.len(), 1);
+        assert_eq!(detail_100.corrections[0].problem_index, "A");
 
         let contest_200 = acm_os_domain::CodeforcesContestIdentity::new(200).expect("contest 200");
         let detail_200 = runtime
@@ -19636,6 +19654,21 @@ mod tests {
             .expect("contest 200 detail");
         assert_eq!(detail_200.problems.len(), 1);
         assert_eq!(detail_200.problems[0].problem.problem.index(), "B");
+        assert!(detail_200.corrections.is_empty());
+
+        sqlx::query(
+            "DELETE FROM problem_external_identities \
+             WHERE problem_id = 300 AND platform = 'codeforces' \
+               AND external_contest_key = '100'",
+        )
+        .execute(pool)
+        .await
+        .expect("remove exact contest alias");
+        let detail_without_exact_alias = runtime
+            .contest_detail(&contest_100)
+            .await
+            .expect("contest detail without exact alias");
+        assert!(detail_without_exact_alias.corrections.is_empty());
     }
 
     #[tokio::test]
