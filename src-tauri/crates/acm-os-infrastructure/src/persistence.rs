@@ -7392,7 +7392,7 @@ impl ContestManagementPort for DatabaseRuntime {
     }
 }
 
-const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id)";
+const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_completion_occurrences x WHERE x.problem_id = p.id)";
 
 async fn contest_delete_state(
     connection: &mut sqlx::SqliteConnection,
@@ -9043,6 +9043,7 @@ async fn validate_schema_contract(
             | 25
             | 26
             | 27
+            | 28
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9177,6 +9178,9 @@ async fn validate_schema_contract(
     }
     if schema_version >= 26 {
         validate_external_identity_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 28 {
+        validate_problem_completion_occurrence_contract(pool).await?;
     }
     Ok(())
 }
@@ -9513,6 +9517,21 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
             "problem_external_identities_one_key_per_problem_contest".to_owned(),
             "problem_external_identities".to_owned(),
         ));
+        expected_objects.sort();
+    }
+    if schema_version >= 28 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "problem_completion_occurrences_by_problem".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+            ),
+        ]);
         expected_objects.sort();
     }
     expected_objects
@@ -10320,6 +10339,24 @@ async fn validate_external_identity_contract(
     Ok(())
 }
 
+async fn validate_problem_completion_occurrence_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "problem_completion_occurrences",
+        &["id", "problem_id", "semantic_kind", "recorded_at_utc"],
+    )
+    .await?;
+    validate_external_identity_fk(
+        pool,
+        "problem_completion_occurrences",
+        "problem_id",
+        "problems",
+    )
+    .await
+}
+
 async fn validate_external_identity_fk(
     pool: &SqlitePool,
     table: &str,
@@ -10415,6 +10452,7 @@ async fn validate_table_columns(
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
+        "problem_completion_occurrences" => "PRAGMA table_xinfo('problem_completion_occurrences')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -10901,9 +10939,9 @@ mod tests {
             inspect_schema_version(&fresh_pool)
                 .await
                 .expect("fresh version"),
-            27
+            28
         );
-        validate_schema_contract(&fresh_pool, 27)
+        validate_schema_contract(&fresh_pool, 28)
             .await
             .expect("fresh schema contract");
         verify_integrity(&fresh_pool)
@@ -10921,9 +10959,20 @@ mod tests {
                 .fetch_one(&fresh_pool)
                 .await
                 .expect("fresh ledger");
-        assert_eq!(applied_before, 27);
+        assert_eq!(applied_before, 28);
+        let migration28 = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 28)
+            .expect("migration 28");
+        let recorded_checksum: Vec<u8> = sqlx::query_scalar(
+            "SELECT checksum FROM _sqlx_migrations WHERE version = 28 AND success = 1",
+        )
+        .fetch_one(&fresh_pool)
+        .await
+        .expect("migration 28 checksum");
+        assert_eq!(recorded_checksum, migration28.checksum.as_ref());
 
-        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 27)
+        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 28)
             .await
             .expect("fresh reopen");
         let applied_after: i64 =
@@ -10937,20 +10986,20 @@ mod tests {
         let (existing_path, existing_pool) = s0_migrate_from_version(&existing, 23).await;
         let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 23)
             .await
-            .expect("23 to 26 migration");
+            .expect("23 to 28 migration");
         assert_eq!(
             inspect_schema_version(&existing_pool)
                 .await
                 .expect("upgraded version"),
-            27
+            28
         );
-        validate_schema_contract(&existing_pool, 27)
+        validate_schema_contract(&existing_pool, 28)
             .await
             .expect("upgraded schema contract");
         verify_integrity(&existing_pool)
             .await
             .expect("upgraded integrity");
-        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 27)
+        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 28)
             .await
             .expect("existing 26 second reopen");
         assert_eq!(
@@ -10958,8 +11007,135 @@ mod tests {
                 .fetch_one(&existing_pool)
                 .await
                 .expect("existing ledger"),
+            28
+        );
+    }
+
+    #[tokio::test]
+    async fn s3c1_schema27_to_28_creates_empty_occurrence_store_without_backfill() {
+        let directory = TempDir::new().expect("schema 27 database");
+        let (path, pool) = s0_migrate_from_version(&directory, 27).await;
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, title, source_url, import_status) VALUES (1, 'Historical contest', 'https://example.test/contest/1', 'complete');\
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'Historical problem', 'https://example.test/problem/1', 'personal');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (1, 'codeforces', '1');\
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (1, 'codeforces', '1', 'A');\
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'waiting_cold_start', '2026-08-20T00:00:00.000Z');\
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000001', 1, 1, 'active', 0, 1, '2026-08-21');",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema 27 historical-like fixture");
+        let pool = run_migrations(&path, pool, &MIGRATOR, 27)
+            .await
+            .expect("migration 28");
+
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 28);
+        validate_schema_contract(&pool, 28)
+            .await
+            .expect("schema 28 contract");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("schema generation"),
+            28
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences",)
+                .fetch_one(&pool)
+                .await
+                .expect("occurrence count"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM review_cycles")
+                .fetch_one(&pool)
+                .await
+                .expect("preserved review history"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn s3c1_failed_migration28_preserves_schema27_and_business_data() {
+        let directory = TempDir::new().expect("schema 27 database");
+        let (path, pool) = s0_migrate_from_version(&directory, 27).await;
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url, identity_type) \
+             VALUES (1, 'Preserved problem', 'https://example.test/problem/1', 'personal')",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema 27 business data");
+        sqlx::query(
+            "INSERT INTO problem_external_identities \
+             (problem_id, platform, external_contest_key, external_problem_key) \
+             VALUES (1, 'codeforces', '1', 'A')",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema 27 identity");
+        let broken = Migrator::with_migrations(vec![Migration::new(
+            28,
+            "create_problem_completion_occurrences".into(),
+            MigrationType::Simple,
+            "CREATE TABLE problem_completion_occurrences (".into_sql_str(),
+            false,
+        )]);
+
+        let result = run_migrations(&path, pool, &broken, 27).await;
+        assert!(matches!(
+            result,
+            Err(StartupRecoveryReason::MigrationFailed)
+        ));
+
+        let inspection = connect_read_only(&path)
+            .await
+            .expect("inspect failed migration");
+        assert_eq!(
+            inspect_schema_version(&inspection).await.expect("version"),
             27
         );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("schema generation"),
+            27
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM problems WHERE id = 1 AND title = 'Preserved problem'",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("preserved business data"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 28 AND success = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("migration ledger"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'problem_completion_occurrences'",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("occurrence table absence"),
+            0
+        );
+        inspection.close().await;
     }
 
     #[tokio::test]
@@ -11074,14 +11250,14 @@ mod tests {
             26,
         )
         .await
-        .expect("migration 27");
+        .expect("migration 28");
         assert_eq!(
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            27
+            28
         );
-        validate_schema_contract(&runtime_pool, 27)
+        validate_schema_contract(&runtime_pool, 28)
             .await
             .expect("schema 27 contract");
         assert_eq!(
@@ -11099,7 +11275,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
     }
 
@@ -13047,14 +13223,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 27);
+        assert_eq!(ledger_count, 28);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -13067,7 +13243,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -13099,7 +13275,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-27-"));
+            .starts_with("schema-10-to-28-"));
     }
 
     #[tokio::test]
@@ -16955,6 +17131,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contest_delete_preserves_lightweight_problem_with_completion_occurrence() {
+        let (directory, runtime, _vault, _problems, _personal_problem) =
+            personal_note_fixture().await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
+        let disposable_problem =
+            acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'B'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences \
+             (id, problem_id, semantic_kind, recorded_at_utc) \
+             VALUES (?1, ?2, 'learning_completion', '2026-08-23T00:00:00.000Z')",
+        )
+        .bind("00000000-0000-0000-0000-000000000028")
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("completion occurrence");
+
+        let preview = runtime
+            .preview_delete_contest(&contest)
+            .await
+            .expect("preview");
+        assert_eq!(preview.cleanup_problem_count, 0);
+        assert_eq!(preview.preserved_problem_count, 2);
+        runtime
+            .delete_contest(&contest)
+            .await
+            .expect("delete contest");
+
+        assert!(runtime
+            .lightweight_problem_detail(&disposable_problem)
+            .await
+            .is_ok());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM problem_completion_occurrences \
+                 WHERE problem_id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_one(pool)
+            .await
+            .expect("occurrence survives"),
+            1
+        );
+        drop(runtime);
+        drop(directory);
+    }
+
+    #[tokio::test]
     async fn first_real_contest_archive_change_uses_pre_mutation_daily_backup() {
         let directory = TempDir::new().expect("temporary app data");
         let runtime = start_database(directory.path()).await;
@@ -17369,7 +17602,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
     }
 
@@ -17435,7 +17668,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17468,7 +17701,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -17513,7 +17746,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -17678,7 +17911,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
     }
 
@@ -17890,7 +18123,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 27);
+        assert_eq!(preview.supported_schema_version, 28);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -18372,7 +18605,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -18464,7 +18697,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-27-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-28-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -18724,7 +18957,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -18758,7 +18991,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -19467,7 +19700,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 28 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
