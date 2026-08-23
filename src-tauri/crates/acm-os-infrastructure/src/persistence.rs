@@ -14022,6 +14022,13 @@ mod tests {
         .await
         .expect("complete relearn entry");
         assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("Today completion is non-emitting"),
+            0
+        );
+        assert_eq!(
             runtime
                 .load_problem_lifecycle(&problem)
                 .await
@@ -14362,6 +14369,13 @@ mod tests {
         assert_eq!(after_reimport.status, ContestImportStatus::Complete);
 
         let pool = runtime._pool.as_ref().expect("ready database pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("import is non-emitting"),
+            0
+        );
         let counts: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), (SELECT COUNT(*) FROM problems), \
                     (SELECT COUNT(*) FROM contest_problems), (SELECT COUNT(*) FROM problem_statement_snapshots)",
@@ -14580,6 +14594,13 @@ mod tests {
         )
         .await
         .expect("start learning");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("non-completion lifecycle does not emit"),
+            0
+        );
         let waiting = transition_problem_lifecycle(
             &runtime,
             &problem,
@@ -15867,6 +15888,13 @@ mod tests {
                 .await
                 .expect("lifecycle transition");
         }
+        let occurrence_before_delete: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("completion occurrence before deletion");
         fs::remove_dir_all(directory.path().join("backups/daily"))
             .expect("remove lifecycle backup");
 
@@ -15892,6 +15920,15 @@ mod tests {
         .await
         .expect("preserved history counts");
         assert_eq!(counts, (2, 0, 1, 1, 1));
+        let occurrence_after_delete: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+        .await
+        .expect("completion occurrence after deletion");
+        assert_eq!(occurrence_after_delete, occurrence_before_delete);
+        assert_eq!(occurrence_after_delete.2, "learning_completion");
         let recovery_files = files_under(
             &runtime
                 .recovery_root
@@ -15934,7 +15971,18 @@ mod tests {
         assert_eq!(backed_up_bindings, 1);
         backup_pool.close().await;
 
-        let recreated = create_personal_note(&runtime, &problem)
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let occurrence_after_restart: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(restarted._pool.as_ref().expect("restarted pool"))
+        .await
+        .expect("completion occurrence after restart");
+        assert_eq!(occurrence_after_restart, occurrence_before_delete);
+
+        let recreated = create_personal_note(&restarted, &problem)
             .await
             .expect("recreate personal note after explicit deletion");
         assert_eq!(recreated.vault_relative_path, "Problems/CF-1979-A.md");
@@ -16895,6 +16943,13 @@ mod tests {
             .complete_contest_facts(&contest, &facts)
             .await
             .expect("complete facts");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("pool"))
+                .await
+                .expect("contest facts are non-emitting"),
+            0
+        );
         assert_eq!(completed.facts_status, ContestFactsStatus::Completed);
         assert_eq!(completed.contest_date.as_deref(), Some("2026-08-10"));
         assert_eq!(
@@ -16984,6 +17039,13 @@ mod tests {
         );
         assert_eq!(corrected.corrections.len(), 2);
         assert_eq!(corrected.corrections[0].old_value, "wrong_answer");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("pool"))
+                .await
+                .expect("contest correction is non-emitting"),
+            0
+        );
         assert_eq!(
             runtime
                 .correct_contest_problem_facts(
@@ -17361,12 +17423,38 @@ mod tests {
 
     #[tokio::test]
     async fn contest_delete_preserves_lightweight_problem_with_completion_occurrence() {
-        let (directory, runtime, _vault, _problems, _personal_problem) =
+        let (directory, runtime, _vault, _problems, personal_problem) =
             personal_note_fixture().await;
         let contest = acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest");
         let disposable_problem =
             acm_os_domain::CodeforcesProblemIdentity::new(contest.clone(), "B").expect("B");
         let pool = runtime._pool.as_ref().expect("pool");
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-23").expect("today");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &personal_problem, action, today)
+                .await
+                .expect("real MarkUnderstood completion");
+        }
+        let personal_problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("personal problem id");
+        let personal_occurrence_before: (String, i64, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind FROM problem_completion_occurrences \
+             WHERE problem_id = ?1",
+        )
+        .bind(personal_problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("personal completion occurrence");
         let problem_id: i64 = sqlx::query_scalar(
             "SELECT problem_id FROM problem_external_identities \
              WHERE platform = 'codeforces' AND external_contest_key = '1979' \
@@ -17401,6 +17489,19 @@ mod tests {
             .lightweight_problem_detail(&disposable_problem)
             .await
             .is_ok());
+        assert!(runtime
+            .lightweight_problem_detail(&personal_problem)
+            .await
+            .is_ok());
+        let personal_occurrence_after: (String, i64, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind FROM problem_completion_occurrences \
+             WHERE problem_id = ?1",
+        )
+        .bind(personal_problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("personal occurrence survives contest deletion");
+        assert_eq!(personal_occurrence_after, personal_occurrence_before);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_completion_occurrences \
