@@ -99,6 +99,7 @@ pub enum ReviewCycleDirective {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProblemLifecycleDecision {
+    pub action: ProblemLifecycleAction,
     pub previous_status: LearningStatus,
     pub next_status: LearningStatus,
     pub review_cycle: ReviewCycleDirective,
@@ -163,6 +164,7 @@ impl ProblemLifecycleEngine {
         };
 
         Ok(ProblemLifecycleDecision {
+            action,
             previous_status: status,
             next_status,
             review_cycle,
@@ -1184,6 +1186,7 @@ mod tests {
             ProblemLifecycleAction::MarkUnderstood,
         )
         .expect("mark understood");
+        assert_eq!(understood.action, ProblemLifecycleAction::MarkUnderstood);
         assert_eq!(understood.next_status, LearningStatus::WaitingColdStart);
         assert_eq!(
             understood.review_cycle,

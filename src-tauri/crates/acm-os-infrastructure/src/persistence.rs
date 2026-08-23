@@ -2056,6 +2056,17 @@ impl DatabaseRuntime {
         if update.rows_affected() != 1 {
             return Err(ProblemLifecycleError::InvalidTransition);
         }
+        if decision.action == acm_os_domain::ProblemLifecycleAction::MarkUnderstood {
+            sqlx::query(
+                "INSERT INTO problem_completion_occurrences \
+                 (id, problem_id, semantic_kind) VALUES (?1, ?2, 'learning_completion')",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(problem_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        }
         transaction
             .commit()
             .await
@@ -2069,6 +2080,12 @@ async fn validate_problem_lifecycle_decision_state(
     problem: &acm_os_domain::ProblemIdentity,
     decision: acm_os_domain::ProblemLifecycleDecision,
 ) -> Result<i64, ProblemLifecycleError> {
+    let verified =
+        acm_os_domain::ProblemLifecycleEngine::decide(decision.previous_status, decision.action)
+            .map_err(|_| ProblemLifecycleError::IntegrityViolation)?;
+    if verified != decision {
+        return Err(ProblemLifecycleError::IntegrityViolation);
+    }
     let problem_id = resolve_problem_id_by_identity(connection, problem)
         .await
         .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?
@@ -14528,7 +14545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learning_lifecycle_persists_first_due_and_survives_restart() {
+    async fn mark_understood_emits_one_durable_learning_completion_occurrence() {
         let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
         let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
 
@@ -14581,6 +14598,35 @@ mod tests {
         assert_eq!(cycle.schedule_rule_version, 1);
         assert_eq!(cycle.next_due_local_date.to_iso_string(), "2026-08-14");
 
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let canonical_problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical problem id");
+        let occurrence: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("learning completion occurrence");
+        assert_eq!(occurrence.1, canonical_problem_id);
+        assert_eq!(occurrence.2, "learning_completion");
+        let occurrence_id = uuid::Uuid::parse_str(&occurrence.0).expect("occurrence UUID");
+        assert_eq!(occurrence_id.get_version_num(), 7);
+        chrono::DateTime::parse_from_rfc3339(&occurrence.3).expect("recorded UTC timestamp");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("occurrence count"),
+            1
+        );
+
         drop(runtime);
         let restarted = start_database(directory.path()).await;
         let restored = restarted
@@ -14598,6 +14644,121 @@ mod tests {
                 .next_due_local_date
                 .to_iso_string(),
             "2026-08-14"
+        );
+        let restored_occurrence: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(restarted._pool.as_ref().expect("restarted pool"))
+        .await
+        .expect("restored occurrence");
+        assert_eq!(restored_occurrence, occurrence);
+    }
+
+    #[tokio::test]
+    async fn occurrence_insert_failure_rolls_back_mark_understood_authority_commit() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("prepare learning state");
+        }
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "CREATE TRIGGER fail_problem_completion_occurrence \
+             BEFORE INSERT ON problem_completion_occurrences \
+             BEGIN SELECT RAISE(ABORT, 'forced occurrence failure'); END",
+        )
+        .execute(pool)
+        .await
+        .expect("failure trigger");
+
+        assert_eq!(
+            transition_problem_lifecycle(
+                &runtime,
+                &problem,
+                acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+                today,
+            )
+            .await,
+            Err(ProblemLifecycleError::PersistenceUnavailable)
+        );
+        let state = runtime
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("rolled back lifecycle");
+        assert_eq!(
+            state.learning_status,
+            acm_os_domain::LearningStatus::Learning
+        );
+        assert!(state.active_review_cycle.is_none());
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM review_cycles), \
+                    (SELECT COUNT(*) FROM problem_completion_occurrences)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("rolled back counts");
+        assert_eq!(counts, (0, 0));
+
+        sqlx::query("DROP TRIGGER fail_problem_completion_occurrence")
+            .execute(pool)
+            .await
+            .expect("remove isolated failure trigger");
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let restored = restarted
+            .load_problem_lifecycle(&problem)
+            .await
+            .expect("restart after rollback");
+        assert_eq!(
+            restored.learning_status,
+            acm_os_domain::LearningStatus::Learning
+        );
+        assert!(restored.active_review_cycle.is_none());
+        let restored_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM review_cycles), \
+                    (SELECT COUNT(*) FROM problem_completion_occurrences)",
+        )
+        .fetch_one(restarted._pool.as_ref().expect("restarted pool"))
+        .await
+        .expect("restart rolled back counts");
+        assert_eq!(restored_counts, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn immediate_mark_understood_retry_does_not_duplicate_occurrence() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("first authority path");
+        }
+        assert_eq!(
+            transition_problem_lifecycle(
+                &runtime,
+                &problem,
+                acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+                today,
+            )
+            .await,
+            Err(ProblemLifecycleError::InvalidTransition)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("occurrence count after retry"),
+            1
         );
     }
 
@@ -14638,12 +14799,26 @@ mod tests {
         for action in [
             acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
             acm_os_domain::ProblemLifecycleAction::StartLearning,
-            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
         ] {
             transition_problem_lifecycle(&runtime, &problem, action, learned_on)
                 .await
                 .expect("lifecycle transition");
         }
+        let mark_understood = acm_os_domain::ProblemLifecycleEngine::decide(
+            acm_os_domain::LearningStatus::Learning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        )
+        .expect("mark understood decision");
+        let first_due = acm_os_domain::ReviewSchedulingEngine::first_cold_start_due(learned_on)
+            .expect("first due");
+        runtime
+            .commit_problem_lifecycle_decision_by_identity(
+                &mirror,
+                mark_understood,
+                Some(first_due),
+            )
+            .await
+            .expect("mark understood through mirror alias");
         let alias_lifecycle = load_problem_lifecycle_by_identity(pool, &mirror)
             .await
             .expect("mutated alias lifecycle");
@@ -14684,15 +14859,22 @@ mod tests {
             assert_eq!(codeforces_id, mirror_id);
             codeforces_id
         };
-        let durable_counts: (i64, i64) = sqlx::query_as(
+        let durable_counts: (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM problem_learning_states WHERE problem_id = ?1), \
-                    (SELECT COUNT(*) FROM problem_mastery_evidence WHERE problem_id = ?1)",
+                    (SELECT COUNT(*) FROM problem_mastery_evidence WHERE problem_id = ?1), \
+                    (SELECT COUNT(*) FROM problem_completion_occurrences WHERE problem_id = ?1)",
         )
         .bind(canonical_id)
         .fetch_one(pool)
         .await
         .expect("durable canonical counts");
-        assert_eq!(durable_counts, (1, 1));
+        assert_eq!(durable_counts, (1, 1, 1));
+        let occurrence_problem_id: i64 =
+            sqlx::query_scalar("SELECT problem_id FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("canonical occurrence ownership");
+        assert_eq!(occurrence_problem_id, canonical_id);
 
         drop(runtime);
         let restarted = start_database(directory.path()).await;
@@ -15142,6 +15324,14 @@ mod tests {
     async fn completed_reviews_advance_then_relearn_without_overwriting_history() {
         let (directory, runtime, _vault, _problems, problem, first_attempt) =
             review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("initial learning completion"),
+            1
+        );
         let first = complete_review(
             &runtime,
             &first_attempt.attempt_id,
@@ -15161,6 +15351,13 @@ mod tests {
             .expect("continued cycle");
         assert_eq!(next_cycle.stage, 1);
         assert_eq!(next_cycle.next_due_local_date.to_iso_string(), "2026-08-24");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("mastered review is not an emitter"),
+            1
+        );
 
         let second_attempt = start_or_resume_review(
             &runtime,
@@ -15186,6 +15383,13 @@ mod tests {
             acm_os_domain::LearningStatus::Relearning
         );
         assert!(second.lifecycle.active_review_cycle.is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("partial review is not an emitter"),
+            1
+        );
 
         let history = review_history(&runtime, &problem)
             .await
@@ -15203,6 +15407,23 @@ mod tests {
             item.attempt.attempt_id == second_attempt.attempt_id
                 && item.judgement == Some(acm_os_domain::ReviewJudgement::Partial)
         }));
+        let relearned_on =
+            acm_os_domain::LocalDate::parse_iso("2026-08-25").expect("relearned date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::StartRelearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, relearned_on)
+                .await
+                .expect("genuine relearning completion");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("two legitimate completions"),
+            2
+        );
         drop(runtime);
         let restarted = start_database(directory.path()).await;
         let restored = review_history(&restarted, &problem)
@@ -15212,6 +15433,13 @@ mod tests {
         assert_eq!(
             restored.historical_best_review,
             Some(acm_os_domain::ReviewJudgement::Mastered)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(restarted._pool.as_ref().expect("restarted pool"))
+                .await
+                .expect("restarted legitimate completions"),
+            2
         );
     }
 
@@ -15653,16 +15881,17 @@ mod tests {
         assert!(deleted.active_review_cycle.is_none());
         assert!(!note_path.exists());
 
-        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contest_problems), \
                     (SELECT COUNT(*) FROM file_bindings), \
                     (SELECT COUNT(*) FROM review_cycles), \
-                    (SELECT COUNT(*) FROM review_cycles WHERE cycle_status = 'cancelled')",
+                    (SELECT COUNT(*) FROM review_cycles WHERE cycle_status = 'cancelled'), \
+                    (SELECT COUNT(*) FROM problem_completion_occurrences)",
         )
         .fetch_one(runtime._pool.as_ref().expect("ready pool"))
         .await
         .expect("preserved history counts");
-        assert_eq!(counts, (2, 0, 1, 1));
+        assert_eq!(counts, (2, 0, 1, 1, 1));
         let recovery_files = files_under(
             &runtime
                 .recovery_root
