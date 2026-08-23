@@ -8149,10 +8149,13 @@ async fn validate_contest_facts_state(
         "SELECT p.id, identities.external_problem_key FROM contest_problems cp \
          JOIN problems p ON p.id = cp.problem_id \
          JOIN problem_external_identities identities \
-           ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
+           ON identities.problem_id = p.id \
+          AND identities.platform = 'codeforces' \
+          AND identities.external_contest_key = ?2 \
          WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
     )
     .bind(contest_id)
+    .bind(contest.contest_id().to_string())
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| ContestFactsError::Unavailable)?;
@@ -22592,6 +22595,118 @@ mod tests {
             Err(ReviewAttemptError::ProblemNotFound)
         );
         assert!(!directory.path().join("backups/daily").exists());
+    }
+
+    async fn seed_contest_facts_alias_fixture(runtime: &DatabaseRuntime, aliases: &[(&str, &str)]) {
+        let pool = runtime._pool.as_ref().expect("pool");
+        for (contest_id, external_key) in [(100_i64, "100"), (200_i64, "200")] {
+            sqlx::query(
+                "INSERT INTO contests \
+                 (id, title, source_url, starts_at_utc, import_status, facts_status) \
+                 VALUES (?1, ?2, ?3, '2026-08-10T12:00:00Z', 'complete', 'pending')",
+            )
+            .bind(contest_id)
+            .bind(format!("Contest {external_key}"))
+            .bind(format!("https://codeforces.com/contest/{external_key}"))
+            .execute(pool)
+            .await
+            .expect("contest fixture");
+            sqlx::query(
+                "INSERT INTO contest_external_identities \
+                 (contest_id, platform, external_contest_key) \
+                 VALUES (?1, 'codeforces', ?2)",
+            )
+            .bind(contest_id)
+            .bind(external_key)
+            .execute(pool)
+            .await
+            .expect("contest identity fixture");
+        }
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url) \
+             VALUES (300, 'Shared internal problem X', \
+                     'https://codeforces.com/problemset/problem/100/A')",
+        )
+        .execute(pool)
+        .await
+        .expect("problem fixture");
+        for (external_contest_key, external_problem_key) in aliases {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                 (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (300, 'codeforces', ?1, ?2)",
+            )
+            .bind(external_contest_key)
+            .bind(external_problem_key)
+            .execute(pool)
+            .await
+            .expect("problem identity fixture");
+        }
+        sqlx::query("INSERT INTO problem_learning_states (problem_id) VALUES (300)")
+            .execute(pool)
+            .await
+            .expect("learning state fixture");
+        sqlx::query(
+            "INSERT INTO contest_problems \
+             (contest_id, problem_id, ordinal, import_state, final_contest_result, upsolve_decision) \
+             VALUES (100, 300, 1, 'ready', 'unknown', 'undecided')",
+        )
+        .execute(pool)
+        .await
+        .expect("contest problem fixture");
+    }
+
+    #[tokio::test]
+    async fn contest_facts_validation_scopes_problem_alias_to_selected_contest() {
+        let exact_directory = TempDir::new().expect("exact alias directory");
+        let exact_runtime = start_database(exact_directory.path()).await;
+        seed_contest_facts_alias_fixture(&exact_runtime, &[("100", "A"), ("200", "B")]).await;
+        let contest_100 = acm_os_domain::CodeforcesContestIdentity::new(100).expect("contest 100");
+        let exact_fact = ContestProblemFactInput {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest_100.clone(), "A")
+                .expect("exact selected-contest problem"),
+            final_contest_result: ContestFinalResult::Accepted,
+            upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+        };
+        let completed = exact_runtime
+            .complete_contest_facts(&contest_100, &[exact_fact])
+            .await
+            .expect("exact selected-contest alias validates");
+        assert_eq!(completed.problems.len(), 1);
+        assert_eq!(completed.problems[0].problem.problem.index(), "A");
+        assert_eq!(
+            completed.problems[0].final_contest_result,
+            Some(ContestFinalResult::Accepted)
+        );
+
+        let wrong_directory = TempDir::new().expect("wrong alias directory");
+        let wrong_runtime = start_database(wrong_directory.path()).await;
+        seed_contest_facts_alias_fixture(&wrong_runtime, &[("200", "B")]).await;
+        let wrong_contest_fact = ContestProblemFactInput {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest_100.clone(), "B")
+                .expect("wrong-contest alias submitted under selected contest"),
+            final_contest_result: ContestFinalResult::Accepted,
+            upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+        };
+        assert_eq!(
+            wrong_runtime
+                .complete_contest_facts(&contest_100, &[wrong_contest_fact])
+                .await,
+            Err(ContestFactsError::ProblemSetMismatch)
+        );
+
+        let missing_exact_fact = ContestProblemFactInput {
+            problem: acm_os_domain::CodeforcesProblemIdentity::new(contest_100.clone(), "A")
+                .expect("missing exact selected-contest alias"),
+            final_contest_result: ContestFinalResult::Accepted,
+            upsolve_decision: acm_os_application::ContestUpsolveDecision::Planned,
+        };
+        assert_eq!(
+            wrong_runtime
+                .complete_contest_facts(&contest_100, &[missing_exact_fact])
+                .await,
+            Err(ContestFactsError::ProblemSetMismatch)
+        );
     }
 
     #[tokio::test]
