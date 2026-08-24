@@ -1745,6 +1745,20 @@ pub async fn create_personal_note(
 }
 
 #[tauri::command]
+pub async fn create_personal_note_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalProblemIdInput,
+) -> Result<PersonalNoteBindingDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::create_personal_note_by_id(database.inner(), problem_id)
+        .await
+        .map(personal_note_binding_dto)
+        .map_err(acm_os_application::PersonalNoteError::code)
+}
+
+#[tauri::command]
 pub async fn transition_problem_lifecycle(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ProblemLifecycleCommandInput,

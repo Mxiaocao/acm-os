@@ -45,6 +45,7 @@ import {
 } from "../ipc/knowledge";
 import {
   createPersonalNote,
+  createPersonalNoteById,
   completeReview,
   confirmPersonalNoteDeleted,
   confirmPersonalNoteDeletedById,
@@ -2005,6 +2006,14 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     setCreatingNote(true);
     setNoteMessage(null);
     try {
+      if (canonical) {
+        await createPersonalNoteById(problemId!);
+        const nextDetail = await getCanonicalProblemDetail(problemId!);
+        setCanonicalDetail(nextDetail);
+        setNoteMessage("Personal Markdown created and verified.");
+        if (nextDetail.identityType === "personal") await refreshPersonalNote();
+        return;
+      }
       await createPersonalNote(contestId, index);
       const nextDetail = await getLightweightProblemDetail(contestId, index);
       setDetail(nextDetail);
@@ -2219,8 +2228,10 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <section className="content-panel">
         <p>{canonicalDetail.rating ? `Rating ${canonicalDetail.rating}` : ""} · {canonicalDetail.identityType === "personal" ? "Personal Problem" : "Lightweight Problem"}</p>
         <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a>
+        {canonicalDetail.identityType === "lightweight" ? <button className="primary-action" disabled={creatingNote} onClick={() => void createNote()} type="button">{creatingNote ? "Creating…" : "Create Personal Markdown"}</button> : null}
         {canonicalDetail.personalNote ? <p className="safe-note">Personal Markdown: <code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
         {canonicalDetail.identityType === "personal" ? <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
+        {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
       </section>
       {canonicalDetail.identityType === "personal" ? <>
         {canonicalDetail.personalNote ? <section className="content-panel" aria-labelledby="canonical-personal-note-heading">

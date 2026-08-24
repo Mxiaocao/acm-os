@@ -2397,7 +2397,8 @@ pub async fn add_extra_problem_link_by_id<P: PersonalNotePatchPort>(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonalNoteCreationContext {
-    pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub problem_id: i64,
+    pub candidate_filename: String,
     pub existing_binding: Option<PersonalNoteBinding>,
 }
 
@@ -2416,6 +2417,12 @@ impl From<CreatedPersonalNoteFile> for PersonalNoteBinding {
             windows_file_key: value.windows_file_key,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersonalNoteBindingCommitOutcome {
+    CandidateBound(PersonalNoteBinding),
+    ExistingBindingWon(PersonalNoteBinding),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2453,6 +2460,11 @@ pub trait PersonalNotePort {
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<PersonalNoteCreationContext, PersonalNoteError>;
 
+    async fn personal_note_creation_context_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PersonalNoteCreationContext, PersonalNoteError>;
+
     async fn create_personal_note_file(
         &self,
         context: &PersonalNoteCreationContext,
@@ -2461,9 +2473,9 @@ pub trait PersonalNotePort {
 
     async fn commit_personal_note_binding(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem_id: i64,
         file: &CreatedPersonalNoteFile,
-    ) -> Result<PersonalNoteBinding, PersonalNoteError>;
+    ) -> Result<PersonalNoteBindingCommitOutcome, PersonalNoteError>;
 
     async fn discard_created_personal_note(
         &self,
@@ -2476,15 +2488,56 @@ pub async fn create_personal_note<P: PersonalNotePort>(
     problem: &acm_os_domain::CodeforcesProblemIdentity,
 ) -> Result<PersonalNoteBinding, PersonalNoteError> {
     let context = port.personal_note_creation_context(problem).await?;
+    create_personal_note_from_context(port, context).await
+}
+
+pub async fn create_personal_note_by_id<P: PersonalNotePort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<PersonalNoteBinding, PersonalNoteError> {
+    let context = port
+        .personal_note_creation_context_by_id(problem_id)
+        .await?;
+    create_personal_note_from_context(port, context).await
+}
+
+async fn create_personal_note_from_context<P: PersonalNotePort>(
+    port: &P,
+    context: PersonalNoteCreationContext,
+) -> Result<PersonalNoteBinding, PersonalNoteError> {
     if let Some(binding) = context.existing_binding {
         return Ok(binding);
     }
 
-    let file = port
+    let file = match port
         .create_personal_note_file(&context, INITIAL_PROBLEM_MARKDOWN.as_bytes())
-        .await?;
-    match port.commit_personal_note_binding(problem, &file).await {
-        Ok(binding) => Ok(binding),
+        .await
+    {
+        Ok(file) => file,
+        Err(PersonalNoteError::TargetAlreadyExists) => {
+            let rechecked = port
+                .personal_note_creation_context_by_id(context.problem_id)
+                .await?;
+            return rechecked
+                .existing_binding
+                .ok_or(PersonalNoteError::TargetAlreadyExists);
+        }
+        Err(error) => return Err(error),
+    };
+    match port
+        .commit_personal_note_binding(context.problem_id, &file)
+        .await
+    {
+        Ok(PersonalNoteBindingCommitOutcome::CandidateBound(binding)) => Ok(binding),
+        Ok(PersonalNoteBindingCommitOutcome::ExistingBindingWon(binding)) => {
+            if binding.vault_relative_path == file.vault_relative_path {
+                return Ok(binding);
+            }
+            match port.discard_created_personal_note(&file).await {
+                Ok(()) => Ok(binding),
+                Err(_) => Err(PersonalNoteError::CompensationFailed),
+            }
+        }
         Err(error) => match port.discard_created_personal_note(&file).await {
             Ok(()) => Err(error),
             Err(_) => Err(PersonalNoteError::CompensationFailed),
@@ -3872,6 +3925,102 @@ mod tests {
         discarded: Cell<bool>,
     }
 
+    struct RacingPersonalNotePort {
+        context_calls: Cell<u32>,
+        target_exists: bool,
+        binding_visible_on_recheck: bool,
+        existing_binding_wins: bool,
+        discard_fails: bool,
+        discarded: Cell<bool>,
+    }
+
+    impl RacingPersonalNotePort {
+        fn winner() -> PersonalNoteBinding {
+            PersonalNoteBinding {
+                vault_relative_path: "Problems/CF-100-A.md".to_owned(),
+                content_digest: "1".repeat(64),
+                windows_file_key: None,
+            }
+        }
+
+        fn context(&self, problem_id: i64, candidate_filename: String) -> PersonalNoteCreationContext {
+            let call = self.context_calls.get() + 1;
+            self.context_calls.set(call);
+            PersonalNoteCreationContext {
+                problem_id,
+                candidate_filename,
+                existing_binding: (self.binding_visible_on_recheck && call > 1)
+                    .then(Self::winner),
+            }
+        }
+    }
+
+    impl PersonalNotePort for RacingPersonalNotePort {
+        async fn personal_note_creation_context(
+            &self,
+            problem: &acm_os_domain::CodeforcesProblemIdentity,
+        ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+            Ok(self.context(
+                42,
+                format!(
+                    "CF-{}-{}.md",
+                    problem.contest().contest_id(),
+                    problem.index()
+                ),
+            ))
+        }
+
+        async fn personal_note_creation_context_by_id(
+            &self,
+            problem_id: i64,
+        ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+            Ok(self.context(problem_id, format!("Problem-{problem_id}.md")))
+        }
+
+        async fn create_personal_note_file(
+            &self,
+            context: &PersonalNoteCreationContext,
+            _markdown: &[u8],
+        ) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
+            if self.target_exists {
+                return Err(PersonalNoteError::TargetAlreadyExists);
+            }
+            Ok(CreatedPersonalNoteFile {
+                vault_relative_path: format!("Problems/{}", context.candidate_filename),
+                content_digest: "0".repeat(64),
+                windows_file_key: None,
+            })
+        }
+
+        async fn commit_personal_note_binding(
+            &self,
+            _problem_id: i64,
+            file: &CreatedPersonalNoteFile,
+        ) -> Result<PersonalNoteBindingCommitOutcome, PersonalNoteError> {
+            if self.existing_binding_wins {
+                Ok(PersonalNoteBindingCommitOutcome::ExistingBindingWon(
+                    Self::winner(),
+                ))
+            } else {
+                Ok(PersonalNoteBindingCommitOutcome::CandidateBound(
+                    file.clone().into(),
+                ))
+            }
+        }
+
+        async fn discard_created_personal_note(
+            &self,
+            _file: &CreatedPersonalNoteFile,
+        ) -> Result<(), PersonalNoteError> {
+            self.discarded.set(true);
+            if self.discard_fails {
+                Err(PersonalNoteError::CompensationFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     struct FailingPersonalNoteDeletionCommit {
         restored: Cell<bool>,
     }
@@ -3911,7 +4060,23 @@ mod tests {
             problem: &acm_os_domain::CodeforcesProblemIdentity,
         ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
             Ok(PersonalNoteCreationContext {
-                problem: problem.clone(),
+                problem_id: 42,
+                candidate_filename: format!(
+                    "CF-{}-{}.md",
+                    problem.contest().contest_id(),
+                    problem.index()
+                ),
+                existing_binding: None,
+            })
+        }
+
+        async fn personal_note_creation_context_by_id(
+            &self,
+            problem_id: i64,
+        ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+            Ok(PersonalNoteCreationContext {
+                problem_id,
+                candidate_filename: format!("Problem-{problem_id}.md"),
                 existing_binding: None,
             })
         }
@@ -3931,9 +4096,9 @@ mod tests {
 
         async fn commit_personal_note_binding(
             &self,
-            _problem: &acm_os_domain::CodeforcesProblemIdentity,
+            _problem_id: i64,
             _file: &CreatedPersonalNoteFile,
-        ) -> Result<PersonalNoteBinding, PersonalNoteError> {
+        ) -> Result<PersonalNoteBindingCommitOutcome, PersonalNoteError> {
             Err(PersonalNoteError::PersistenceUnavailable)
         }
 
@@ -4096,6 +4261,65 @@ mod tests {
             Err(PersonalNoteError::PersistenceUnavailable)
         );
         assert!(port.discarded.get());
+    }
+
+    fn racing_port() -> RacingPersonalNotePort {
+        RacingPersonalNotePort {
+            context_calls: Cell::new(0),
+            target_exists: false,
+            binding_visible_on_recheck: false,
+            existing_binding_wins: false,
+            discard_fails: false,
+            discarded: Cell::new(false),
+        }
+    }
+
+    #[test]
+    fn existing_binding_won_discards_the_losing_candidate_and_returns_the_winner() {
+        let mut port = racing_port();
+        port.existing_binding_wins = true;
+        assert_eq!(
+            run_ready(create_personal_note_by_id(&port, 42)),
+            Ok(RacingPersonalNotePort::winner())
+        );
+        assert!(port.discarded.get());
+    }
+
+    #[test]
+    fn existing_binding_won_fails_closed_when_losing_candidate_cleanup_fails() {
+        let mut port = racing_port();
+        port.existing_binding_wins = true;
+        port.discard_fails = true;
+        assert_eq!(
+            run_ready(create_personal_note_by_id(&port, 42)),
+            Err(PersonalNoteError::CompensationFailed)
+        );
+        assert!(port.discarded.get());
+    }
+
+    #[test]
+    fn target_exists_recheck_returns_a_binding_that_became_visible() {
+        let mut port = racing_port();
+        port.target_exists = true;
+        port.binding_visible_on_recheck = true;
+        assert_eq!(
+            run_ready(create_personal_note_by_id(&port, 42)),
+            Ok(RacingPersonalNotePort::winner())
+        );
+        assert_eq!(port.context_calls.get(), 2);
+        assert!(!port.discarded.get());
+    }
+
+    #[test]
+    fn target_exists_without_a_binding_is_never_adopted() {
+        let mut port = racing_port();
+        port.target_exists = true;
+        assert_eq!(
+            run_ready(create_personal_note_by_id(&port, 42)),
+            Err(PersonalNoteError::TargetAlreadyExists)
+        );
+        assert_eq!(port.context_calls.get(), 2);
+        assert!(!port.discarded.get());
     }
 
     #[test]

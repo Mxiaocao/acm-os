@@ -78,6 +78,7 @@ pub fn run() {
             ipc::lightweight_problem_detail,
             ipc::lightweight_problem_detail_by_id,
             ipc::create_personal_note,
+            ipc::create_personal_note_by_id,
             ipc::transition_problem_lifecycle,
             ipc::transition_problem_lifecycle_by_id,
             ipc::start_or_resume_review,

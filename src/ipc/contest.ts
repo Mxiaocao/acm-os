@@ -492,6 +492,10 @@ export function createPersonalNote(contestId: number, index: string): Promise<Pe
   return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
 }
 
+export function createPersonalNoteById(problemId: string): Promise<PersonalNoteBindingDto> {
+  return invoke<PersonalNoteBindingDto>("create_personal_note_by_id", { input: { problemId } });
+}
+
 export function transitionProblemLifecycle(
   contestId: number,
   index: string,

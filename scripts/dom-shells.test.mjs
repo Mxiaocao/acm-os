@@ -1371,7 +1371,7 @@ test("Canonical bound Personal Note exposes read, open, and delete through probl
   try {
     await settle();
     assert.match(view.document.body.textContent, /Problems\/Canonical\.md/);
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Create my note"), false);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => /Create my note|Create Personal Markdown/.test(button.textContent)), false);
     const open = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Open in Obsidian");
     assert.ok(open);
     await act(async () => open.click()); await settle();
@@ -1442,26 +1442,50 @@ test("Canonical Personal Note anomaly exposes relocation, rebind, and missing co
   }
 });
 
-test("Unbound canonical Problem exposes no Personal Note creation or fabricated alias", {
+test("Unbound canonical Problem creates Personal Markdown only through problem_id IPC", {
   concurrency: false,
 }, async () => {
   const calls = [];
+  let detailReads = 0;
   const view = await renderApp((command, args) => {
     calls.push([command, args]);
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
-    if (command === "lightweight_problem_detail_by_id") return {
-      problemId: "44", title: "Unbound Canonical Problem", rating: null,
-      sourceUrl: "https://example.test/problem/44", statement: { state: "pending" },
-      identityType: "lightweight", personalNote: null, lifecycle: lightweightLifecycle, reviewAction: null,
+    if (command === "lightweight_problem_detail_by_id") {
+      detailReads += 1;
+      const personal = detailReads > 1;
+      return {
+        problemId: "44", title: "Unbound Canonical Problem", rating: null,
+        sourceUrl: "https://example.test/problem/44", statement: { state: "pending" },
+        identityType: personal ? "personal" : "lightweight",
+        personalNote: personal ? { vaultRelativePath: "Problems/Problem-44.md" } : null,
+        lifecycle: personal ? personalUnstartedLifecycle : lightweightLifecycle,
+        reviewAction: null,
+      };
+    }
+    if (command === "create_personal_note_by_id") return { vaultRelativePath: "Problems/Problem-44.md" };
+    if (command === "personal_note_projection_by_id") return {
+      state: "ready", vaultRelativePath: "Problems/Problem-44.md", relocated: false,
+      projection: { contentDigest: "a".repeat(64), knownSections: [], solutionRoutes: [], warnings: [] },
     };
+    if (command === "review_history_by_id") return { items: [], mastery: null };
     throw new Error(`unexpected command ${command}`);
   }, "/problems/id/44");
   try {
     await settle();
     assert.match(view.document.body.textContent, /Unbound Canonical Problem/);
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => /Create my note|Personal Markdown/.test(button.textContent)), false);
-    assert.equal(calls.some(([command]) => command.startsWith("personal_note")), false);
+    const create = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create Personal Markdown");
+    assert.ok(create);
+    await act(async () => create.click());
+    await settle();
+    assert.match(view.document.body.textContent, /Problems\/Problem-44\.md/);
+    assert.ok([...view.document.querySelectorAll("button")]
+      .some((button) => button.textContent === "Open in Obsidian"));
+    assert.equal(calls.filter(([command]) => command === "create_personal_note_by_id").length, 1);
+    assert.equal(calls.some(([command]) => command === "create_personal_note"), false);
+    const createCall = calls.find(([command]) => command === "create_personal_note_by_id");
+    assert.deepEqual(createCall[1].input, { problemId: "44" });
     assert.equal(calls.some(([, args]) => args?.input?.contestId !== undefined || args?.input?.index !== undefined), false);
   } finally {
     await view.cleanup();

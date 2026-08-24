@@ -26,10 +26,11 @@ use acm_os_application::{
     KnowledgeLinkResolution, KnowledgeLocationState, KnowledgeNodeProjection,
     KnowledgeRelationPort, KnowledgeRelocationCandidate, KnowledgeUnderstandingPort,
     KnowledgeUnderstandingProjection, LightweightProblemDetail, LightweightProblemItem,
-    LocalStatementAsset, PersistedContestImport, PersonalNoteBinding, PersonalNoteCreationContext,
-    PersonalNoteDeletionError, PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError,
-    PersonalNotePatchPort, PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort,
-    PersonalNoteReadState, PreparedPersonalNoteDeletion, PrerequisiteLinkTarget,
+    LocalStatementAsset, PersistedContestImport, PersonalNoteBinding,
+    PersonalNoteBindingCommitOutcome, PersonalNoteCreationContext, PersonalNoteDeletionError,
+    PersonalNoteDeletionPort, PersonalNoteError, PersonalNotePatchError, PersonalNotePatchPort,
+    PersonalNotePort, PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState,
+    PreparedPersonalNoteDeletion, PrerequisiteLinkTarget,
     ProblemIdentityType, ProblemLifecycleError, ProblemLifecyclePort, ProblemLifecycleState,
     ProblemMarkdownProjection, ProblemMasteryProjection, RelatedKnowledgeProblemProjection,
     RevealedReviewHelp, ReviewAttempt, ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus,
@@ -6747,26 +6748,23 @@ impl WorkspaceConfigurationPort for DatabaseRuntime {
     }
 }
 
-impl PersonalNotePort for DatabaseRuntime {
-    async fn personal_note_creation_context(
+impl DatabaseRuntime {
+    async fn personal_note_creation_context_for_id(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem_id: i64,
+        candidate_filename: String,
     ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
-        let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT p.identity_type, fb.vault_relative_path, \
+        let row: Option<(String, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT p.identity_type, fb.vault_relative_path, \
                         fb.content_digest, fb.windows_file_key \
-             FROM problems p JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id \
-                 LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-                 WHERE identities.platform = 'codeforces' \
-                   AND identities.external_contest_key = ?1 \
-                   AND identities.external_problem_key = ?2",
-        )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
-        .fetch_optional(self.personal_note_pool()?)
-        .await
-        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+                 FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 WHERE p.id = ?1",
+            )
+            .bind(problem_id)
+            .fetch_optional(self.personal_note_pool()?)
+            .await
+            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
         let (identity_type, relative_path, digest, file_key) =
             row.ok_or(PersonalNoteError::ProblemNotFound)?;
         let existing_binding = match (relative_path, digest) {
@@ -6785,9 +6783,49 @@ impl PersonalNotePort for DatabaseRuntime {
             return Err(PersonalNoteError::PersistenceUnavailable);
         }
         Ok(PersonalNoteCreationContext {
-            problem: problem.clone(),
+            problem_id,
+            candidate_filename,
             existing_binding,
         })
+    }
+}
+
+impl PersonalNotePort for DatabaseRuntime {
+    async fn personal_note_creation_context(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id().to_string())
+        .bind(problem.index())
+        .fetch_optional(self.personal_note_pool()?)
+        .await
+        .map_err(|_| PersonalNoteError::PersistenceUnavailable)?
+        .ok_or(PersonalNoteError::ProblemNotFound)?;
+        self.personal_note_creation_context_for_id(
+            problem_id,
+            format!(
+                "CF-{}-{}.md",
+                problem.contest().contest_id(),
+                problem.index()
+            ),
+        )
+        .await
+    }
+
+    async fn personal_note_creation_context_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PersonalNoteCreationContext, PersonalNoteError> {
+        self.personal_note_creation_context_for_id(
+            problem_id,
+            format!("Problem-{problem_id}.md"),
+        )
+        .await
     }
 
     async fn create_personal_note_file(
@@ -6803,11 +6841,16 @@ impl PersonalNotePort for DatabaseRuntime {
         .await
         .map_err(|_| PersonalNoteError::PersistenceUnavailable)?
         .ok_or(PersonalNoteError::WorkspaceUnavailable)?;
-        let problem = context.problem.clone();
+        let candidate_filename = context.candidate_filename.clone();
         let markdown = markdown.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            create_personal_note_file_on_disk(&active_vault, &problem_root, &problem, &markdown)
+            create_personal_note_file_on_disk(
+                &active_vault,
+                &problem_root,
+                &candidate_filename,
+                &markdown,
+            )
         })
         .await
         .map_err(|_| PersonalNoteError::FileWriteFailed)?
@@ -6815,26 +6858,22 @@ impl PersonalNotePort for DatabaseRuntime {
 
     async fn commit_personal_note_binding(
         &self,
-        problem: &acm_os_domain::CodeforcesProblemIdentity,
+        problem_id: i64,
         file: &CreatedPersonalNoteFile,
-    ) -> Result<PersonalNoteBinding, PersonalNoteError> {
+    ) -> Result<PersonalNoteBindingCommitOutcome, PersonalNoteError> {
         let pool = self.personal_note_pool()?;
         {
             let mut connection = pool
                 .acquire()
                 .await
                 .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-            let row: Option<(String, Option<String>, Option<String>, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT p.identity_type, fb.vault_relative_path, fb.content_digest, \
-                            fb.windows_file_key
-                     FROM problems p JOIN problem_external_identities identities ON identities.problem_id = p.id
-                     LEFT JOIN file_bindings fb ON fb.problem_id = p.id
-                     WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1
-                       AND identities.external_problem_key = ?2",
-                )
-                .bind(problem.contest().contest_id().to_string())
-                .bind(problem.index())
+            let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT p.identity_type, fb.vault_relative_path, fb.content_digest, \
+                        fb.windows_file_key \
+                 FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                 WHERE p.id = ?1",
+            )
+                .bind(problem_id)
                 .fetch_optional(&mut *connection)
                 .await
                 .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
@@ -6842,11 +6881,15 @@ impl PersonalNotePort for DatabaseRuntime {
                 row.ok_or(PersonalNoteError::ProblemNotFound)?;
             if identity_type == "personal" {
                 return match (relative_path, digest) {
-                    (Some(vault_relative_path), Some(content_digest)) => Ok(PersonalNoteBinding {
-                        vault_relative_path,
-                        content_digest,
-                        windows_file_key: file_key,
-                    }),
+                    (Some(vault_relative_path), Some(content_digest)) => {
+                        Ok(PersonalNoteBindingCommitOutcome::ExistingBindingWon(
+                            PersonalNoteBinding {
+                                vault_relative_path,
+                                content_digest,
+                                windows_file_key: file_key,
+                            },
+                        ))
+                    }
                     _ => Err(PersonalNoteError::PersistenceUnavailable),
                 };
             }
@@ -6864,45 +6907,47 @@ impl PersonalNotePort for DatabaseRuntime {
             .begin()
             .await
             .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-        let row: Option<(i64, String)> = sqlx::query_as(
-            "SELECT p.id, p.identity_type FROM problems p \
-             JOIN problem_external_identities identities ON identities.problem_id = p.id \
-             WHERE identities.platform = 'codeforces' \
-               AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2",
+        // The first transactional statement is a write so concurrent creators serialize
+        // before deciding whether this candidate or an existing binding won.
+        let claimed = sqlx::query(
+            "UPDATE problems SET identity_type = 'personal' \
+             WHERE id = ?1 AND identity_type = 'lightweight'",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
-        .fetch_optional(&mut *transaction)
+        .bind(problem_id)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-        let (problem_id, identity_type) = row.ok_or(PersonalNoteError::ProblemNotFound)?;
-
-        if identity_type == "personal" {
-            let binding: Option<(String, String, Option<String>)> = sqlx::query_as(
-                "SELECT vault_relative_path, content_digest, windows_file_key \
-                 FROM file_bindings WHERE problem_id = ?1",
-            )
-            .bind(problem_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
+        if claimed.rows_affected() == 0 {
+            let row: Option<(String, Option<String>, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT p.identity_type, fb.vault_relative_path, fb.content_digest, \
+                            fb.windows_file_key \
+                     FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+                     WHERE p.id = ?1",
+                )
+                .bind(problem_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
             transaction
                 .rollback()
                 .await
                 .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-            return binding
-                .map(|(vault_relative_path, content_digest, windows_file_key)| {
-                    PersonalNoteBinding {
-                        vault_relative_path,
-                        content_digest,
-                        windows_file_key,
-                    }
-                })
-                .ok_or(PersonalNoteError::PersistenceUnavailable);
-        }
-        if identity_type != "lightweight" {
-            return Err(PersonalNoteError::PersistenceUnavailable);
+            return match row {
+                None => Err(PersonalNoteError::ProblemNotFound),
+                Some((identity_type, Some(vault_relative_path), Some(content_digest), file_key))
+                    if identity_type == "personal" =>
+                {
+                    Ok(PersonalNoteBindingCommitOutcome::ExistingBindingWon(
+                        PersonalNoteBinding {
+                            vault_relative_path,
+                            content_digest,
+                            windows_file_key: file_key,
+                        },
+                    ))
+                }
+                _ => Err(PersonalNoteError::PersistenceUnavailable),
+            };
         }
 
         sqlx::query(
@@ -6916,16 +6961,13 @@ impl PersonalNotePort for DatabaseRuntime {
         .execute(&mut *transaction)
         .await
         .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-        sqlx::query("UPDATE problems SET identity_type = 'personal' WHERE id = ?1")
-            .bind(problem_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
         transaction
             .commit()
             .await
             .map_err(|_| PersonalNoteError::PersistenceUnavailable)?;
-        Ok(file.clone().into())
+        Ok(PersonalNoteBindingCommitOutcome::CandidateBound(
+            file.clone().into(),
+        ))
     }
 
     async fn discard_created_personal_note(
@@ -6949,7 +6991,7 @@ impl PersonalNotePort for DatabaseRuntime {
 fn create_personal_note_file_on_disk(
     active_vault: &str,
     problem_root: &str,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
+    candidate_filename: &str,
     markdown: &[u8],
 ) -> Result<CreatedPersonalNoteFile, PersonalNoteError> {
     let vault =
@@ -6959,12 +7001,16 @@ fn create_personal_note_file_on_disk(
     if !root.is_dir() || !root.starts_with(&vault) || root == vault {
         return Err(PersonalNoteError::WorkspaceUnavailable);
     }
-    let filename = format!(
-        "CF-{}-{}.md",
-        problem.contest().contest_id(),
-        problem.index()
-    );
-    let target = root.join(filename);
+    let candidate = Path::new(candidate_filename);
+    if candidate.components().count() != 1
+        || !candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return Err(PersonalNoteError::FileWriteFailed);
+    }
+    let target = root.join(candidate);
     let mut handle = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -7017,6 +7063,11 @@ fn discard_created_note_on_disk(
         std::fs::canonicalize(&target).map_err(|_| PersonalNoteError::CompensationFailed)?;
     if !resolved.starts_with(&vault) {
         return Err(PersonalNoteError::CompensationFailed);
+    }
+    if let Some(expected_file_key) = file.windows_file_key.as_deref() {
+        if windows_file_key(&resolved).as_deref() != Some(expected_file_key) {
+            return Err(PersonalNoteError::CompensationFailed);
+        }
     }
     let current = std::fs::read(&resolved).map_err(|_| PersonalNoteError::CompensationFailed)?;
     if sha256_hex(&current) != file.content_digest {
@@ -12131,12 +12182,16 @@ mod tests {
 
     use acm_os_application::{
         accept_existing_knowledge_candidate, accept_today_extra_suggestion, add_extra_problem_link,
+        add_extra_problem_link_by_id,
         apply_today_replan, complete_review, complete_today_entry, configure_workspace,
-        confirm_knowledge_markdown_deleted, confirm_knowledge_understanding, create_personal_note,
-        delete_personal_note, import_codeforces_contest, knowledge_relocation_candidates,
+        confirm_knowledge_markdown_deleted, confirm_knowledge_understanding,
+        confirm_personal_note_deleted_by_id, create_personal_note, create_personal_note_by_id,
+        delete_personal_note, delete_personal_note_by_id, import_codeforces_contest,
+        knowledge_relocation_candidates,
         list_knowledge_candidates, load_knowledge_detail, load_or_generate_today_snapshot,
-        preview_today_extra_suggestions, preview_today_replan, query_workspace_configuration,
-        rebind_knowledge_node, rebuild_knowledge_index, rebuild_knowledge_relations,
+        personal_note_relocation_candidates_by_id, preview_today_extra_suggestions,
+        preview_today_replan, query_workspace_configuration, rebind_knowledge_node,
+        rebind_personal_note_by_id, rebuild_knowledge_index, rebuild_knowledge_relations,
         register_knowledge_candidate, reorder_today_snapshot, resolve_knowledge_identity_conflict,
         reveal_review_help, review_focus, review_help_drawer, review_history,
         search_knowledge_index, set_knowledge_candidate_disposition, start_or_resume_review,
@@ -18284,6 +18339,420 @@ mod tests {
             .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
             .collect::<Vec<_>>();
         assert_eq!(published_after_idempotent, published);
+    }
+
+    #[tokio::test]
+    async fn canonical_personal_note_creation_is_alias_independent_and_idempotent() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical problem id");
+        for (platform, contest_key, problem_key) in [
+            ("codeforces", "1980", "A"),
+            ("opaque-provider", "round/x", "problem/a"),
+        ] {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                 (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(problem_id)
+            .bind(platform)
+            .bind(contest_key)
+            .bind(problem_key)
+            .execute(pool)
+            .await
+            .expect("additional alias");
+        }
+
+        let binding = create_personal_note_by_id(&runtime, problem_id)
+            .await
+            .expect("canonical creation");
+        assert_eq!(
+            binding.vault_relative_path,
+            format!("Problems/Problem-{problem_id}.md")
+        );
+        assert_eq!(
+            fs::read_to_string(problems.join(format!("Problem-{problem_id}.md")))
+                .expect("canonical note"),
+            INITIAL_PROBLEM_MARKDOWN
+        );
+
+        for contest_id in [1979, 1980] {
+            let alias = acm_os_domain::CodeforcesProblemIdentity::new(
+                acm_os_domain::CodeforcesContestIdentity::new(contest_id).expect("contest"),
+                "A",
+            )
+            .expect("alias");
+            assert_eq!(
+                create_personal_note(&runtime, &alias)
+                    .await
+                    .expect("alias returns canonical binding"),
+                binding
+            );
+        }
+        sqlx::query(
+            "DELETE FROM problem_external_identities \
+             WHERE problem_id = ?1 AND platform = 'codeforces' \
+               AND external_contest_key = '1980'",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("remove secondary alias");
+        assert_eq!(
+            create_personal_note_by_id(&runtime, problem_id)
+                .await
+                .expect("repeat canonical creation"),
+            binding
+        );
+        assert!(!problems.join("CF-1979-A.md").exists());
+        assert!(!problems.join("CF-1980-A.md").exists());
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1")
+                .bind(problem_id)
+                .fetch_one(pool)
+                .await
+                .expect("binding count");
+        assert_eq!(binding_count, 1);
+    }
+
+    #[tokio::test]
+    async fn canonical_creation_never_adopts_or_overwrites_a_preexisting_target() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        let target = problems.join(format!("Problem-{problem_id}.md"));
+        fs::write(&target, "user-owned file").expect("preexisting target");
+
+        assert_eq!(
+            create_personal_note_by_id(&runtime, problem_id).await,
+            Err(PersonalNoteError::TargetAlreadyExists)
+        );
+        assert_eq!(fs::read_to_string(target).expect("preserved target"), "user-owned file");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings")
+            .fetch_one(pool)
+            .await
+            .expect("binding count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn canonical_creation_short_circuits_an_existing_legacy_binding_without_touching_its_candidate() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        let legacy_binding = create_personal_note(&runtime, &problem)
+            .await
+            .expect("legacy creation");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        let canonical_candidate = problems.join(format!("Problem-{problem_id}.md"));
+        fs::write(&canonical_candidate, "unrelated user file").expect("sentinel candidate");
+
+        assert_eq!(
+            create_personal_note_by_id(&runtime, problem_id)
+                .await
+                .expect("existing binding"),
+            legacy_binding
+        );
+        assert_eq!(
+            fs::read_to_string(canonical_candidate).expect("untouched sentinel"),
+            "unrelated user file"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_creation_candidates_report_the_winner_and_allow_verified_loser_cleanup() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let legacy = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        let legacy_context = runtime
+            .personal_note_creation_context(&legacy)
+            .await
+            .expect("legacy context");
+        let canonical_context = runtime
+            .personal_note_creation_context_by_id(legacy_context.problem_id)
+            .await
+            .expect("canonical context");
+        let legacy_file = runtime
+            .create_personal_note_file(&legacy_context, INITIAL_PROBLEM_MARKDOWN.as_bytes())
+            .await
+            .expect("legacy candidate");
+        let canonical_file = runtime
+            .create_personal_note_file(&canonical_context, INITIAL_PROBLEM_MARKDOWN.as_bytes())
+            .await
+            .expect("canonical candidate");
+
+        let winner = runtime
+            .commit_personal_note_binding(legacy_context.problem_id, &legacy_file)
+            .await
+            .expect("winner commit");
+        assert_eq!(
+            winner,
+            PersonalNoteBindingCommitOutcome::CandidateBound(legacy_file.clone().into())
+        );
+        let loser = runtime
+            .commit_personal_note_binding(canonical_context.problem_id, &canonical_file)
+            .await
+            .expect("loser commit outcome");
+        assert_eq!(
+            loser,
+            PersonalNoteBindingCommitOutcome::ExistingBindingWon(legacy_file.clone().into())
+        );
+        if canonical_file.windows_file_key.is_some() {
+            let mut wrong_identity = canonical_file.clone();
+            wrong_identity.windows_file_key = Some("same-file-1:0000000000000000".to_owned());
+            assert_eq!(
+                runtime.discard_created_personal_note(&wrong_identity).await,
+                Err(PersonalNoteError::CompensationFailed)
+            );
+            assert!(problems
+                .join(format!("Problem-{}.md", canonical_context.problem_id))
+                .exists());
+        }
+        runtime
+            .discard_created_personal_note(&canonical_file)
+            .await
+            .expect("verified losing candidate cleanup");
+        assert!(problems.join("CF-1979-A.md").exists());
+        assert!(!problems
+            .join(format!("Problem-{}.md", canonical_context.problem_id))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_canonical_and_legacy_creation_converge_on_one_binding_and_one_file() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let legacy = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
+            "A",
+        )
+        .expect("problem");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("problem id");
+
+        let (legacy_result, canonical_result) = tokio::join!(
+            create_personal_note(&runtime, &legacy),
+            create_personal_note_by_id(&runtime, problem_id),
+        );
+        let legacy_binding = legacy_result.expect("legacy result");
+        let canonical_binding = canonical_result.expect("canonical result");
+        assert_eq!(legacy_binding, canonical_binding);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("binding count");
+        assert_eq!(count, 1);
+        let candidates = [
+            problems.join("CF-1979-A.md"),
+            problems.join(format!("Problem-{problem_id}.md")),
+        ];
+        assert_eq!(candidates.iter().filter(|path| path.exists()).count(), 1);
+        assert!(problems.join(
+            Path::new(&canonical_binding.vault_relative_path)
+                .file_name()
+                .expect("bound filename")
+        ).exists());
+    }
+
+    #[tokio::test]
+    async fn canonical_created_note_uses_existing_read_patch_and_delete_authority() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (_vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        let binding = create_personal_note_by_id(&runtime, problem_id)
+            .await
+            .expect("canonical creation");
+        assert!(matches!(
+            runtime.read_personal_note_projection_by_id(problem_id).await,
+            Ok(PersonalNoteReadState::Ready { .. })
+        ));
+        add_extra_problem_link_by_id(&runtime, problem_id, "CF-2000-A")
+            .await
+            .expect("canonical patch");
+        assert!(fs::read_to_string(problems.join(format!("Problem-{problem_id}.md")))
+            .expect("patched note")
+            .contains("[[CF-2000-A]]"));
+        delete_personal_note_by_id(&runtime, problem_id)
+            .await
+            .expect("canonical delete");
+        assert!(!problems.join(format!("Problem-{problem_id}.md")).exists());
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1")
+                .bind(problem_id)
+                .fetch_one(pool)
+                .await
+                .expect("binding count");
+        assert_eq!(binding_count, 0);
+        assert!(!binding.vault_relative_path.is_empty());
+    }
+
+    #[tokio::test]
+    async fn canonical_created_note_uses_existing_relocation_rebind_and_missing_authority() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let (vault, problems, _knowledge) =
+            configure_temporary_workspace(&runtime, &directory).await;
+        runtime
+            .persist_manifest(&contest_draft())
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        create_personal_note_by_id(&runtime, problem_id)
+            .await
+            .expect("canonical creation");
+        let archive = vault.join("Archive");
+        fs::create_dir(&archive).expect("archive directory");
+        let moved = archive.join("Canonical-Moved.md");
+        fs::rename(problems.join(format!("Problem-{problem_id}.md")), &moved)
+            .expect("external move");
+        let relocated = runtime
+            .read_personal_note_projection_by_id(problem_id)
+            .await
+            .expect("automatic relocation");
+        assert!(matches!(
+            relocated,
+            PersonalNoteReadState::Ready {
+                binding: PersonalNoteBinding { ref vault_relative_path, .. },
+                relocated: true,
+                ..
+            } if vault_relative_path == "Archive/Canonical-Moved.md"
+        ));
+
+        fs::remove_file(&moved).expect("remove relocated note");
+        let rebound_path = archive.join("Canonical-Rebound.md");
+        fs::write(&rebound_path, format!("{INITIAL_PROBLEM_MARKDOWN}\nmanual recovery\n"))
+            .expect("manual candidate");
+        assert!(matches!(
+            runtime.read_personal_note_projection_by_id(problem_id).await,
+            Ok(PersonalNoteReadState::LocationAnomaly { .. })
+        ));
+        let candidates = personal_note_relocation_candidates_by_id(&runtime, problem_id)
+            .await
+            .expect("relocation candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.vault_relative_path == "Archive/Canonical-Rebound.md"
+                && !candidate.occupied
+        }));
+        let rebound = rebind_personal_note_by_id(
+            &runtime,
+            problem_id,
+            "Archive/Canonical-Rebound.md",
+        )
+        .await
+        .expect("canonical rebind");
+        assert_eq!(rebound.vault_relative_path, "Archive/Canonical-Rebound.md");
+
+        fs::remove_file(&rebound_path).expect("remove rebound note");
+        assert!(matches!(
+            runtime.read_personal_note_projection_by_id(problem_id).await,
+            Ok(PersonalNoteReadState::LocationAnomaly { .. })
+        ));
+        let lifecycle = confirm_personal_note_deleted_by_id(&runtime, problem_id)
+            .await
+            .expect("confirm missing canonical note");
+        assert_eq!(lifecycle.identity_type, ProblemIdentityType::Lightweight);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("binding count");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
