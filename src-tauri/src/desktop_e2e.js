@@ -61,6 +61,53 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
         "Personal Markdown binding",
       );
     };
+    const knowledgeCandidateRow = (targetRef) => [...document.querySelectorAll("section.knowledge-candidates > ul > li")]
+      .find((item) => item.querySelector("strong")?.textContent.trim() === targetRef);
+    const knowledgeCandidateAction = (targetRef, selector) => knowledgeCandidateRow(targetRef)?.querySelector(selector);
+    const saveKnowledgeIntent = async (targetRef) => {
+      await waitFor(
+        () => knowledgeCandidateAction(targetRef, "button:not(.secondary-action)") != null,
+        "Knowledge intent action",
+      );
+      knowledgeCandidateAction(targetRef, "button:not(.secondary-action)").click();
+      await waitFor(
+        () => {
+          const row = knowledgeCandidateRow(targetRef);
+          return row
+            && row.querySelector("button:not(.secondary-action)") === null
+            && row.querySelectorAll("button.secondary-action").length === 2;
+        },
+        "accepted Knowledge intent",
+      );
+    };
+    const ignoreKnowledgeCandidate = async (targetRef) => {
+      await waitFor(
+        () => knowledgeCandidateAction(targetRef, "button.secondary-action") != null,
+        "Knowledge candidate ignore action",
+      );
+      knowledgeCandidateAction(targetRef, "button.secondary-action").click();
+      await waitFor(
+        () => {
+          const row = knowledgeCandidateRow(targetRef);
+          return row
+            && row.querySelector("button:not(.secondary-action)") === null
+            && row.querySelectorAll("button.secondary-action").length === 1;
+        },
+        "ignored Knowledge candidate",
+      );
+    };
+    const acceptKnowledgeCandidate = async (targetRef) => {
+      await waitFor(
+        () => knowledgeCandidateAction(targetRef, "button:not(.secondary-action)") != null,
+        "pending Knowledge candidate",
+      );
+      knowledgeCandidateAction(targetRef, "button:not(.secondary-action)").click();
+      await waitFor(
+        () => knowledgeCandidateRow(targetRef) === undefined
+          && document.querySelector('section.content-panel[aria-label="Personal Markdown projection"]') !== null,
+        "accepted Knowledge relation",
+      );
+    };
     const navigateTo = async (label, readyText = label) => {
       const primaryRoute = {
         Today: "/today",
@@ -247,9 +294,8 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       } });
       await clickText("我的题库");
       await clickText("A. Desktop E2E Problem");
-      await waitText("Fenwick Tree Intent");
-      await clickText("Save intent only");
-      await waitText("Intent saved only");
+      await waitFor(() => knowledgeCandidateRow("Fenwick Tree Intent") !== undefined, "Fenwick Tree intent candidate");
+      await saveKnowledgeIntent("Fenwick Tree Intent");
       await stage("candidate-accepted-intent-without-authority");
       await invoke("register_knowledge_candidate", { input: {
         contestId: 1979,
@@ -259,10 +305,8 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       } });
       await clickText("我的题库");
       await clickText("A. Desktop E2E Problem");
-      await waitText("Segment Tree Candidate");
-      await waitText("Save intent only");
-      await clickText("Do not suggest");
-      await waitText("Suggestion ignored.");
+      await waitFor(() => knowledgeCandidateRow("Segment Tree Candidate") !== undefined, "Segment Tree candidate");
+      await ignoreKnowledgeCandidate("Segment Tree Candidate");
       await stage("candidate-ignored-without-authority");
       await invoke("register_knowledge_candidate", { input: {
         contestId: 1979,
@@ -272,9 +316,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       } });
       await clickText("我的题库");
       await clickText("A. Desktop E2E Problem");
-      await waitText("Pending · existing Knowledge Markdown found");
-      await clickText("Accept existing Knowledge");
-      await waitText("verified as a formal relation");
+      await acceptKnowledgeCandidate("Segment Tree");
       await stage("candidate-safe-patched");
       await clickText("加入补题");
       await waitText("开始学习");
