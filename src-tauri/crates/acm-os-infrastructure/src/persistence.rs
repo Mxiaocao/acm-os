@@ -4528,6 +4528,48 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .collect::<Vec<_>>();
         let evidence_json = serde_json::to_string(&evidence_codes)
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let scheduled_ordinal = match context.attempt.attempt_type {
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+            | acm_os_domain::ReviewAttemptType::LongTermReview => {
+                let problem_id: i64 = sqlx::query_scalar(
+                    "SELECT problem_id FROM review_attempts WHERE id = ?1 AND attempt_status = 'in_progress'",
+                )
+                .bind(&context.attempt.attempt_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO scheduled_review_ordinal_states \
+                     (problem_id, historical_baseline, last_allocated) VALUES (?1, 0, 0)",
+                )
+                .bind(problem_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                let ordinal: i64 = sqlx::query_scalar(
+                    "UPDATE scheduled_review_ordinal_states
+                     SET last_allocated = last_allocated + 1
+                     WHERE problem_id = ?1
+                     RETURNING last_allocated",
+                )
+                .bind(problem_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                sqlx::query(
+                    "INSERT INTO scheduled_review_ordinal_facts \
+                     (review_attempt_id, problem_id, ordinal) VALUES (?1, ?2, ?3)",
+                )
+                .bind(&context.attempt.attempt_id)
+                .bind(problem_id)
+                .bind(ordinal)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                Some(ordinal)
+            }
+            acm_os_domain::ReviewAttemptType::EarlyCheck => None,
+        };
         let completed_at_utc: String = sqlx::query_scalar(
             "UPDATE review_attempts SET attempt_status = 'completed', judgement = ?2, \
                     completed_local_date = ?3, final_ac = ?4, first_submission_result = ?5, \
@@ -4552,6 +4594,20 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if let Some(ordinal) = scheduled_ordinal {
+            let fact_exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM scheduled_review_ordinal_facts
+                 WHERE review_attempt_id = ?1 AND ordinal = ?2",
+            )
+            .bind(&context.attempt.attempt_id)
+            .bind(ordinal)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if fact_exists != 1 {
+                return Err(ReviewAttemptError::IntegrityViolation);
+            }
+        }
         match scheduling.cycle {
             acm_os_domain::ReviewCycleCompletion::Keep => {}
             acm_os_domain::ReviewCycleCompletion::Advance {
@@ -9061,6 +9117,7 @@ async fn validate_schema_contract(
             | 26
             | 27
             | 28
+            | 29
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9198,6 +9255,9 @@ async fn validate_schema_contract(
     }
     if schema_version >= 28 {
         validate_problem_completion_occurrence_contract(pool).await?;
+    }
+    if schema_version >= 29 {
+        validate_scheduled_review_ordinal_contract(pool).await?;
     }
     Ok(())
 }
@@ -9547,6 +9607,81 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "table".to_owned(),
                 "problem_completion_occurrences".to_owned(),
                 "problem_completion_occurrences".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 29 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "review_attempts_id_problem_unique".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "completed_scheduled_review_no_delete".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "completed_scheduled_review_no_update".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_completion_requires_ordinal".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_attempt_identity_immutable".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_attempt_must_complete".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_baseline_immutable".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_fact_insert_guard".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_facts_no_delete".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_facts_no_update".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_last_monotonic".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_states_no_delete".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -10374,6 +10509,113 @@ async fn validate_problem_completion_occurrence_contract(
     .await
 }
 
+async fn validate_scheduled_review_ordinal_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "scheduled_review_ordinal_states",
+        &["problem_id", "historical_baseline", "last_allocated"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "scheduled_review_ordinal_facts",
+        &[
+            "review_attempt_id",
+            "problem_id",
+            "ordinal",
+            "recorded_at_utc",
+        ],
+    )
+    .await?;
+    validate_external_identity_fk(
+        pool,
+        "scheduled_review_ordinal_states",
+        "problem_id",
+        "problems",
+    )
+    .await?;
+    let state_fk: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('scheduled_review_ordinal_facts')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if state_fk.len() != 3
+        || !state_fk.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || !state_fk.iter().any(|fk| {
+            fk.2 == "review_attempts"
+                && fk.3 == "review_attempt_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_review_ordinal_states s
+         WHERE s.historical_baseline < 0
+            OR s.last_allocated < s.historical_baseline
+            OR s.historical_baseline != (
+                SELECT COUNT(*) FROM review_attempts a
+                WHERE a.problem_id = s.problem_id
+                  AND a.attempt_status = 'completed'
+                  AND a.attempt_type IN ('first_cold_start', 'long_term_review')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scheduled_review_ordinal_facts f
+                      WHERE f.review_attempt_id = a.id
+                  )
+            )
+            OR s.last_allocated != s.historical_baseline + (
+                SELECT COUNT(*) FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+            )
+            OR EXISTS (
+                SELECT 1 FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+                  AND f.ordinal <= s.historical_baseline
+            )
+            OR EXISTS (
+                SELECT 1 FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scheduled_review_ordinal_facts prior
+                      WHERE prior.problem_id = f.problem_id
+                        AND prior.ordinal = f.ordinal - 1
+                  )
+                  AND f.ordinal != s.historical_baseline + 1
+            )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if inconsistent != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let invalid_fact: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_review_ordinal_facts f
+         LEFT JOIN review_attempts a ON a.id = f.review_attempt_id
+         LEFT JOIN scheduled_review_ordinal_states s ON s.problem_id = f.problem_id
+         WHERE a.id IS NULL
+            OR a.attempt_status != 'completed'
+            OR a.attempt_type NOT IN ('first_cold_start', 'long_term_review')
+            OR a.problem_id != f.problem_id
+            OR s.problem_id IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_fact != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
 async fn validate_external_identity_fk(
     pool: &SqlitePool,
     table: &str,
@@ -10470,6 +10712,10 @@ async fn validate_table_columns(
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
         "problem_completion_occurrences" => "PRAGMA table_xinfo('problem_completion_occurrences')",
+        "scheduled_review_ordinal_states" => {
+            "PRAGMA table_xinfo('scheduled_review_ordinal_states')"
+        }
+        "scheduled_review_ordinal_facts" => "PRAGMA table_xinfo('scheduled_review_ordinal_facts')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -10956,9 +11202,9 @@ mod tests {
             inspect_schema_version(&fresh_pool)
                 .await
                 .expect("fresh version"),
-            28
+            29
         );
-        validate_schema_contract(&fresh_pool, 28)
+        validate_schema_contract(&fresh_pool, 29)
             .await
             .expect("fresh schema contract");
         verify_integrity(&fresh_pool)
@@ -10976,20 +11222,20 @@ mod tests {
                 .fetch_one(&fresh_pool)
                 .await
                 .expect("fresh ledger");
-        assert_eq!(applied_before, 28);
-        let migration28 = MIGRATOR
+        assert_eq!(applied_before, 29);
+        let migration29 = MIGRATOR
             .iter()
-            .find(|migration| migration.version == 28)
-            .expect("migration 28");
+            .find(|migration| migration.version == 29)
+            .expect("migration 29");
         let recorded_checksum: Vec<u8> = sqlx::query_scalar(
-            "SELECT checksum FROM _sqlx_migrations WHERE version = 28 AND success = 1",
+            "SELECT checksum FROM _sqlx_migrations WHERE version = 29 AND success = 1",
         )
         .fetch_one(&fresh_pool)
         .await
-        .expect("migration 28 checksum");
-        assert_eq!(recorded_checksum, migration28.checksum.as_ref());
+        .expect("migration 29 checksum");
+        assert_eq!(recorded_checksum, migration29.checksum.as_ref());
 
-        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 28)
+        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 29)
             .await
             .expect("fresh reopen");
         let applied_after: i64 =
@@ -11003,20 +11249,20 @@ mod tests {
         let (existing_path, existing_pool) = s0_migrate_from_version(&existing, 23).await;
         let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 23)
             .await
-            .expect("23 to 28 migration");
+            .expect("23 to 29 migration");
         assert_eq!(
             inspect_schema_version(&existing_pool)
                 .await
                 .expect("upgraded version"),
-            28
+            29
         );
-        validate_schema_contract(&existing_pool, 28)
+        validate_schema_contract(&existing_pool, 29)
             .await
             .expect("upgraded schema contract");
         verify_integrity(&existing_pool)
             .await
             .expect("upgraded integrity");
-        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 28)
+        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 29)
             .await
             .expect("existing 26 second reopen");
         assert_eq!(
@@ -11024,7 +11270,7 @@ mod tests {
                 .fetch_one(&existing_pool)
                 .await
                 .expect("existing ledger"),
-            28
+            29
         );
     }
 
@@ -11045,12 +11291,12 @@ mod tests {
         .expect("schema 27 historical-like fixture");
         let pool = run_migrations(&path, pool, &MIGRATOR, 27)
             .await
-            .expect("migration 28");
+            .expect("migration 29");
 
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 28);
-        validate_schema_contract(&pool, 28)
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 29);
+        validate_schema_contract(&pool, 29)
             .await
-            .expect("schema 28 contract");
+            .expect("schema 29 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
@@ -11058,7 +11304,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            28
+            29
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences",)
@@ -11074,6 +11320,494 @@ mod tests {
                 .expect("preserved review history"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn s4d_migration29_materializes_only_historical_scheduled_cardinality() {
+        let directory = TempDir::new().expect("schema 28 database");
+        let (path, pool) = s0_migrate_from_version(&directory, 28).await;
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, title, source_url, import_status) VALUES (1, 'Historical contest', 'https://example.test/contest/1', 'complete');\
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'Historical problem', 'https://example.test/problem/1', 'personal');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (1, 'codeforces', '1');\
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (1, 'codeforces', '1', 'A');\
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-20T00:00:00.000Z');\
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000001', 1, 1, 'active', 1, 1, '2026-08-21');\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000001', 1, '00000000-0000-0000-0000-000000000001', 'first_cold_start', 'completed', '2026-08-20', 0, 1, '2026-08-20T00:00:00.000Z', '2026-08-20T00:01:00.000Z', 'mastered', '2026-08-20', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000002', 1, '00000000-0000-0000-0000-000000000001', 'long_term_review', 'completed', '2026-08-21', 0, 1, '2026-08-21T00:00:00.000Z', '2026-08-21T00:01:00.000Z', 'partial', '2026-08-21', 1, 'accepted', 'accepted', 1, 1, 0, 'independent', 'solving_hint', '[\"partial\"]');\
+             INSERT INTO review_failure_reasons (review_attempt_id, reason_code) VALUES ('00000000-0000-0000-0000-000000000002', 'key_property_blocked');\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000003', 1, '00000000-0000-0000-0000-000000000001', 'early_check', 'completed', '2026-08-21', 1, 1, '2026-08-21T00:02:00.000Z', '2026-08-21T00:03:00.000Z', 'mastered', '2026-08-21', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES ('00000000-0000-0000-0000-000000000004', 1, '00000000-0000-0000-0000-000000000001', 'long_term_review', 'in_progress', '2026-08-22', 0, 1, '2026-08-22T00:00:00.000Z');\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc) VALUES ('00000000-0000-0000-0000-000000000005', 1, '00000000-0000-0000-0000-000000000001', 'long_term_review', 'void', '2026-08-22', 0, 1, '2026-08-22T00:01:00.000Z', '2026-08-22T00:02:00.000Z');\
+             INSERT INTO review_void_events (id, review_attempt_id, reason) VALUES ('00000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000005', 'test void');",
+        )
+        .execute(&pool)
+        .await
+        .expect("historical fixture");
+        let pool = run_migrations(&path, pool, &MIGRATOR, 28)
+            .await
+            .expect("migration 29");
+        let baseline: (i64, i64) = sqlx::query_as(
+            "SELECT historical_baseline, last_allocated FROM scheduled_review_ordinal_states WHERE problem_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("baseline state");
+        assert_eq!(baseline, (2, 2));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scheduled_review_ordinal_facts")
+                .fetch_one(&pool)
+                .await
+                .expect("no historical facts"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn s4d_storage_guards_enforce_append_only_and_post_activation_completion_boundary() {
+        let directory = TempDir::new().expect("schema 29 database");
+        let (_path, pool) = s0_migrate_from_version(&directory, 29).await;
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, title, source_url, import_status) VALUES (1, 'Test contest', 'https://example.test/contest/1', 'complete');\
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'Test problem', 'https://example.test/problem/1', 'personal');\
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (1, 'codeforces', '1');\
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (1, 'codeforces', '1', 'A');\
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-20T00:00:00.000Z');\
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000011', 1, 1, 'active', 1, 1, '2026-08-21');\
+             INSERT INTO scheduled_review_ordinal_states (problem_id, historical_baseline, last_allocated) VALUES (1, 0, 1);\
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES ('00000000-0000-0000-0000-000000000011', 1, '00000000-0000-0000-0000-000000000011', 'long_term_review', '2026-08-21', 0, 1, '2026-08-21T00:00:00.000Z');",
+        )
+        .execute(&pool)
+        .await
+        .expect("future transaction pre-state");
+        assert!(sqlx::query("UPDATE review_attempts SET attempt_status = 'completed', completed_at_utc = '2026-08-21T00:01:00.000Z' WHERE id = '00000000-0000-0000-0000-000000000011'").execute(&pool).await.is_err());
+        sqlx::query("INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal) VALUES ('00000000-0000-0000-0000-000000000011', 1, 1)").execute(&pool).await.expect("ordinal fact");
+        assert!(sqlx::query("UPDATE scheduled_review_ordinal_facts SET ordinal = 2 WHERE review_attempt_id = '00000000-0000-0000-0000-000000000011'").execute(&pool).await.is_err());
+        assert!(sqlx::query("DELETE FROM scheduled_review_ordinal_facts WHERE review_attempt_id = '00000000-0000-0000-0000-000000000011'").execute(&pool).await.is_err());
+        assert!(sqlx::query("UPDATE scheduled_review_ordinal_states SET historical_baseline = 1 WHERE problem_id = 1").execute(&pool).await.is_err());
+        assert!(
+            sqlx::query("DELETE FROM scheduled_review_ordinal_states WHERE problem_id = 1")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE review_attempts SET attempt_status = 'completed', completed_at_utc = '2026-08-21T00:01:00.000Z' WHERE id = '00000000-0000-0000-0000-000000000011'").execute(&pool).await.expect("completion with ordinal");
+    }
+
+    async fn scheduled_ordinal_snapshot(pool: &SqlitePool) -> (i64, i64, i64, Vec<i64>) {
+        let state = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT historical_baseline, last_allocated
+             FROM scheduled_review_ordinal_states",
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("ordinal state")
+        .unwrap_or((0, 0));
+        let facts: Vec<i64> = sqlx::query_scalar(
+            "SELECT ordinal FROM scheduled_review_ordinal_facts ORDER BY ordinal",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("ordinal facts");
+        (state.0, state.1, facts.len() as i64, facts)
+    }
+
+    #[tokio::test]
+    async fn s4e_zero_baseline_resume_and_duplicate_completion_allocate_once() {
+        let (_directory, runtime, _vault, _problems, problem, attempt) =
+            review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let resumed = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due"),
+        )
+        .await
+        .expect("resume attempt");
+        assert_eq!(resumed.attempt_id, attempt.attempt_id);
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+
+        complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion"),
+        )
+        .await
+        .expect("first completion");
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+        assert_eq!(
+            complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                mastered_input(),
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("duplicate"),
+            )
+            .await,
+            Err(ReviewAttemptError::AttemptNotFound)
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+    }
+
+    #[tokio::test]
+    async fn s4e_historical_baseline_three_allocates_four_then_five_without_backfill() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 =
+            sqlx::query_scalar("SELECT problem_id FROM review_attempts WHERE id = ?1")
+                .bind(&first_attempt.attempt_id)
+                .fetch_one(pool)
+                .await
+                .expect("problem id");
+        for (id, completed_on) in [
+            ("00000000-0000-0000-0000-000000000041", "2026-08-01"),
+            ("00000000-0000-0000-0000-000000000042", "2026-08-02"),
+            ("00000000-0000-0000-0000-000000000043", "2026-08-03"),
+        ] {
+            sqlx::query(
+                "INSERT INTO review_attempts
+                 (id, problem_id, review_cycle_id, attempt_type, attempt_status,
+                  scheduled_due_local_date, started_early, judgement_rule_version,
+                  started_at_utc, completed_at_utc, judgement, completed_local_date,
+                  final_ac, first_submission_result, final_result, total_submissions,
+                  idea_independent, implementation_independent, debug_independence,
+                  external_help, evidence_codes_json)
+                 SELECT ?1, problem_id, review_cycle_id, 'long_term_review', 'completed',
+                        ?2, 0, judgement_rule_version, ?2 || 'T00:00:00.000Z',
+                        ?2 || 'T00:01:00.000Z', 'mastered', ?2, 1, 'accepted',
+                        'accepted', 1, 1, 1, 'not_needed', 'none', '[]'
+                 FROM review_attempts WHERE id = ?3",
+            )
+            .bind(id)
+            .bind(completed_on)
+            .bind(&first_attempt.attempt_id)
+            .execute(pool)
+            .await
+            .expect("historical scheduled completion");
+        }
+        sqlx::query(
+            "INSERT INTO scheduled_review_ordinal_states
+             (problem_id, historical_baseline, last_allocated) VALUES (?1, 3, 3)",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("activation baseline");
+        let historical_unordinalized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_attempts a
+             WHERE a.problem_id = ?1
+               AND a.attempt_status = 'completed'
+               AND a.attempt_type IN ('first_cold_start', 'long_term_review')
+               AND NOT EXISTS (
+                   SELECT 1 FROM scheduled_review_ordinal_facts f
+                   WHERE f.review_attempt_id = a.id
+               )",
+        )
+        .bind(problem_id)
+        .fetch_one(pool)
+        .await
+        .expect("historical population");
+        assert_eq!(historical_unordinalized, 3);
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (3, 3, 0, vec![]));
+
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("ordinal four");
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second attempt");
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+        )
+        .await
+        .expect("ordinal five");
+        assert_eq!(
+            scheduled_ordinal_snapshot(pool).await,
+            (3, 5, 2, vec![4, 5])
+        );
+    }
+
+    #[tokio::test]
+    async fn s4e_mastered_partial_and_fail_each_allocate_one_ordinal() {
+        for (label, input, expected) in [
+            (
+                "mastered",
+                mastered_input(),
+                acm_os_domain::ReviewJudgement::Mastered,
+            ),
+            (
+                "partial",
+                {
+                    let mut input = mastered_input();
+                    input.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+                    input.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Partial,
+            ),
+            (
+                "fail",
+                {
+                    let mut input = mastered_input();
+                    input.final_ac = false;
+                    input.first_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.final_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.total_submissions = 1;
+                    input.failure_reasons = vec![ReviewFailureReason::ImplementationError];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Fail,
+            ),
+        ] {
+            let (_directory, runtime, _vault, _problems, _problem, attempt) =
+                review_ready_fixture().await;
+            let completed = complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                input,
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} completion failed: {error:?}"));
+            assert_eq!(completed.judgement, expected, "{label}");
+            assert_eq!(
+                scheduled_ordinal_snapshot(runtime._pool.as_ref().expect("pool")).await,
+                (0, 1, 1, vec![1]),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn s4e_early_check_and_void_allocate_zero_then_scheduled_replacement_gets_one() {
+        let (_directory, runtime, _vault, _problems, problem, voided) =
+            review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        void_review(&runtime, &voided.attempt_id, "replace fixture attempt")
+            .await
+            .expect("void attempt");
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+
+        let early = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early date"),
+        )
+        .await
+        .expect("early check");
+        assert_eq!(
+            early.attempt_type,
+            acm_os_domain::ReviewAttemptType::EarlyCheck
+        );
+        let early_completed = complete_review(
+            &runtime,
+            &early.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early completion"),
+        )
+        .await
+        .expect("complete early check");
+        assert_eq!(
+            early_completed.judgement,
+            acm_os_domain::ReviewJudgement::Mastered
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+
+        let replacement = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("scheduled date"),
+        )
+        .await
+        .expect("scheduled replacement");
+        assert_eq!(
+            replacement.attempt_type,
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+        complete_review(
+            &runtime,
+            &replacement.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("replacement completion"),
+        )
+        .await
+        .expect("complete replacement");
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+    }
+
+    #[tokio::test]
+    async fn s4e_relearning_alias_and_restart_continue_one_canonical_sequence() {
+        let (directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("ordinal one");
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second attempt");
+        let mut partial = mastered_input();
+        partial.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+        partial.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            partial,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+        )
+        .await
+        .expect("ordinal two");
+        let relearned_on = acm_os_domain::LocalDate::parse_iso("2026-08-25").expect("relearned");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::StartRelearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, relearned_on)
+                .await
+                .expect("relearning transition");
+        }
+        let pool = runtime._pool.as_ref().expect("pool");
+        let canonical_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities
+             WHERE platform = 'codeforces' AND external_contest_key = '1979'
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities
+             (problem_id, platform, external_contest_key, external_problem_key)
+             VALUES (?1, 'mirror', 'round-1979', 'problem-a')",
+        )
+        .bind(canonical_id)
+        .execute(pool)
+        .await
+        .expect("canonical alias");
+        assert_eq!(
+            scheduled_ordinal_snapshot(pool).await,
+            (0, 2, 2, vec![1, 2])
+        );
+        drop(runtime);
+
+        let restarted = start_database(directory.path()).await;
+        let third_attempt = start_or_resume_review(
+            &restarted,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-28").expect("new cycle due"),
+        )
+        .await
+        .expect("new-cycle attempt");
+        complete_review(
+            &restarted,
+            &third_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-28").expect("third completion"),
+        )
+        .await
+        .expect("ordinal three");
+        let restarted_pool = restarted._pool.as_ref().expect("restarted pool");
+        let alias_problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities
+             WHERE platform = 'mirror' AND external_contest_key = 'round-1979'
+               AND external_problem_key = 'problem-a'",
+        )
+        .fetch_one(restarted_pool)
+        .await
+        .expect("alias problem id");
+        assert_eq!(alias_problem_id, canonical_id);
+        assert_eq!(
+            scheduled_ordinal_snapshot(restarted_pool).await,
+            (0, 3, 3, vec![1, 2, 3])
+        );
+        let fact_problem_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT DISTINCT problem_id FROM scheduled_review_ordinal_facts")
+                .fetch_all(restarted_pool)
+                .await
+                .expect("fact ownership");
+        assert_eq!(fact_problem_ids, vec![canonical_id]);
+    }
+
+    #[tokio::test]
+    async fn s4e_post_allocation_failure_rolls_back_all_review_authority() {
+        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let before: (String, i64, String, String) = sqlx::query_as(
+            "SELECT ra.attempt_status, rc.stage, rc.cycle_status, pls.learning_status
+             FROM review_attempts ra
+             JOIN review_cycles rc ON rc.id = ra.review_cycle_id
+             JOIN problem_learning_states pls ON pls.problem_id = ra.problem_id
+             WHERE ra.id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("authority before");
+        sqlx::query(
+            "CREATE TRIGGER s4e_test_reject_cycle_update
+             BEFORE UPDATE ON review_cycles
+             BEGIN
+                 SELECT RAISE(ABORT, 'test rejects post-allocation cycle update');
+             END",
+        )
+        .execute(pool)
+        .await
+        .expect("failure constraint");
+
+        assert_eq!(
+            complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                mastered_input(),
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion"),
+            )
+            .await,
+            Err(ReviewAttemptError::PersistenceUnavailable)
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+        let after: (String, i64, String, String) = sqlx::query_as(
+            "SELECT ra.attempt_status, rc.stage, rc.cycle_status, pls.learning_status
+             FROM review_attempts ra
+             JOIN review_cycles rc ON rc.id = ra.review_cycle_id
+             JOIN problem_learning_states pls ON pls.problem_id = ra.problem_id
+             WHERE ra.id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("authority after");
+        assert_eq!(after, before);
+        let failure_reasons: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM review_failure_reasons WHERE review_attempt_id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("rolled-back reasons");
+        assert_eq!(failure_reasons, 0);
     }
 
     #[tokio::test]
@@ -11267,16 +12001,16 @@ mod tests {
             26,
         )
         .await
-        .expect("migration 28");
+        .expect("migration 29");
         assert_eq!(
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            28
+            29
         );
-        validate_schema_contract(&runtime_pool, 28)
+        validate_schema_contract(&runtime_pool, 29)
             .await
-            .expect("schema 27 contract");
+            .expect("schema 29 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -11292,7 +12026,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
     }
 
@@ -13240,14 +13974,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 28);
+        assert_eq!(ledger_count, 29);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -13260,7 +13994,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -13292,7 +14026,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-28-"));
+            .starts_with("schema-10-to-29-"));
     }
 
     #[tokio::test]
@@ -17932,7 +18666,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
     }
 
@@ -17998,7 +18732,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -18031,7 +18765,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -18076,7 +18810,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -18241,7 +18975,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
     }
 
@@ -18453,7 +19187,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 28);
+        assert_eq!(preview.supported_schema_version, 29);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -18935,7 +19669,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -19027,7 +19761,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-28-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-29-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -19287,7 +20021,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -19321,7 +20055,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -20030,7 +20764,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 28 }
+            &StartupGateStatus::Ready { schema_version: 29 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
