@@ -46,6 +46,21 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
         assertText(budgetInput(day)?.value ?? "<missing>", value, `${day} weekly budget`);
       }
     };
+    const createPersonalNote = async () => {
+      await waitFor(
+        () => document.querySelector('section.content-panel button.primary-action[type="button"]') !== null,
+        "Personal Markdown create control",
+      );
+      document.querySelector('section.content-panel button.primary-action[type="button"]').click();
+      await waitFor(
+        () => document.querySelector('section.content-panel[aria-label="Personal Markdown projection"]') !== null,
+        "Personal Markdown projection",
+      );
+      await waitFor(
+        () => document.querySelector('section.content-panel[aria-label="Personal Markdown projection"] code')?.textContent.trim() !== "",
+        "Personal Markdown binding",
+      );
+    };
     const navigateTo = async (label, readyText = label) => {
       const primaryRoute = {
         Today: "/today",
@@ -223,8 +238,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
 
       await clickText("我的题库");
       await clickText("A. Desktop E2E Problem");
-      await clickText("Create my note");
-      await waitText("Personal Markdown created and verified.");
+      await createPersonalNote();
       await invoke("register_knowledge_candidate", { input: {
         contestId: 1979,
         index: "A",
@@ -272,8 +286,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
 
       await clickText("我的题库");
       await clickText("B. Desktop E2E Study Problem");
-      await clickText("Create my note");
-      await waitText("Personal Markdown created and verified.");
+      await createPersonalNote();
       await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "B", fingerprint: "be".repeat(32), targetRef: "Segment Tree" } });
       await clickText("我的题库");
       await clickText("B. Desktop E2E Study Problem");
@@ -289,8 +302,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
 
       await clickText("我的题库");
       await clickText("C. Desktop E2E Extra Study Problem");
-      await clickText("Create my note");
-      await waitText("Personal Markdown created and verified.");
+      await createPersonalNote();
       await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "C", fingerprint: "ce".repeat(32), targetRef: "Segment Tree" } });
       await clickText("我的题库");
       await clickText("C. Desktop E2E Extra Study Problem");
