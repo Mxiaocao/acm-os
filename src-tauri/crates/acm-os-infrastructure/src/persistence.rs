@@ -414,6 +414,64 @@ impl DatabaseRuntime {
             .ok_or(WorkspacePersistenceError::Unavailable)
     }
 
+    async fn register_knowledge_candidate_core(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        target_ref: &str,
+    ) -> Result<acm_os_application::CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError>
+    {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let identity_type: String = sqlx::query_scalar(
+            "SELECT identity_type FROM problems WHERE id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+        .ok_or(KnowledgeCandidateError::ProblemNotFound)?;
+        if identity_type != "personal" {
+            return Err(KnowledgeCandidateError::NotPersonal);
+        }
+        let local_date = crate::current_local_date()
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        sqlx::query(
+            "INSERT INTO knowledge_candidate_records \
+                (problem_id, fingerprint, target_ref, disposition) \
+             VALUES (?1, ?2, ?3, 'pending') \
+             ON CONFLICT(problem_id, fingerprint) DO UPDATE SET \
+                target_ref = excluded.target_ref, \
+                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(problem_id)
+        .bind(fingerprint)
+        .bind(target_ref)
+        .execute(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT fingerprint, target_ref, disposition FROM knowledge_candidate_records \
+             WHERE problem_id = ?1 AND fingerprint = ?2",
+        )
+        .bind(problem_id)
+        .bind(fingerprint)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        Ok(acm_os_application::CanonicalKnowledgeCandidateReadProjection {
+            problem_id: problem_id.to_string(),
+            fingerprint: row.0,
+            target_ref: row.1,
+            disposition: parse_candidate_disposition(&row.2)?,
+        })
+    }
+
     async fn review_help_sources(
         &self,
         attempt_id: &str,
@@ -424,13 +482,9 @@ impl DatabaseRuntime {
         )>,
         ReviewAttemptError,
     > {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT identities.external_contest_key, identities.external_problem_key \
-             FROM review_attempts ra \
-             JOIN problem_external_identities identities \
-               ON identities.problem_id = ra.problem_id \
-              AND identities.platform = 'codeforces' \
-             WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
+        let problem_id: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM review_attempts \
+             WHERE id = ?1 AND attempt_status = 'in_progress'",
         )
         .bind(attempt_id)
         .fetch_optional(
@@ -440,13 +494,8 @@ impl DatabaseRuntime {
         )
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let (contest_id, index) = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
-        let contest = parse_codeforces_contest_identity(&contest_id)
-            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-        let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
-            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-        let generic_problem = generic_problem_identity(&problem);
-        let binding = match self.read_personal_note_projection(&generic_problem).await {
+        let problem_id = problem_id.ok_or(ReviewAttemptError::AttemptNotFound)?;
+        let binding = match self.read_personal_note_projection_by_id(problem_id).await {
             Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
             Ok(PersonalNoteReadState::LocationAnomaly { .. })
             | Ok(PersonalNoteReadState::VaultUnavailable { .. })
@@ -1347,14 +1396,12 @@ impl KnowledgeDetailPort for DatabaseRuntime {
             .transpose()?;
         let incoming = load_incoming_knowledge_nodes(pool, knowledge_node_id).await?;
         let outgoing = load_outgoing_knowledge_nodes(pool, knowledge_node_id).await?;
-        let problem_rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-            "SELECT p.id, identities.external_contest_key, identities.external_problem_key, p.title \
+        let problem_rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT DISTINCT p.id, p.title \
              FROM knowledge_link_index l JOIN problems p ON CAST(l.source_id AS INTEGER) = p.id \
-             JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
              WHERE l.source_kind = 'problem' AND l.resolution = 'resolved' \
-               AND l.target_knowledge_node_id = ?1 \
-             ORDER BY identities.external_contest_key, identities.external_problem_key, p.id",
+                AND l.target_knowledge_node_id = ?1 \
+             ORDER BY p.id",
         )
         .bind(knowledge_node_id)
         .fetch_all(pool)
@@ -1362,18 +1409,13 @@ impl KnowledgeDetailPort for DatabaseRuntime {
         .map_err(|_| KnowledgeIndexError::PersistenceUnavailable)?;
         let related_problems = problem_rows
             .into_iter()
-            .map(|(problem_id, contest_id, index, title)| {
-                let contest = parse_codeforces_contest_identity(&contest_id)
-                    .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
-                let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
-                    .map_err(|_| KnowledgeIndexError::IntegrityViolation)?;
-                Ok(RelatedKnowledgeProblemProjection {
+            .map(|(problem_id, title)| {
+                RelatedKnowledgeProblemProjection {
                     problem_id: problem_id.to_string(),
-                    problem,
                     title,
-                })
+                }
             })
-            .collect::<Result<Vec<_>, KnowledgeIndexError>>()?;
+            .collect();
         Ok(KnowledgeDetailProjection {
             node,
             understanding,
@@ -1427,34 +1469,25 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
         fingerprint: &str,
         target_ref: &str,
     ) -> Result<acm_os_application::KnowledgeCandidateReadProjection, KnowledgeCandidateError> {
-        let pool = self
-            ._pool
-            .as_ref()
-            .ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let pool = self._pool.as_ref().ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
         let (problem_id, identity_type) = candidate_problem_row_generic(pool, problem).await?;
         if identity_type != "personal" {
             return Err(KnowledgeCandidateError::NotPersonal);
         }
-        let local_date = crate::current_local_date()
-            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
-        self.ensure_daily_backup(local_date)
-            .await
-            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
-        sqlx::query(
-            "INSERT INTO knowledge_candidate_records \
-                (problem_id, fingerprint, target_ref, disposition) \
-             VALUES (?1, ?2, ?3, 'pending') \
-             ON CONFLICT(problem_id, fingerprint) DO UPDATE SET \
-                target_ref = excluded.target_ref, \
-                updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-        )
-        .bind(problem_id)
-        .bind(fingerprint)
-        .bind(target_ref)
-        .execute(pool)
-        .await
-        .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        self.register_knowledge_candidate_core(problem_id, fingerprint, target_ref)
+            .await?;
         load_candidate_read_projection(pool, problem, problem_id, fingerprint).await
+    }
+
+    async fn register_knowledge_candidate_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        target_ref: &str,
+    ) -> Result<acm_os_application::CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError>
+    {
+        self.register_knowledge_candidate_core(problem_id, fingerprint, target_ref)
+            .await
     }
 
     async fn set_knowledge_candidate_disposition(
@@ -2109,6 +2142,7 @@ impl ProblemLifecyclePort for DatabaseRuntime {
     }
 }
 
+#[cfg(test)]
 fn generic_problem_identity(
     problem: &acm_os_domain::CodeforcesProblemIdentity,
 ) -> acm_os_domain::ProblemIdentity {
@@ -3773,8 +3807,7 @@ type ReviewAttemptRow = (String, String, String, String, String, i64, i64, Strin
 #[derive(sqlx::FromRow)]
 struct ReviewHistoryRow {
     id: String,
-    contest_id: String,
-    problem_index: String,
+    problem_id: i64,
     attempt_type: String,
     scheduled_due_local_date: String,
     started_early: i64,
@@ -3916,10 +3949,9 @@ fn parse_failure_reason(
 async fn load_review_history_item_from_pool(
     pool: &SqlitePool,
     attempt_id: &str,
-) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+) -> Result<acm_os_application::CanonicalReviewHistoryItem, ReviewAttemptError> {
     let row: Option<ReviewHistoryRow> = sqlx::query_as(
-        "SELECT ra.id, identities.external_contest_key AS contest_id, \
-                identities.external_problem_key AS problem_index, ra.attempt_type, \
+        "SELECT ra.id, ra.problem_id, ra.attempt_type, \
                 ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                 ra.started_at_utc, ra.attempt_status, ra.judgement, ra.completed_at_utc, \
                 ra.completed_local_date, ra.final_ac, ra.first_submission_result, \
@@ -3927,9 +3959,6 @@ async fn load_review_history_item_from_pool(
                 ra.implementation_independent, ra.debug_independence, ra.external_help, \
                 ra.evidence_codes_json, rve.reason AS void_reason, rve.voided_at_utc \
          FROM review_attempts ra \
-         JOIN problems p ON p.id = ra.problem_id \
-         JOIN problem_external_identities identities \
-           ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
          LEFT JOIN review_void_events rve ON rve.review_attempt_id = ra.id \
          WHERE ra.id = ?1",
     )
@@ -3938,16 +3967,15 @@ async fn load_review_history_item_from_pool(
     .await
     .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
     let row = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
-    let attempt = review_attempt_from_row((
+    let attempt = canonical_review_attempt_from_row(
+        row.problem_id,
         row.id,
-        row.contest_id,
-        row.problem_index,
         row.attempt_type,
         row.scheduled_due_local_date,
-        row.started_early,
+        row.started_early != 0,
         row.judgement_rule_version,
         row.started_at_utc,
-    ))?;
+    )?;
     let reason_rows: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT reason_code, other_text FROM review_failure_reasons \
          WHERE review_attempt_id = ?1 ORDER BY reason_code",
@@ -4046,8 +4074,14 @@ async fn load_review_history_item_from_pool(
     {
         return Err(ReviewAttemptError::IntegrityViolation);
     }
-    Ok(ReviewHistoryItem {
-        attempt,
+    Ok(acm_os_application::CanonicalReviewHistoryItem {
+        problem_id: attempt.problem_id,
+        attempt_id: attempt.attempt_id,
+        attempt_type: attempt.attempt_type,
+        scheduled_due_local_date: attempt.scheduled_due_local_date,
+        started_early: attempt.started_early,
+        judgement_rule_version: attempt.judgement_rule_version,
+        started_at_utc: attempt.started_at_utc,
         status,
         judgement,
         completion_input,
@@ -4064,6 +4098,33 @@ async fn load_review_history_item_from_pool(
         void_reason: row.void_reason,
         voided_at_utc: row.voided_at_utc,
     })
+}
+
+fn legacy_review_history_item(
+    item: acm_os_application::CanonicalReviewHistoryItem,
+    problem: acm_os_domain::CodeforcesProblemIdentity,
+) -> ReviewHistoryItem {
+    ReviewHistoryItem {
+        attempt: ReviewAttempt {
+            attempt_id: item.attempt_id,
+            problem,
+            attempt_type: item.attempt_type,
+            scheduled_due_local_date: item.scheduled_due_local_date,
+            started_early: item.started_early,
+            judgement_rule_version: item.judgement_rule_version,
+            started_at_utc: item.started_at_utc,
+        },
+        status: item.status,
+        judgement: item.judgement,
+        completion_input: item.completion_input,
+        evidence_codes: item.evidence_codes,
+        failure_reasons: item.failure_reasons,
+        help_levels: item.help_levels,
+        completed_at_utc: item.completed_at_utc,
+        completed_local_date: item.completed_local_date,
+        void_reason: item.void_reason,
+        voided_at_utc: item.voided_at_utc,
+    }
 }
 
 fn review_attempt_from_row(row: ReviewAttemptRow) -> Result<ReviewAttempt, ReviewAttemptError> {
@@ -4224,26 +4285,12 @@ impl ReviewAttemptPort for DatabaseRuntime {
         &self,
         attempt_id: &str,
     ) -> Result<ReviewFocusView, ReviewAttemptError> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            String,
-            String,
-            String,
-        )> = sqlx::query_as(
-            "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
+        let row: Option<(String, i64, String, String, i64, i64, String, String, String, String)> = sqlx::query_as(
+            "SELECT ra.id, ra.problem_id, ra.attempt_type, \
                     ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
                     ra.started_at_utc, p.title, p.source_url, ss.sanitized_html \
              FROM review_attempts ra \
              JOIN problems p ON p.id = ra.problem_id \
-             JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
              JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
              WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
         )
@@ -4257,8 +4304,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let (
             id,
-            contest_id,
-            index,
+            problem_id,
             attempt_type,
             due,
             started_early,
@@ -4268,18 +4314,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
             source_url,
             statement_sanitized_html,
         ) = row.ok_or(ReviewAttemptError::AttemptNotFound)?;
-        let attempt = review_attempt_from_row((
-            id,
-            contest_id,
-            index,
-            attempt_type,
-            due,
-            started_early,
-            rule_version,
-            started_at,
-        ))?;
+        let attempt = canonical_review_attempt_from_row(
+            problem_id, id, attempt_type, due, started_early != 0, rule_version, started_at,
+        )?;
         let statement_assets = self
-            .statement_assets(&attempt.problem)
+            .load_statement_assets_by_id(problem_id)
             .await
             .map_err(|error| match error {
                 ContestReadError::NotFound => ReviewAttemptError::ProblemNotFound,
@@ -4438,15 +4477,13 @@ impl ReviewAttemptPort for DatabaseRuntime {
         &self,
         attempt_id: &str,
     ) -> Result<ReviewCompletionContext, ReviewAttemptError> {
-        let row: Option<(String, String, String, String, String, i64, i64, String, String, i64)> =
+        let row: Option<(String, i64, String, String, i64, i64, String, String, i64)> =
             sqlx::query_as(
-                "SELECT ra.id, identities.external_contest_key, identities.external_problem_key, ra.attempt_type, \
-                        ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
-                        ra.started_at_utc, pls.learning_status, rc.stage \
+                "SELECT ra.id, ra.problem_id, ra.attempt_type, \
+                         ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
+                         ra.started_at_utc, pls.learning_status, rc.stage \
                  FROM review_attempts ra \
                  JOIN problems p ON p.id = ra.problem_id \
-                 JOIN problem_external_identities identities \
-                   ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
                  JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  JOIN review_cycles rc ON rc.id = ra.review_cycle_id AND rc.cycle_status = 'active' \
                  WHERE ra.id = ?1 AND ra.attempt_status = 'in_progress'",
@@ -4459,7 +4496,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
             )
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let (id, contest_id, index, attempt_type, due, early, rule, started, status, stage) =
+        let (id, problem_id, attempt_type, due, early, rule, started, status, stage) =
             row.ok_or(ReviewAttemptError::AttemptNotFound)?;
         let highest_help: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(help_level) FROM review_help_usage_events WHERE review_attempt_id = ?1",
@@ -4473,16 +4510,9 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         Ok(ReviewCompletionContext {
-            attempt: review_attempt_from_row((
-                id,
-                contest_id,
-                index,
-                attempt_type,
-                due,
-                early,
-                rule,
-                started,
-            ))?,
+            attempt: canonical_review_attempt_from_row(
+                problem_id, id, attempt_type, due, early != 0, rule, started,
+            )?,
             learning_status: parse_learning_status(&status)
                 .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
             current_stage: u32::try_from(stage)
@@ -4644,9 +4674,13 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .commit()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let generic_problem = generic_problem_identity(&context.attempt.problem);
+        let problem_id = context
+            .attempt
+            .problem_id
+            .parse::<i64>()
+            .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
         let lifecycle = self
-            .load_problem_lifecycle(&generic_problem)
+            .load_problem_lifecycle_by_id(problem_id)
             .await
             .map_err(|error| match error {
                 ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
@@ -4670,7 +4704,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
         &self,
         attempt_id: &str,
         reason: &str,
-    ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+    ) -> Result<acm_os_application::CanonicalReviewHistoryItem, ReviewAttemptError> {
         if reason.trim().is_empty() || reason.len() > 500 {
             return Err(ReviewAttemptError::InvalidVoidReason);
         }
@@ -4740,7 +4774,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
     async fn load_review_attempt_history_item(
         &self,
         attempt_id: &str,
-    ) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+    ) -> Result<acm_os_application::CanonicalReviewHistoryItem, ReviewAttemptError> {
         load_review_history_item_from_pool(
             self._pool
                 .as_ref()
@@ -4758,36 +4792,34 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM problem_external_identities \
+        let problem_id: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
              WHERE platform = 'codeforces' AND external_contest_key = ?1 \
-               AND external_problem_key = ?2",
+                AND external_problem_key = ?2",
         )
         .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        if exists != 1 {
-            return Err(ReviewAttemptError::ProblemNotFound);
-        }
+        let problem_id = problem_id.ok_or(ReviewAttemptError::ProblemNotFound)?;
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT ra.id FROM review_attempts ra \
-             JOIN problem_external_identities identities ON identities.problem_id = ra.problem_id \
-             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-               AND identities.external_problem_key = ?2 ORDER BY ra.started_at_utc DESC, ra.id DESC",
+            "SELECT id FROM review_attempts WHERE problem_id = ?1 \
+             ORDER BY started_at_utc DESC, id DESC",
         )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
+        .bind(problem_id)
         .fetch_all(pool)
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let mut attempts = Vec::with_capacity(ids.len());
         for id in ids {
-            attempts.push(load_review_history_item_from_pool(pool, &id).await?);
+            attempts.push(legacy_review_history_item(
+                load_review_history_item_from_pool(pool, &id).await?,
+                problem.clone(),
+            ));
         }
         let historical_best_review = attempts.iter().filter_map(|item| item.judgement).max();
-        let mastery = load_problem_mastery_projection(pool, problem).await?;
+        let mastery = load_problem_mastery_projection_by_id(pool, problem_id).await?;
         Ok(ReviewHistoryView {
             problem: problem.clone(),
             historical_best_review,
@@ -4806,72 +4838,19 @@ impl ReviewAttemptPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(ReviewAttemptError::PersistenceUnavailable)?;
-        let problem_exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM problem_external_identities \
+        let problem_id: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
              WHERE platform = 'codeforces' AND external_contest_key = ?1 \
-               AND external_problem_key = ?2)",
+               AND external_problem_key = ?2",
         )
         .bind(problem.contest().contest_id().to_string())
         .bind(problem.index())
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        if problem_exists == 0 {
-            return Err(ReviewAttemptError::ProblemNotFound);
-        }
-        let local_date =
-            crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        self.ensure_daily_backup(local_date)
+        let problem_id = problem_id.ok_or(ReviewAttemptError::ProblemNotFound)?;
+        self.update_problem_mastery_evidence_by_id(problem_id, evidence, confirmed_on)
             .await
-            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        let thorough = evidence.is_thoroughly_digested();
-        let updated = sqlx::query(
-            "INSERT INTO problem_mastery_evidence (\
-                 problem_id, recalls_problem, multiple_solutions_clear, knowledge_understood, \
-                 implementation_fluent, can_adapt_or_create, transfer_solved_independently, \
-                 historical_thoroughly_digested, first_thoroughly_digested_local_date, updated_at_utc\
-             ) SELECT p.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                      CASE WHEN ?9 = 1 THEN ?10 ELSE NULL END, \
-                      strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-               FROM problems p JOIN problem_external_identities identities \
-                 ON identities.problem_id = p.id \
-              WHERE identities.platform = 'codeforces' \
-                AND identities.external_contest_key = ?1 \
-                AND identities.external_problem_key = ?2 \
-             ON CONFLICT(problem_id) DO UPDATE SET \
-                 recalls_problem = excluded.recalls_problem, \
-                 multiple_solutions_clear = excluded.multiple_solutions_clear, \
-                 knowledge_understood = excluded.knowledge_understood, \
-                 implementation_fluent = excluded.implementation_fluent, \
-                 can_adapt_or_create = excluded.can_adapt_or_create, \
-                 transfer_solved_independently = excluded.transfer_solved_independently, \
-                 historical_thoroughly_digested = MAX(\
-                     problem_mastery_evidence.historical_thoroughly_digested, \
-                     excluded.historical_thoroughly_digested\
-                 ), \
-                 first_thoroughly_digested_local_date = COALESCE(\
-                     problem_mastery_evidence.first_thoroughly_digested_local_date, \
-                     excluded.first_thoroughly_digested_local_date\
-                 ), \
-                 updated_at_utc = excluded.updated_at_utc",
-        )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
-        .bind(evidence.recalls_problem)
-        .bind(evidence.multiple_solutions_clear)
-        .bind(evidence.knowledge_understood)
-        .bind(evidence.implementation_fluent)
-        .bind(evidence.can_adapt_or_create)
-        .bind(evidence.transfer_solved_independently)
-        .bind(thorough)
-        .bind(confirmed_on.to_iso_string())
-        .execute(pool)
-        .await
-        .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-        if updated.rows_affected() != 1 {
-            return Err(ReviewAttemptError::ProblemNotFound);
-        }
-        load_problem_mastery_projection(pool, problem).await
     }
 
     async fn create_or_resume_review_attempt_by_id(
@@ -4914,24 +4893,10 @@ impl ReviewAttemptPort for DatabaseRuntime {
         for id in ids {
             let item = load_review_history_item_from_pool(pool, &id).await?;
             if let Some(value) = item.judgement { historical_best_review = Some(historical_best_review.map_or(value, |current| current.max(value))); }
-            attempts.push(acm_os_application::CanonicalReviewHistoryItem {
-                attempt_id: item.attempt.attempt_id,
-                attempt_type: item.attempt.attempt_type,
-                scheduled_due_local_date: item.attempt.scheduled_due_local_date,
-                started_early: item.attempt.started_early,
-                judgement_rule_version: item.attempt.judgement_rule_version,
-                started_at_utc: item.attempt.started_at_utc,
-                status: item.status,
-                judgement: item.judgement,
-                completion_input: item.completion_input,
-                evidence_codes: item.evidence_codes,
-                failure_reasons: item.failure_reasons,
-                help_levels: item.help_levels,
-                completed_at_utc: item.completed_at_utc,
-                completed_local_date: item.completed_local_date,
-                void_reason: item.void_reason,
-                voided_at_utc: item.voided_at_utc,
-            });
+            if item.problem_id != problem_id.to_string() {
+                return Err(ReviewAttemptError::IntegrityViolation);
+            }
+            attempts.push(item);
         }
         let mastery = load_problem_mastery_projection_by_id(pool, problem_id).await?;
         Ok(acm_os_application::CanonicalReviewHistoryView { problem_id: problem_id.to_string(), historical_best_review, mastery, attempts })
@@ -4949,7 +4914,7 @@ impl ReviewAttemptPort for DatabaseRuntime {
         let local_date = crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         self.ensure_daily_backup(local_date).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         let thorough = evidence.is_thoroughly_digested();
-        sqlx::query("INSERT INTO problem_mastery_evidence (problem_id, recalls_problem, multiple_solutions_clear, knowledge_understood, implementation_fluent, can_adapt_or_create, transfer_solved_independently, historical_thoroughly_digested, first_thoroughly_digested_local_date, updated_at_utc) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,CASE WHEN ?8 = 1 THEN ?9 ELSE NULL END,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(problem_id) DO UPDATE SET recalls_problem=excluded.recalls_problem,multiple_solutions_clear=excluded.multiple_solutions_clear,knowledge_understood=excluded.knowledge_understood,implementation_fluent=excluded.implementation_fluent,can_adapt_or_create=excluded.can_adapt_or_create,transfer_solved_independently=excluded.transfer_solved_independently,historical_thoroughly_digested=MAX(problem_mastery_evidence.historical_thoroughly_digested,excluded.historical_thoroughly_digested),first_thoroughly_digested_local_date=COALESCE(problem_mastery_evidence.first_thoroughly_digested_local_date,excluded.first_thoroughly_digested_local_date),updated_at_utc=excluded.updated_at_utc)")
+        sqlx::query("INSERT INTO problem_mastery_evidence (problem_id, recalls_problem, multiple_solutions_clear, knowledge_understood, implementation_fluent, can_adapt_or_create, transfer_solved_independently, historical_thoroughly_digested, first_thoroughly_digested_local_date, updated_at_utc) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,CASE WHEN ?8 = 1 THEN ?9 ELSE NULL END,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(problem_id) DO UPDATE SET recalls_problem=excluded.recalls_problem,multiple_solutions_clear=excluded.multiple_solutions_clear,knowledge_understood=excluded.knowledge_understood,implementation_fluent=excluded.implementation_fluent,can_adapt_or_create=excluded.can_adapt_or_create,transfer_solved_independently=excluded.transfer_solved_independently,historical_thoroughly_digested=MAX(problem_mastery_evidence.historical_thoroughly_digested,excluded.historical_thoroughly_digested),first_thoroughly_digested_local_date=COALESCE(problem_mastery_evidence.first_thoroughly_digested_local_date,excluded.first_thoroughly_digested_local_date),updated_at_utc=excluded.updated_at_utc")
             .bind(problem_id).bind(evidence.recalls_problem).bind(evidence.multiple_solutions_clear).bind(evidence.knowledge_understood).bind(evidence.implementation_fluent).bind(evidence.can_adapt_or_create).bind(evidence.transfer_solved_independently).bind(thorough).bind(confirmed_on.to_iso_string()).execute(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
         load_problem_mastery_projection_by_id(pool, problem_id).await
     }
@@ -5056,55 +5021,6 @@ async fn validate_review_completion_state(
         return Err(ReviewAttemptError::FailureReasonRequired);
     }
     Ok(())
-}
-
-async fn load_problem_mastery_projection(
-    pool: &SqlitePool,
-    problem: &acm_os_domain::CodeforcesProblemIdentity,
-) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
-    let row: Option<(bool, bool, bool, bool, bool, bool, bool, Option<String>)> = sqlx::query_as(
-        "SELECT pme.recalls_problem, pme.multiple_solutions_clear, pme.knowledge_understood, \
-                pme.implementation_fluent, pme.can_adapt_or_create, \
-                pme.transfer_solved_independently, pme.historical_thoroughly_digested, \
-                pme.first_thoroughly_digested_local_date \
-         FROM problem_mastery_evidence pme \
-         JOIN problem_external_identities identities ON identities.problem_id = pme.problem_id \
-         WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 \
-           AND identities.external_problem_key = ?2",
-    )
-    .bind(problem.contest().contest_id().to_string())
-    .bind(problem.index())
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
-    let Some(row) = row else {
-        return Ok(ProblemMasteryProjection {
-            current: acm_os_domain::ProblemMasteryEvidence::default(),
-            historical_thoroughly_digested: false,
-            first_thoroughly_digested_local_date: None,
-        });
-    };
-    let first_date = row
-        .7
-        .as_deref()
-        .map(acm_os_domain::LocalDate::parse_iso)
-        .transpose()
-        .map_err(|_| ReviewAttemptError::IntegrityViolation)?;
-    if row.6 != first_date.is_some() {
-        return Err(ReviewAttemptError::IntegrityViolation);
-    }
-    Ok(ProblemMasteryProjection {
-        current: acm_os_domain::ProblemMasteryEvidence {
-            recalls_problem: row.0,
-            multiple_solutions_clear: row.1,
-            knowledge_understood: row.2,
-            implementation_fluent: row.3,
-            can_adapt_or_create: row.4,
-            transfer_solved_independently: row.5,
-        },
-        historical_thoroughly_digested: row.6,
-        first_thoroughly_digested_local_date: first_date,
-    })
 }
 
 async fn load_in_progress_review_attempt_from_connection(
@@ -12178,8 +12094,10 @@ mod tests {
         personal_note_relocation_candidates_by_id, preview_today_extra_suggestions,
         preview_today_replan, query_workspace_configuration, rebind_knowledge_node,
         rebind_personal_note_by_id, rebuild_knowledge_index, rebuild_knowledge_relations,
-        register_knowledge_candidate, reorder_today_snapshot, resolve_knowledge_identity_conflict,
-        reveal_review_help, review_focus, review_help_drawer, review_history,
+        register_knowledge_candidate, register_knowledge_candidate_by_id, reorder_today_snapshot,
+        resolve_knowledge_identity_conflict,
+        reveal_review_help, review_attempt_history_item, review_focus, review_help_drawer,
+        review_history, review_history_by_id,
         search_knowledge_index, set_knowledge_candidate_disposition, start_or_resume_review,
         update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
         ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
@@ -13565,6 +13483,12 @@ mod tests {
     #[tokio::test]
     async fn knowledge_detail_projects_fresh_neighbors_understanding_and_related_problems() {
         let (_directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let (problem_id, _) = candidate_problem_row_generic(
+            runtime._pool.as_ref().expect("pool"),
+            &generic_problem_identity(&problem),
+        )
+        .await
+        .expect("problem id");
         let binding = match runtime
             .read_personal_note_projection(&generic_problem_identity(&problem))
             .await
@@ -13584,6 +13508,13 @@ mod tests {
             "# Problem\n\n## 前置知识\n- [[Target]]\n",
         )
         .expect("problem prerequisite");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', 'opaque-final', 'Z'), (?1, 'codeforces', '2000', 'B')",
+        )
+        .bind(problem_id)
+        .execute(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("multi aliases");
         let index = rebuild_knowledge_index(&runtime)
             .await
             .expect("knowledge index");
@@ -13614,8 +13545,19 @@ mod tests {
             ["Outgoing"]
         );
         assert_eq!(initial.related_problems.len(), 1);
-        assert_eq!(initial.related_problems[0].problem, problem);
+        assert_eq!(initial.related_problems[0].problem_id, problem_id.to_string());
         assert_eq!(initial.related_problems[0].title, "Problem A");
+        sqlx::query(
+            "DELETE FROM problem_external_identities WHERE problem_id = ?1 AND external_contest_key IN ('opaque-final', '2000')",
+        )
+        .bind(problem_id)
+        .execute(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("remove aliases");
+        let after_alias_removal = load_knowledge_detail(&runtime, &target.knowledge_node_id)
+            .await
+            .expect("detail after alias removal");
+        assert_eq!(after_alias_removal.related_problems, initial.related_problems);
 
         let confirmed_on = acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("date");
         confirm_knowledge_understanding(
@@ -13779,6 +13721,13 @@ mod tests {
         .execute(pool)
         .await
         .expect("generic alias");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', 'opaque-final', 'Z'), (?1, 'codeforces', '2000', 'B')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("same-platform aliases");
 
         let fingerprint = "ef".repeat(32);
         register_knowledge_candidate(
@@ -13868,15 +13817,15 @@ mod tests {
         .expect("atcoder problem");
         let fingerprint = "9a".repeat(32);
 
-        let registered = register_knowledge_candidate(
+        let registered = register_knowledge_candidate_by_id(
             &runtime,
-            &atcoder,
+            problem_id,
             &fingerprint,
             "  Segment Tree  ",
         )
         .await
         .expect("register through atcoder alias");
-        assert_eq!(registered.problem, atcoder);
+        assert_eq!(registered.problem_id, problem_id.to_string());
         assert_eq!(registered.fingerprint, fingerprint);
         assert_eq!(registered.target_ref, "Segment Tree");
         assert_eq!(registered.disposition, KnowledgeCandidateDisposition::Pending);
@@ -14558,7 +14507,7 @@ mod tests {
         assert!(detail
             .related_problems
             .iter()
-            .any(|item| item.problem == problem));
+            .any(|item| item.problem_id == problem_id.to_string()));
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM file_bindings WHERE problem_id = ?1",
@@ -18930,6 +18879,20 @@ mod tests {
     #[tokio::test]
     async fn review_attempt_starts_once_resumes_and_exposes_only_focus_data() {
         let (_directory, runtime, _vault, problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', 'opaque-review-key', 'Z'), (?1, 'codeforces', '2000', 'B')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("multi aliases");
         let note_path = problems.join("CF-1979-A.md");
         fs::write(
             &note_path,
@@ -18989,11 +18952,25 @@ mod tests {
             .await
             .expect("focus view");
         assert_eq!(focus.attempt.attempt_id, first.attempt_id);
+        assert_eq!(focus.attempt.problem_id, problem_id.to_string());
         assert_eq!(focus.title, "Problem A");
         assert!(focus.statement_sanitized_html.contains("A"));
         assert!(!focus
             .statement_sanitized_html
             .contains("DO NOT SEND THIS TO REVIEW"));
+        sqlx::query(
+            "DELETE FROM problem_external_identities WHERE problem_id = ?1 AND external_contest_key IN ('opaque-review-key', '2000')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("remove aliases");
+        assert_eq!(
+            review_focus(&runtime, &first.attempt_id)
+                .await
+                .expect("focus after alias removal"),
+            focus
+        );
         assert_eq!(
             transition_problem_lifecycle(
                 &runtime,
@@ -19014,6 +18991,20 @@ mod tests {
     #[tokio::test]
     async fn help_reveal_commits_evidence_before_returning_fresh_content() {
         let (directory, runtime, vault, problems, problem) = personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', 'opaque-help-key', 'Z')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("opaque alias");
         let note_path = problems.join("CF-1979-A.md");
         fs::write(
             &note_path,
@@ -19051,7 +19042,6 @@ mod tests {
             .await
             .expect("open drawer");
         assert!(drawer.items.iter().all(|item| item.available));
-        let pool = runtime._pool.as_ref().expect("pool");
         let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_help_usage_events")
             .fetch_one(pool)
             .await
@@ -19154,6 +19144,21 @@ mod tests {
     async fn completed_reviews_advance_then_relearn_without_overwriting_history() {
         let (directory, runtime, _vault, _problems, problem, first_attempt) =
             review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM review_attempts WHERE id = ?1",
+        )
+        .bind(&first_attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("problem id");
+        sqlx::query(
+            "INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (?1, 'codeforces', 'opaque-review-completion', 'Z'), (?1, 'codeforces', '2000', 'B')",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("multi aliases");
         let first = complete_review(
             &runtime,
             &first_attempt.attempt_id,
@@ -19162,6 +19167,7 @@ mod tests {
         )
         .await
         .expect("mastered first cold start");
+        assert_eq!(first.attempt.problem_id, problem_id.to_string());
         assert_eq!(first.judgement, acm_os_domain::ReviewJudgement::Mastered);
         assert_eq!(
             first.lifecycle.learning_status,
@@ -19203,6 +19209,14 @@ mod tests {
             .await
             .expect("review history");
         assert_eq!(history.attempts.len(), 2);
+        let canonical_history = review_history_by_id(&runtime, problem_id)
+            .await
+            .expect("canonical history");
+        assert_eq!(canonical_history.attempts.len(), 2);
+        let terminal = review_attempt_history_item(&runtime, &first_attempt.attempt_id)
+            .await
+            .expect("terminal projection");
+        assert_eq!(terminal.problem_id, problem_id.to_string());
         assert_eq!(
             history.historical_best_review,
             Some(acm_os_domain::ReviewJudgement::Mastered)

@@ -365,6 +365,14 @@ pub struct KnowledgeCandidateRegisterInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CanonicalKnowledgeCandidateRegisterInput {
+    problem_id: String,
+    fingerprint: String,
+    target_ref: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeCandidateDispositionInput {
     contest_id: u64,
     index: String,
@@ -470,8 +478,6 @@ pub struct KnowledgeUnderstandingDto {
 #[serde(rename_all = "camelCase")]
 pub struct RelatedKnowledgeProblemDto {
     problem_id: String,
-    contest_id: u64,
-    problem_index: String,
     title: String,
 }
 
@@ -849,7 +855,7 @@ pub struct CanonicalReviewAttemptDto {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewFocusDto {
-    attempt: ReviewAttemptDto,
+    attempt: CanonicalReviewAttemptDto,
     title: String,
     source_url: String,
     statement_sanitized_html: String,
@@ -888,7 +894,7 @@ pub struct RevealedReviewHelpDto {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletedReviewAttemptDto {
-    attempt: ReviewAttemptDto,
+    attempt: CanonicalReviewAttemptDto,
     judgement: &'static str,
     evidence_codes: Vec<String>,
     failure_reasons: Vec<ReviewFailureReasonDto>,
@@ -2037,13 +2043,13 @@ pub async fn complete_review(
 pub async fn void_review(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: VoidReviewInput,
-) -> Result<ReviewHistoryItemDto, &'static str> {
+) -> Result<CanonicalReviewHistoryItemDto, &'static str> {
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
     acm_os_application::void_review(database.inner(), &input.attempt_id, &input.reason)
         .await
-        .map(review_history_item_dto)
+        .map(canonical_review_history_item_dto)
         .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
@@ -2051,13 +2057,13 @@ pub async fn void_review(
 pub async fn review_attempt_history(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ReviewFocusInput,
-) -> Result<ReviewHistoryItemDto, &'static str> {
+) -> Result<CanonicalReviewHistoryItemDto, &'static str> {
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
     acm_os_application::review_attempt_history_item(database.inner(), &input.attempt_id)
         .await
-        .map(review_history_item_dto)
+        .map(canonical_review_history_item_dto)
         .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
@@ -2526,6 +2532,25 @@ pub async fn register_knowledge_candidate(
 }
 
 #[tauri::command]
+pub async fn register_knowledge_candidate_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalKnowledgeCandidateRegisterInput,
+) -> Result<CanonicalKnowledgeCandidateDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    let item = acm_os_application::register_knowledge_candidate_by_id(
+        database.inner(),
+        problem_id,
+        &input.fingerprint,
+        &input.target_ref,
+    )
+    .await
+    .map_err(knowledge_candidate_error_code)?;
+    Ok(canonical_knowledge_candidate_dto(item, &[]))
+}
+
+#[tauri::command]
 pub async fn set_knowledge_candidate_disposition(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: KnowledgeCandidateDispositionInput,
@@ -2772,8 +2797,6 @@ fn knowledge_detail_dto(
             .into_iter()
             .map(|item| RelatedKnowledgeProblemDto {
                 problem_id: item.problem_id,
-                contest_id: item.problem.contest().contest_id(),
-                problem_index: item.problem.index().to_owned(),
                 title: item.title,
             })
             .collect(),
@@ -3405,7 +3428,7 @@ fn canonical_review_attempt_dto(attempt: acm_os_application::CanonicalReviewAtte
 
 fn review_focus_dto(view: acm_os_application::ReviewFocusView) -> ReviewFocusDto {
     ReviewFocusDto {
-        attempt: review_attempt_dto(view.attempt),
+        attempt: canonical_review_attempt_dto(view.attempt),
         title: view.title,
         source_url: view.source_url,
         statement_sanitized_html: view.statement_sanitized_html,
@@ -3535,7 +3558,7 @@ fn completed_review_attempt_dto(
     completed: acm_os_application::CompletedReviewAttempt,
 ) -> CompletedReviewAttemptDto {
     CompletedReviewAttemptDto {
-        attempt: review_attempt_dto(completed.attempt),
+        attempt: canonical_review_attempt_dto(completed.attempt),
         judgement: review_judgement_dto(completed.judgement),
         evidence_codes: completed.evidence_codes,
         failure_reasons: completed
@@ -3569,13 +3592,13 @@ fn canonical_review_history_dto(history: acm_os_application::CanonicalReviewHist
         problem_id,
         historical_best_review: history.historical_best_review.map(review_judgement_dto),
         mastery: problem_mastery_projection_dto(history.mastery),
-        attempts: history.attempts.into_iter().map(|item| canonical_review_history_item_dto(item, &history.problem_id)).collect(),
+        attempts: history.attempts.into_iter().map(canonical_review_history_item_dto).collect(),
     }
 }
 
-fn canonical_review_history_item_dto(item: acm_os_application::CanonicalReviewHistoryItem, problem_id: &str) -> CanonicalReviewHistoryItemDto {
+fn canonical_review_history_item_dto(item: acm_os_application::CanonicalReviewHistoryItem) -> CanonicalReviewHistoryItemDto {
     CanonicalReviewHistoryItemDto {
-        attempt: CanonicalReviewAttemptDto { attempt_id: item.attempt_id, problem_id: problem_id.to_owned(), attempt_type: match item.attempt_type { acm_os_domain::ReviewAttemptType::FirstColdStart => "firstColdStart", acm_os_domain::ReviewAttemptType::LongTermReview => "longTermReview", acm_os_domain::ReviewAttemptType::EarlyCheck => "earlyCheck" }, scheduled_due_local_date: item.scheduled_due_local_date.to_iso_string(), started_early: item.started_early, judgement_rule_version: item.judgement_rule_version, started_at_utc: item.started_at_utc },
+        attempt: CanonicalReviewAttemptDto { attempt_id: item.attempt_id, problem_id: item.problem_id, attempt_type: match item.attempt_type { acm_os_domain::ReviewAttemptType::FirstColdStart => "firstColdStart", acm_os_domain::ReviewAttemptType::LongTermReview => "longTermReview", acm_os_domain::ReviewAttemptType::EarlyCheck => "earlyCheck" }, scheduled_due_local_date: item.scheduled_due_local_date.to_iso_string(), started_early: item.started_early, judgement_rule_version: item.judgement_rule_version, started_at_utc: item.started_at_utc },
         status: match item.status { acm_os_application::ReviewAttemptStatus::InProgress => "inProgress", acm_os_application::ReviewAttemptStatus::Completed => "completed", acm_os_application::ReviewAttemptStatus::Void => "void" },
         judgement: item.judgement.map(review_judgement_dto),
         completion_facts: item.completion_input.as_ref().map(|input| ReviewCompletionFactsDto {
@@ -4745,7 +4768,7 @@ mod tests {
     use acm_os_application::{
         ActiveReviewCycle, KnownMarkdownSection, LocalStatementAsset, MarkdownParseWarning,
         PersonalNoteBinding, PersonalNoteReadState, ProblemIdentityType, ProblemLifecycleState,
-        ProblemMarkdownProjection, RevealedReviewHelp, ReviewAttempt, ReviewFocusView,
+        ProblemMarkdownProjection, RevealedReviewHelp, ReviewFocusView,
         ReviewHelpDrawerView, ReviewHelpItem, SolutionRoute, StartupDestination, StartupGateStatus,
         StartupRecoveryReason, WorkspaceConfiguration, WorkspaceConfigurationError,
         WorkspaceConfigurationStatus, WorkspacePathField,
@@ -5133,11 +5156,6 @@ mod tests {
 
     #[test]
     fn review_contract_exposes_attempt_metadata_and_only_focus_statement_data() {
-        let problem = acm_os_domain::CodeforcesProblemIdentity::new(
-            acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest"),
-            "A",
-        )
-        .expect("problem");
         let due = acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("due");
         let lifecycle = ProblemLifecycleState {
             identity_type: ProblemIdentityType::Personal,
@@ -5163,9 +5181,9 @@ mod tests {
         );
 
         let dto = review_focus_dto(ReviewFocusView {
-            attempt: ReviewAttempt {
+            attempt: acm_os_application::CanonicalReviewAttempt {
                 attempt_id: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab".to_owned(),
-                problem,
+                problem_id: "42".to_owned(),
                 attempt_type: acm_os_domain::ReviewAttemptType::FirstColdStart,
                 scheduled_due_local_date: due,
                 started_early: false,
@@ -5186,8 +5204,7 @@ mod tests {
             json!({
                 "attempt": {
                     "attemptId": "018f0d8e-4a5b-7c6d-8e9f-0123456789ab",
-                    "contestId": 1979,
-                    "index": "A",
+                    "problemId": "42",
                     "attemptType": "firstColdStart",
                     "scheduledDueLocalDate": "2026-08-14",
                     "startedEarly": false,

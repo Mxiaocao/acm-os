@@ -208,7 +208,7 @@ export interface ReviewAttemptDto {
 }
 
 export interface ReviewFocusDto {
-  attempt: ReviewAttemptDto;
+  attempt: CanonicalReviewAttemptDto;
   title: string;
   sourceUrl: string;
   statementSanitizedHtml: string;
@@ -280,7 +280,7 @@ export interface CompleteReviewInputDto {
 }
 
 export interface CompletedReviewAttemptDto {
-  attempt: ReviewAttemptDto;
+  attempt: CanonicalReviewAttemptDto;
   judgement: ReviewJudgementDto;
   evidenceCodes: string[];
   failureReasons: ReviewFailureReasonDto[];
@@ -351,8 +351,9 @@ export interface CanonicalReviewHistoryDto {
   problemId: string;
   historicalBestReview: ReviewJudgementDto | null;
   mastery: ProblemMasteryProjectionDto;
-  attempts: Array<Omit<ReviewHistoryItemDto, "attempt"> & { attempt: CanonicalReviewAttemptDto }>;
+  attempts: CanonicalReviewHistoryItemDto[];
 }
+export type CanonicalReviewHistoryItemDto = Omit<ReviewHistoryItemDto, "attempt"> & { attempt: CanonicalReviewAttemptDto };
 export interface CanonicalReviewAttemptDto {
   attemptId: string;
   problemId: string;
@@ -540,12 +541,12 @@ export function completeReview(input: CompleteReviewInputDto): Promise<Completed
   return invoke<CompletedReviewAttemptDto>("complete_review", { input });
 }
 
-export function voidReview(attemptId: string, reason: string): Promise<ReviewHistoryItemDto> {
-  return invoke<ReviewHistoryItemDto>("void_review", { input: { attemptId, reason } });
+export function voidReview(attemptId: string, reason: string): Promise<CanonicalReviewHistoryItemDto> {
+  return invoke<CanonicalReviewHistoryItemDto>("void_review", { input: { attemptId, reason } });
 }
 
-export function getReviewAttemptHistory(attemptId: string): Promise<ReviewHistoryItemDto> {
-  return invoke<ReviewHistoryItemDto>("review_attempt_history", { input: { attemptId } });
+export function getReviewAttemptHistory(attemptId: string): Promise<CanonicalReviewHistoryItemDto> {
+  return invoke<CanonicalReviewHistoryItemDto>("review_attempt_history", { input: { attemptId } });
 }
 
 export function getReviewHistory(contestId: number, index: string): Promise<ReviewHistoryDto> {

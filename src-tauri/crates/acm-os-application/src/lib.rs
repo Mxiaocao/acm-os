@@ -1014,7 +1014,7 @@ pub struct CanonicalReviewAttempt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewFocusView {
-    pub attempt: ReviewAttempt,
+    pub attempt: CanonicalReviewAttempt,
     pub title: String,
     pub source_url: String,
     pub statement_sanitized_html: String,
@@ -1093,7 +1093,7 @@ pub enum ReviewFailureReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewCompletionContext {
-    pub attempt: ReviewAttempt,
+    pub attempt: CanonicalReviewAttempt,
     pub learning_status: acm_os_domain::LearningStatus,
     pub current_stage: u32,
     pub highest_help_level: Option<acm_os_domain::ReviewHelpLevel>,
@@ -1101,7 +1101,7 @@ pub struct ReviewCompletionContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedReviewAttempt {
-    pub attempt: ReviewAttempt,
+    pub attempt: CanonicalReviewAttempt,
     pub judgement: acm_os_domain::ReviewJudgement,
     pub evidence_codes: Vec<String>,
     pub failure_reasons: Vec<ReviewFailureReason>,
@@ -1150,6 +1150,7 @@ pub struct CanonicalReviewHistoryView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalReviewHistoryItem {
+    pub problem_id: String,
     pub attempt_id: String,
     pub attempt_type: acm_os_domain::ReviewAttemptType,
     pub scheduled_due_local_date: acm_os_domain::LocalDate,
@@ -1266,12 +1267,12 @@ pub trait ReviewAttemptPort {
         &self,
         attempt_id: &str,
         reason: &str,
-    ) -> Result<ReviewHistoryItem, ReviewAttemptError>;
+    ) -> Result<CanonicalReviewHistoryItem, ReviewAttemptError>;
 
     async fn load_review_attempt_history_item(
         &self,
         attempt_id: &str,
-    ) -> Result<ReviewHistoryItem, ReviewAttemptError>;
+    ) -> Result<CanonicalReviewHistoryItem, ReviewAttemptError>;
 
     async fn load_review_history(
         &self,
@@ -1489,7 +1490,7 @@ pub async fn void_review<P: ReviewAttemptPort>(
     port: &P,
     attempt_id: &str,
     reason: &str,
-) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+) -> Result<CanonicalReviewHistoryItem, ReviewAttemptError> {
     if reason.trim().is_empty() || reason.len() > 500 {
         return Err(ReviewAttemptError::InvalidVoidReason);
     }
@@ -1499,7 +1500,7 @@ pub async fn void_review<P: ReviewAttemptPort>(
 pub async fn review_attempt_history_item<P: ReviewAttemptPort>(
     port: &P,
     attempt_id: &str,
-) -> Result<ReviewHistoryItem, ReviewAttemptError> {
+) -> Result<CanonicalReviewHistoryItem, ReviewAttemptError> {
     port.load_review_attempt_history_item(attempt_id).await
 }
 
@@ -3652,7 +3653,6 @@ pub async fn confirm_knowledge_understanding<P: KnowledgeUnderstandingPort>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelatedKnowledgeProblemProjection {
     pub problem_id: String,
-    pub problem: acm_os_domain::CodeforcesProblemIdentity,
     pub title: String,
 }
 
@@ -3772,6 +3772,13 @@ pub trait KnowledgeCandidatePort {
         target_ref: &str,
     ) -> Result<KnowledgeCandidateReadProjection, KnowledgeCandidateError>;
 
+    async fn register_knowledge_candidate_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        target_ref: &str,
+    ) -> Result<CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError>;
+
     async fn set_knowledge_candidate_disposition(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
@@ -3808,6 +3815,18 @@ pub async fn list_knowledge_candidates_by_id<P: KnowledgeCandidatePort>(
     problem_id: i64,
 ) -> Result<Vec<CanonicalKnowledgeCandidateReadProjection>, KnowledgeCandidateError> {
     port.list_knowledge_candidates_by_id(problem_id).await
+}
+
+pub async fn register_knowledge_candidate_by_id<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem_id: i64,
+    fingerprint: &str,
+    target_ref: &str,
+) -> Result<CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    let target_ref = normalize_candidate_target(target_ref)?;
+    port.register_knowledge_candidate_by_id(problem_id, &fingerprint, &target_ref)
+        .await
 }
 
 pub async fn set_knowledge_candidate_disposition_by_id<P: KnowledgeCandidatePort>(

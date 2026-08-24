@@ -131,6 +131,7 @@ import {
   type ReviewHistoryDto,
   type ReviewHistoryItemDto,
   type CanonicalReviewHistoryDto,
+  type CanonicalReviewHistoryItemDto,
   type ReviewFailureReasonCodeDto,
   type SubmissionResultDto,
 } from "../ipc/contest";
@@ -423,7 +424,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
   const [revealedHelp, setRevealedHelp] = useState<RevealedReviewHelpDto[]>([]);
   const [revealingLevel, setRevealingLevel] = useState<ReviewHelpLevel | null>(null);
   const [completedReview, setCompletedReview] = useState<CompletedReviewAttemptDto | null>(null);
-  const [terminalHistory, setTerminalHistory] = useState<ReviewHistoryItemDto | null>(null);
+  const [terminalHistory, setTerminalHistory] = useState<CanonicalReviewHistoryItemDto | null>(null);
   const [completion, setCompletion] = useState<CompleteReviewInputDto>(() => emptyReviewCompletion(attemptId));
   const [completionError, setCompletionError] = useState<string | null>(null);
   const [ojOpenError, setOjOpenError] = useState<string | null>(null);
@@ -607,7 +608,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
       <header className="review-header">
         <div>
           <p className="eyebrow">M4 · 复习专注</p>
-          <h1>{focus ? `${focus.attempt.index}. ${displayProblemTitle(focus.attempt.index, focus.title)}` : "Isolated review workspace"}</h1>
+          <h1>{focus ? focus.title : "Isolated review workspace"}</h1>
         </div>
         <button className="secondary-action" onClick={() => navigate("/today")} type="button">
           返回今日计划
@@ -1026,7 +1027,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
           </div>
           <KnowledgeNeighborList heading="指向的知识" nodes={detail.outgoing} onOpen={openDetail} />
           <KnowledgeNeighborList heading="引用此知识" nodes={detail.incoming} onOpen={openDetail} />
-          <div><h3>相关题目</h3>{detail.relatedProblems.length === 0 ? <p>暂无。</p> : <ul>{detail.relatedProblems.map((problem) => <li key={problem.problemId}><button className="list-link" onClick={() => navigate(`/problems/${problem.contestId}/${problem.problemIndex}`)} type="button"><strong>{problem.contestId}{problem.problemIndex} · {problem.title}</strong></button></li>)}</ul>}</div>
+<div><h3>相关题目</h3>{detail.relatedProblems.length === 0 ? <p>暂无。</p> : <ul>{detail.relatedProblems.map((problem) => <li key={problem.problemId}><button className="list-link" onClick={() => navigate(`/problems/id/${problem.problemId}`)} type="button"><strong>{problem.title}</strong></button></li>)}</ul>}</div>
         </section>
       ) : null}
     </>
@@ -2488,7 +2489,7 @@ function ReviewEvidenceCard({ completed }: { completed: CompletedReviewAttemptDt
   );
 }
 
-function ReviewHistoryEvidenceCard({ item }: { item: ReviewHistoryItemDto }) {
+function ReviewHistoryEvidenceCard({ item }: { item: ReviewHistoryItemDto | CanonicalReviewHistoryItemDto }) {
   if (item.status === "void") {
     return <section className="review-stage review-evidence-card"><p className="eyebrow">复习历史</p><h2>已作废的误开复习</h2><p>{item.voidReason}</p><p>复习排程没有改变，已查看的帮助仍保留在历史中。</p></section>;
   }

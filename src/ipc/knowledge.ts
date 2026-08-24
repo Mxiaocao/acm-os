@@ -37,8 +37,6 @@ export interface KnowledgeUnderstandingDto {
 
 export interface RelatedKnowledgeProblemDto {
   problemId: string;
-  contestId: number;
-  problemIndex: string;
   title: string;
 }
 
@@ -114,6 +112,14 @@ export const registerKnowledgeCandidate = (
   targetRef: string,
 ) => invoke<KnowledgeCandidateDto>("register_knowledge_candidate", {
   input: { contestId, index, fingerprint, targetRef },
+});
+
+export const registerKnowledgeCandidateById = (
+  problemId: string,
+  fingerprint: string,
+  targetRef: string,
+) => invoke<CanonicalKnowledgeCandidateDto>("register_knowledge_candidate_by_id", {
+  input: { problemId, fingerprint, targetRef },
 });
 
 export const setKnowledgeCandidateDisposition = (

@@ -127,6 +127,7 @@ pub fn run() {
             ipc::knowledge_candidates,
             ipc::knowledge_candidates_by_id,
             ipc::register_knowledge_candidate,
+            ipc::register_knowledge_candidate_by_id,
             ipc::set_knowledge_candidate_disposition,
             ipc::set_knowledge_candidate_disposition_by_id,
             ipc::accept_existing_knowledge_candidate,

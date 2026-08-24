@@ -4,7 +4,7 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { createServer } from "vite";
+import { createServer, createServerModuleRunner } from "vite";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -13,24 +13,34 @@ const vite = await createServer({
   root: process.cwd(),
   cacheDir: ".dom-shells-vite-cache",
   plugins: [{
-    name: "dom-shells-css-stub",
+    name: "dom-shells-static-asset-stub",
     enforce: "pre",
     resolveId(source) {
-      return source === "katex/dist/katex.min.css" ? `\0dom-shells-css:${source}` : undefined;
+      if (source === "katex/dist/katex.min.css") return `\0dom-shells-css:${source}`;
+      return undefined;
     },
     load(id) {
-      return id.startsWith("\0dom-shells-css:") ? "export default {};" : undefined;
+      if (id.startsWith("\0dom-shells-css:")) return "export default {};";
+      return undefined;
     },
     transform(code, id) {
       if (id.endsWith("/src/app/shells.tsx")) {
-        return code.replace('import "katex/dist/katex.min.css";', "");
+        return code
+          .replace('import "katex/dist/katex.min.css";', "")
+          .replace(
+            /import (\w+) from "(\.\.\/assets\/[^\"]+\.(?:png|jpe?g|webp|svg))";/g,
+            (_match, name, source) => `const ${name} = ${JSON.stringify(`dom-shells-asset://${source}`)};`,
+          );
       }
       return undefined;
     },
   }],
   server: { middlewareMode: true },
 });
-const shells = await vite.ssrLoadModule("/src/app/shells.tsx");
+const moduleRunner = createServerModuleRunner(vite.environments.ssr, { hmr: false });
+moduleRunner.options.transport.timeout = 300_000;
+moduleRunner.transport.timeout = 300_000;
+const shells = await moduleRunner.import("/src/app/shells.tsx");
 
 const configuredWorkspace = {
   state: "configured",
@@ -210,7 +220,7 @@ async function renderApp(ipc, pathname = "/", strict = false) {
     if (command === "plugin:event|unlisten") return null;
     return ipc(command, args);
   });
-  const { App } = await vite.ssrLoadModule("/src/app/App.tsx");
+  const { App } = await moduleRunner.import("/src/app/App.tsx");
   const root = createRoot(dom.window.document.getElementById("root"));
   const app = React.createElement(App);
   await act(async () => root.render(strict ? React.createElement(React.StrictMode, null, app) : app));
@@ -812,7 +822,10 @@ test("Contest Library ignores stale Series responses after rapid Family switchin
   } finally { await view.cleanup(); }
 });
 
-test.after(async () => vite.close());
+test.after(async () => {
+  moduleRunner.close();
+  await vite.close();
+});
 
 test("Loading, Recovery, and Setup hide ordinary navigation and focus their content", { concurrency: false }, async () => {
   const states = [
@@ -1742,7 +1755,7 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
       focusCalls += 1;
       return {
         attempt: {
-          attemptId, contestId: 1979, index: "A", attemptType: "firstColdStart",
+          attemptId, problemId: "1", attemptType: "firstColdStart",
           scheduledDueLocalDate: "2026-08-14", startedEarly: false,
           judgementRuleVersion: 1, startedAtUtc: "2026-08-14T00:00:00.000Z",
         },
@@ -1791,7 +1804,7 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
       }
       return {
         attempt: {
-          attemptId, contestId: 1979, index: "A", attemptType: "firstColdStart",
+          attemptId, problemId: "1", attemptType: "firstColdStart",
           scheduledDueLocalDate: "2026-08-14", startedEarly: false,
           judgementRuleVersion: 1, startedAtUtc: "2026-08-14T00:00:00.000Z",
         },
@@ -2537,7 +2550,7 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
     if (command === "knowledge_index") { calls.push([command, args]); return { nodes: [node], locationAnomalies: [], identityConflicts: [] }; }
-    if (command === "knowledge_detail") { calls.push([command, args]); return { node, understanding, incoming: [], outgoing: [], relatedProblems: [{ problemId: "problem-1", contestId: 1, problemIndex: "A", title: "Theatre Square" }] }; }
+    if (command === "knowledge_detail") { calls.push([command, args]); return { node, understanding, incoming: [], outgoing: [], relatedProblems: [{ problemId: "1", title: "Theatre Square" }] }; }
     if (command === "knowledge_reevaluation_suggestion") { calls.push([command, args]); return { knowledgeNodeId: node.knowledgeNodeId, shouldSuggest: true, qualifyingProblemCount: 3 }; }
     if (command === "confirm_knowledge_understanding") {
       calls.push([command, args]);
@@ -2554,6 +2567,8 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
     await act(async () => nodeButton.click()); await settle();
     assert.equal(calls.filter(([name]) => name === "knowledge_detail").length, 1);
     assert.equal(calls.filter(([name]) => name === "knowledge_reevaluation_suggestion").length, 1);
+    const relatedProblem = [...view.document.querySelectorAll("button")].find((button) => button.textContent.includes("Theatre Square"));
+    assert.ok(relatedProblem);
     assert.match(view.document.body.textContent, /建议重新评估此知识状态：3 道相关题目获得了新的“真会”复习证据/);
     assert.match(view.document.body.textContent, /当前状态没有改变/);
     assert.match(view.document.body.textContent, /尚未有用户确认的状态/);
@@ -2569,6 +2584,8 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
     assert.equal(calls.at(-1)[0], "confirm_knowledge_understanding");
     assert.equal(calls.at(-1)[1].input.level, "basic");
     assert.match(view.document.body.textContent, /历史最高：\s*基本理解/);
+    await act(async () => relatedProblem.click()); await settle();
+    assert.equal(view.window.location.pathname, "/problems/id/1");
   } finally { await view.cleanup(); }
 });
 
