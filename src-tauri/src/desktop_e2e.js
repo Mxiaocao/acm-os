@@ -46,8 +46,23 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       }
     };
     const navigateTo = async (label, readyText = label) => {
-      await clickText(label);
-      await waitText(readyText);
+      const primaryRoute = {
+        Today: "/today",
+        Contests: "/contests",
+        Knowledge: "/knowledge",
+        Settings: "/settings",
+      }[label];
+      if (primaryRoute) {
+        await waitFor(
+          () => document.querySelector(`nav[aria-label="Primary"] a[href="${primaryRoute}"]`) !== null,
+          `${label} primary route`,
+        );
+        document.querySelector(`nav[aria-label="Primary"] a[href="${primaryRoute}"]`).click();
+        await waitFor(() => window.location.pathname === primaryRoute, `${label} route`);
+      } else {
+        await clickText(label);
+        await waitText(readyText);
+      }
     };
 
     try {
@@ -100,14 +115,20 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
         return;
       }
 
-      await waitText("Connect your workspace");
+      await waitFor(
+        () => document.querySelector(".workspace-form button[type=submit]") !== null,
+        "workspace setup form",
+      );
       await stage("workspace-shell-ready");
       const inputs = [...document.querySelectorAll(".workspace-form input")];
       [configured.vault, configured.problems, configured.knowledge]
         .forEach((value, index) => inputValue(inputs[index], value));
       document.querySelector(".workspace-form button[type=submit]").click();
 
-      await waitText("Today");
+      await waitFor(
+        () => document.querySelector('nav[aria-label="Primary"] a[href="/today"]') !== null,
+        "primary Today route",
+      );
       await stage("workspace-configured");
 
       await navigateTo("Knowledge", "Knowledge index");
