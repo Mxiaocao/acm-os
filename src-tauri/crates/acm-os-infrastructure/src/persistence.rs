@@ -10588,6 +10588,26 @@ async fn validate_scheduled_review_ordinal_contract(
     {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
+    let completed_scheduled_without_state: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT a.problem_id)
+         FROM review_attempts a
+         WHERE a.attempt_status = 'completed'
+           AND a.attempt_type IN ('first_cold_start', 'long_term_review')
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduled_review_ordinal_facts f
+               WHERE f.review_attempt_id = a.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduled_review_ordinal_states s
+               WHERE s.problem_id = a.problem_id
+           )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if completed_scheduled_without_state != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
     let inconsistent: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM scheduled_review_ordinal_states s
          WHERE s.historical_baseline < 0
@@ -12120,6 +12140,422 @@ mod tests {
         assert_eq!(projected[&first_attempt.attempt_id.as_str()], Some(1));
         assert_eq!(projected[&second_attempt.attempt_id.as_str()], Some(2));
         assert_eq!(projected[&third_attempt.attempt_id.as_str()], Some(3));
+    }
+
+    #[tokio::test]
+    async fn s4g_stale_completion_context_cannot_allocate_twice() {
+        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        let completed_on =
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion date");
+        let context = runtime
+            .load_review_completion_context(&attempt.attempt_id)
+            .await
+            .expect("stale context fixture");
+        let stale_input = mastered_input();
+        let judgement = acm_os_domain::ReviewJudgementEngine::judge(
+            &stale_input.domain_facts(),
+            context.highest_help_level,
+        )
+        .expect("judgement");
+        let scheduling = acm_os_domain::ReviewSchedulingEngine::complete_review(
+            context.learning_status,
+            context.attempt.attempt_type,
+            judgement.judgement,
+            context.current_stage,
+            completed_on,
+        )
+        .expect("scheduling");
+
+        complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            mastered_input(),
+            completed_on,
+        )
+        .await
+        .expect("authoritative completion");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let before = scheduled_ordinal_snapshot(pool).await;
+        assert_eq!(before, (0, 1, 1, vec![1]));
+        assert_eq!(
+            runtime
+                .commit_review_completion(
+                    &context,
+                    &stale_input,
+                    &judgement,
+                    scheduling,
+                    completed_on,
+                )
+                .await,
+            Err(ReviewAttemptError::AttemptAlreadyFinished)
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, before);
+    }
+
+    #[tokio::test]
+    async fn s4g_database_rejects_collisions_and_authority_rewrites() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion"),
+        )
+        .await
+        .expect("ordinal one");
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second attempt");
+        let pool = runtime._pool.as_ref().expect("pool");
+        let problem_id: i64 =
+            sqlx::query_scalar("SELECT problem_id FROM review_attempts WHERE id = ?1")
+                .bind(&first_attempt.attempt_id)
+                .fetch_one(pool)
+                .await
+                .expect("problem id");
+        let other_problem_id: i64 = sqlx::query_scalar("SELECT MAX(id) + 1 FROM problems")
+            .fetch_one(pool)
+            .await
+            .expect("other problem id");
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url, identity_type)
+             VALUES (?1, 'Other problem', 'https://example.test/problem/other', 'lightweight')",
+        )
+        .bind(other_problem_id)
+        .execute(pool)
+        .await
+        .expect("other canonical problem");
+
+        assert!(sqlx::query(
+            "INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal)
+             SELECT id, problem_id, 2 FROM review_attempts WHERE id = ?1",
+        )
+        .bind(&first_attempt.attempt_id)
+        .execute(pool)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal)
+             SELECT id, problem_id, 1 FROM review_attempts WHERE id = ?1",
+        )
+        .bind(&second_attempt.attempt_id)
+        .execute(pool)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal)
+             VALUES (?1, ?2, 2)",
+        )
+        .bind(&second_attempt.attempt_id)
+        .bind(other_problem_id)
+        .execute(pool)
+        .await
+        .is_err());
+
+        for query in [
+            "UPDATE scheduled_review_ordinal_facts SET ordinal = 2 WHERE review_attempt_id = ?1",
+            "DELETE FROM scheduled_review_ordinal_facts WHERE review_attempt_id = ?1",
+            "UPDATE review_attempts SET attempt_type = 'early_check' WHERE id = ?1",
+            "UPDATE review_attempts SET attempt_status = 'void' WHERE id = ?1",
+            "DELETE FROM review_attempts WHERE id = ?1",
+        ] {
+            assert!(sqlx::query(query)
+                .bind(&first_attempt.attempt_id)
+                .execute(pool)
+                .await
+                .is_err());
+        }
+        assert!(sqlx::query(
+            "UPDATE scheduled_review_ordinal_states SET historical_baseline = 1
+             WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "UPDATE scheduled_review_ordinal_states SET last_allocated = 0
+             WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .is_err());
+        assert!(
+            sqlx::query("DELETE FROM scheduled_review_ordinal_states WHERE problem_id = ?1",)
+                .bind(problem_id)
+                .execute(pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+    }
+
+    #[tokio::test]
+    async fn s4g_early_check_all_judgements_never_touch_ordinal_authority() {
+        for (input, expected_judgement) in [
+            (mastered_input(), acm_os_domain::ReviewJudgement::Mastered),
+            (
+                {
+                    let mut input = mastered_input();
+                    input.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+                    input.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Partial,
+            ),
+            (
+                {
+                    let mut input = mastered_input();
+                    input.final_ac = false;
+                    input.first_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.final_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.total_submissions = 1;
+                    input.failure_reasons = vec![ReviewFailureReason::ImplementationError];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Fail,
+            ),
+        ] {
+            let (_directory, runtime, _vault, _problems, problem, scheduled) =
+                review_ready_fixture().await;
+            void_review(&runtime, &scheduled.attempt_id, "replace with early check")
+                .await
+                .expect("void scheduled attempt");
+            let early = start_or_resume_review(
+                &runtime,
+                &problem,
+                acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early date"),
+            )
+            .await
+            .expect("early check");
+            let completed = complete_review(
+                &runtime,
+                &early.attempt_id,
+                input,
+                acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("completion"),
+            )
+            .await
+            .expect("complete early check");
+            assert_eq!(completed.judgement, expected_judgement);
+            let pool = runtime._pool.as_ref().expect("pool");
+            assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 0, 0, vec![]));
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM scheduled_review_ordinal_states",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("state count"),
+                0
+            );
+            assert_eq!(
+                load_review_history_item_from_pool(pool, &early.attempt_id)
+                    .await
+                    .expect("early projection")
+                    .stable_scheduled_review_ordinal,
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn s4g_restart_fails_closed_for_gap_state_source_and_baseline_corruption() {
+        for scenario in ["gap", "state_without_fact", "early_source", "baseline"] {
+            let (directory, runtime, _vault, _problems, problem, first_attempt) =
+                review_ready_fixture().await;
+            complete_review(
+                &runtime,
+                &first_attempt.attempt_id,
+                mastered_input(),
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+            )
+            .await
+            .expect("ordinal one");
+            if scenario == "gap" {
+                let second_attempt = start_or_resume_review(
+                    &runtime,
+                    &problem,
+                    acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+                )
+                .await
+                .expect("second attempt");
+                complete_review(
+                    &runtime,
+                    &second_attempt.attempt_id,
+                    mastered_input(),
+                    acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+                )
+                .await
+                .expect("ordinal two");
+            }
+            let pool = runtime._pool.as_ref().expect("pool").clone();
+            drop(runtime);
+
+            match scenario {
+                "gap" => {
+                    let trigger_sql: String = sqlx::query_scalar(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger'
+                         AND name = 'scheduled_review_ordinal_facts_no_delete'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .expect("delete trigger SQL");
+                    sqlx::query("DROP TRIGGER scheduled_review_ordinal_facts_no_delete")
+                        .execute(&pool)
+                        .await
+                        .expect("drop delete guard");
+                    sqlx::query("DELETE FROM scheduled_review_ordinal_facts WHERE ordinal = 1")
+                        .execute(&pool)
+                        .await
+                        .expect("inject gap");
+                    sqlx::query(sqlx::AssertSqlSafe(trigger_sql.as_str()))
+                        .execute(&pool)
+                        .await
+                        .expect("restore delete guard");
+                }
+                "state_without_fact" => {
+                    sqlx::query(
+                        "UPDATE scheduled_review_ordinal_states
+                         SET last_allocated = last_allocated + 1",
+                    )
+                    .execute(&pool)
+                    .await
+                    .expect("advance without fact");
+                }
+                "early_source" => {
+                    let identity_trigger: String = sqlx::query_scalar(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger'
+                         AND name = 'scheduled_review_ordinal_attempt_identity_immutable'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .expect("identity trigger SQL");
+                    let completed_trigger: String = sqlx::query_scalar(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger'
+                         AND name = 'completed_scheduled_review_no_update'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .expect("completed trigger SQL");
+                    sqlx::query("DROP TRIGGER scheduled_review_ordinal_attempt_identity_immutable")
+                        .execute(&pool)
+                        .await
+                        .expect("drop identity guard");
+                    sqlx::query("DROP TRIGGER completed_scheduled_review_no_update")
+                        .execute(&pool)
+                        .await
+                        .expect("drop completed guard");
+                    sqlx::query(
+                        "UPDATE review_attempts
+                         SET attempt_type = 'early_check', started_early = 1 WHERE id = ?1",
+                    )
+                    .bind(&first_attempt.attempt_id)
+                    .execute(&pool)
+                    .await
+                    .expect("inject Early source");
+                    sqlx::query(sqlx::AssertSqlSafe(identity_trigger.as_str()))
+                        .execute(&pool)
+                        .await
+                        .expect("restore identity guard");
+                    sqlx::query(sqlx::AssertSqlSafe(completed_trigger.as_str()))
+                        .execute(&pool)
+                        .await
+                        .expect("restore completed guard");
+                }
+                "baseline" => {
+                    let trigger_sql: String = sqlx::query_scalar(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger'
+                         AND name = 'scheduled_review_ordinal_baseline_immutable'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .expect("baseline trigger SQL");
+                    sqlx::query("DROP TRIGGER scheduled_review_ordinal_baseline_immutable")
+                        .execute(&pool)
+                        .await
+                        .expect("drop baseline guard");
+                    sqlx::query(
+                        "UPDATE scheduled_review_ordinal_states SET historical_baseline = 1",
+                    )
+                    .execute(&pool)
+                    .await
+                    .expect("inject baseline mismatch");
+                    sqlx::query(sqlx::AssertSqlSafe(trigger_sql.as_str()))
+                        .execute(&pool)
+                        .await
+                        .expect("restore baseline guard");
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_scheduled_review_ordinal_contract(&pool).await,
+                Err(StartupRecoveryReason::IntegrityCheckFailed),
+                "validator must reject {scenario}"
+            );
+            pool.close().await;
+            let blocked = start_database(directory.path()).await;
+            assert_eq!(
+                blocked.status(),
+                &StartupGateStatus::RecoveryRequired {
+                    reason: StartupRecoveryReason::IntegrityCheckFailed,
+                },
+                "startup must reject {scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn s4g_validator_rejects_unordinalized_scheduled_population_without_state() {
+        let (directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        let pool = runtime._pool.as_ref().expect("pool").clone();
+        sqlx::query(
+            "INSERT INTO review_attempts
+             (id, problem_id, review_cycle_id, attempt_type, attempt_status,
+              scheduled_due_local_date, started_early, judgement_rule_version,
+              started_at_utc, completed_at_utc, judgement, completed_local_date,
+              final_ac, first_submission_result, final_result, total_submissions,
+              idea_independent, implementation_independent, debug_independence,
+              external_help, evidence_codes_json)
+             SELECT '00000000-0000-0000-0000-000000000099', problem_id,
+                    review_cycle_id, 'long_term_review', 'completed',
+                    '2026-08-12', 0, judgement_rule_version,
+                    '2026-08-12T00:00:00.000Z', '2026-08-12T00:01:00.000Z',
+                    'mastered', '2026-08-12', 1, 'accepted', 'accepted', 1,
+                    1, 1, 'not_needed', 'none', '[]'
+             FROM review_attempts WHERE id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .execute(&pool)
+        .await
+        .expect("inject unordinalized completed Scheduled attempt");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scheduled_review_ordinal_states")
+                .fetch_one(&pool)
+                .await
+                .expect("no ordinal state"),
+            0
+        );
+        assert_eq!(
+            validate_scheduled_review_ordinal_contract(&pool).await,
+            Err(StartupRecoveryReason::IntegrityCheckFailed)
+        );
+        drop(runtime);
+        pool.close().await;
+        let blocked = start_database(directory.path()).await;
+        assert_eq!(
+            blocked.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
     }
 
     #[tokio::test]
@@ -13790,9 +14226,17 @@ mod tests {
             let cycle_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES (?1, ?2, 1, 'active', 0, 1, '2026-08-02')")
                 .bind(&cycle_id).bind(problem_id).execute(pool).await.expect("cycle");
-            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-02', 0, 1, '2026-08-02T00:00:00.000Z', ?4, 'mastered', '2026-08-02', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
-                .bind(uuid::Uuid::now_v7().to_string()).bind(problem_id).bind(&cycle_id)
-                .bind(format!("2026-08-02T00:00:0{position}.000Z")).execute(pool).await.expect("mastered review");
+            let attempt_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES (?1, ?2, ?3, 'first_cold_start', '2026-08-02', 0, 1, '2026-08-02T00:00:00.000Z')")
+                .bind(&attempt_id).bind(problem_id).bind(&cycle_id)
+                .execute(pool).await.expect("mastered review attempt");
+            sqlx::query("INSERT INTO scheduled_review_ordinal_states (problem_id, historical_baseline, last_allocated) VALUES (?1, 0, 1)")
+                .bind(problem_id).execute(pool).await.expect("ordinal state");
+            sqlx::query("INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal) VALUES (?1, ?2, 1)")
+                .bind(&attempt_id).bind(problem_id).execute(pool).await.expect("ordinal fact");
+            sqlx::query("UPDATE review_attempts SET attempt_status = 'completed', completed_at_utc = ?2, judgement = 'mastered', completed_local_date = '2026-08-02', final_ac = 1, first_submission_result = 'accepted', final_result = 'accepted', total_submissions = 1, idea_independent = 1, implementation_independent = 1, debug_independence = 'not_needed', external_help = 'none', evidence_codes_json = '[]' WHERE id = ?1")
+                .bind(&attempt_id).bind(format!("2026-08-02T00:00:0{position}.000Z"))
+                .execute(pool).await.expect("mastered review completion");
             let suggestion = acm_os_application::load_knowledge_reevaluation_suggestion(
                 &runtime,
                 &target.knowledge_node_id,
@@ -13811,8 +14255,20 @@ mod tests {
                 .fetch_one(pool)
                 .await
                 .expect("first cycle");
-        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-03', 0, 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z', 'mastered', '2026-08-03', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
-            .bind(uuid::Uuid::now_v7().to_string()).bind(first_id).bind(first_cycle).execute(pool).await.expect("duplicate mastered review");
+        let duplicate_attempt_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES (?1, ?2, ?3, 'first_cold_start', '2026-08-03', 0, 1, '2026-08-03T00:00:00.000Z')")
+            .bind(&duplicate_attempt_id).bind(first_id).bind(first_cycle).execute(pool).await.expect("duplicate mastered review attempt");
+        sqlx::query(
+            "UPDATE scheduled_review_ordinal_states SET last_allocated = 2 WHERE problem_id = ?1",
+        )
+        .bind(first_id)
+        .execute(pool)
+        .await
+        .expect("second ordinal allocation");
+        sqlx::query("INSERT INTO scheduled_review_ordinal_facts (review_attempt_id, problem_id, ordinal) VALUES (?1, ?2, 2)")
+            .bind(&duplicate_attempt_id).bind(first_id).execute(pool).await.expect("second ordinal fact");
+        sqlx::query("UPDATE review_attempts SET attempt_status = 'completed', completed_at_utc = '2026-08-03T00:00:00.000Z', judgement = 'mastered', completed_local_date = '2026-08-03', final_ac = 1, first_submission_result = 'accepted', final_result = 'accepted', total_submissions = 1, idea_independent = 1, implementation_independent = 1, debug_independence = 'not_needed', external_help = 'none', evidence_codes_json = '[]' WHERE id = ?1")
+            .bind(&duplicate_attempt_id).execute(pool).await.expect("duplicate mastered review completion");
         assert_eq!(
             acm_os_application::load_knowledge_reevaluation_suggestion(
                 &runtime,
