@@ -59,6 +59,45 @@ const STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const DATABASE_RESTORE_ROLLBACK_SUFFIX: &str = ".restore-rollback";
 const DATABASE_RESTORE_INTENT_FILENAME: &str = "restore-intent.json";
+const MAX_EXACT_REWARD_AMOUNT: i64 = 9_007_199_254_740_991;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewardActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+fn parse_reward_utc_millis(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    if value.len() != 24
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || value.as_bytes().get(19) != Some(&b'.')
+        || value.as_bytes().get(23) != Some(&b'Z')
+    {
+        return None;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    if parsed.offset().local_minus_utc() != 0
+        || parsed.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string() != value
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn reward_activation_relation(
+    source_time: chrono::DateTime<chrono::FixedOffset>,
+    activation_time: chrono::DateTime<chrono::FixedOffset>,
+) -> RewardActivationRelation {
+    if source_time <= activation_time {
+        RewardActivationRelation::PreActivation
+    } else {
+        RewardActivationRelation::PostActivation
+    }
+}
 
 type SqliteColumnContract = (i64, String, String, i64, Option<String>, i64, i64);
 
@@ -9149,6 +9188,7 @@ async fn validate_schema_contract(
             | 27
             | 28
             | 29
+            | 30
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -9289,6 +9329,9 @@ async fn validate_schema_contract(
     }
     if schema_version >= 29 {
         validate_scheduled_review_ordinal_contract(pool).await?;
+    }
+    if schema_version >= 30 {
+        validate_reward_durable_core_contract(pool).await?;
     }
     Ok(())
 }
@@ -9713,6 +9756,161 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "trigger".to_owned(),
                 "scheduled_review_ordinal_states_no_delete".to_owned(),
                 "scheduled_review_ordinal_states".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 30 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "reward_events_by_problem".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_events_by_recorded_at".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_ledger_entries_by_resource".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_activation_state".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_events".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_grants".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_ledger_entries".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_review_event_sources".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_activation_state_no_delete".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_activation_state_transition_guard".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_events_no_delete".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_events_no_update".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_insert_guard".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_no_delete".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_no_update".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_insert_guard".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_no_delete".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_no_update".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_ledger_entries_no_delete".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_ledger_entries_no_update".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_exclusive".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_insert_guard".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_no_delete".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_no_update".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_exclusive".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_insert_guard".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_no_delete".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_no_update".to_owned(),
+                "reward_review_event_sources".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -10667,6 +10865,376 @@ async fn validate_scheduled_review_ordinal_contract(
     Ok(())
 }
 
+async fn validate_reward_durable_core_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    for (table, columns) in [
+        (
+            "reward_activation_state",
+            &[
+                "singleton",
+                "activation_status",
+                "installed_at_utc",
+                "activated_at_utc",
+            ][..],
+        ),
+        (
+            "reward_events",
+            &[
+                "id",
+                "problem_id",
+                "source_occurred_at_utc",
+                "activation_relation",
+                "recorded_at_utc",
+            ][..],
+        ),
+        (
+            "reward_problem_completion_event_sources",
+            &["reward_event_id", "problem_completion_occurrence_id"][..],
+        ),
+        (
+            "reward_review_event_sources",
+            &["reward_event_id", "review_attempt_id", "problem_id"][..],
+        ),
+        (
+            "reward_grants",
+            &[
+                "reward_event_id",
+                "xp_amount",
+                "coin_amount",
+                "decision_reason",
+                "policy_key",
+                "policy_version",
+                "decided_at_utc",
+            ][..],
+        ),
+        (
+            "reward_ledger_entries",
+            &["id", "resource_kind", "delta", "recorded_at_utc"][..],
+        ),
+        (
+            "reward_grant_ledger_origins",
+            &["ledger_entry_id", "reward_event_id", "resource_kind"][..],
+        ),
+    ] {
+        validate_table_columns(pool, table, columns).await?;
+    }
+
+    let s3_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_completion_event_sources')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if s3_fks.len() != 2
+        || !s3_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "reward_event_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || !s3_fks.iter().any(|fk| {
+            fk.2 == "problem_completion_occurrences"
+                && fk.3 == "problem_completion_occurrence_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let s4_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_review_event_sources')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if s4_fks.len() != 4
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "reward_events" && fk.3 == "reward_event_id" && fk.4 == "id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "reward_events" && fk.3 == "problem_id" && fk.4 == "problem_id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "review_attempts" && fk.3 == "review_attempt_id" && fk.4 == "id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "review_attempts" && fk.3 == "problem_id" && fk.4 == "problem_id")
+        || s4_fks
+            .iter()
+            .any(|fk| !fk.6.eq_ignore_ascii_case("RESTRICT"))
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let activation_rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT singleton, activation_status, installed_at_utc, activated_at_utc
+         FROM reward_activation_state",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if activation_rows.len() != 1
+        || activation_rows[0].0 != 1
+        || parse_reward_utc_millis(&activation_rows[0].2).is_none()
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let activation_time = match (
+        activation_rows[0].1.as_str(),
+        activation_rows[0].3.as_deref(),
+    ) {
+        ("inactive", None) => None,
+        ("active", Some(value)) => Some(
+            parse_reward_utc_millis(value).ok_or(StartupRecoveryReason::IntegrityCheckFailed)?,
+        ),
+        _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
+    };
+
+    let events: Vec<(String, Option<i64>, String, String, String)> = sqlx::query_as(
+        "SELECT id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc
+         FROM reward_events",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if activation_time.is_none() && !events.is_empty() {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    for (id, _, source_time, relation, recorded_at) in &events {
+        if uuid::Uuid::parse_str(id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || parse_reward_utc_millis(recorded_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+        let source_time = parse_reward_utc_millis(source_time)
+            .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+        let expected_relation = reward_activation_relation(
+            source_time,
+            activation_time.ok_or(StartupRecoveryReason::IntegrityCheckFailed)?,
+        );
+        if !matches!(
+            (expected_relation, relation.as_str()),
+            (RewardActivationRelation::PreActivation, "pre_activation")
+                | (RewardActivationRelation::PostActivation, "post_activation")
+        ) {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_event_participation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_events event
+         WHERE (EXISTS (
+                    SELECT 1 FROM reward_problem_completion_event_sources source
+                    WHERE source.reward_event_id = event.id
+                ))
+             + (EXISTS (
+                    SELECT 1 FROM reward_review_event_sources source
+                    WHERE source.reward_event_id = event.id
+                )) != 1
+            OR (SELECT COUNT(*) FROM reward_grants grant
+                WHERE grant.reward_event_id = event.id) != 1",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_event_participation != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_s3_source: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_problem_completion_event_sources source
+         LEFT JOIN reward_events event ON event.id = source.reward_event_id
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         WHERE event.id IS NULL
+            OR occurrence.id IS NULL
+            OR event.problem_id IS NULL
+            OR event.problem_id != occurrence.problem_id
+            OR event.source_occurred_at_utc != occurrence.recorded_at_utc",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_s3_source != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let invalid_s4_source: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_review_event_sources source
+         LEFT JOIN reward_events event ON event.id = source.reward_event_id
+         LEFT JOIN review_attempts attempt
+           ON attempt.id = source.review_attempt_id AND attempt.problem_id = source.problem_id
+         WHERE event.id IS NULL
+            OR attempt.id IS NULL
+            OR event.problem_id != source.problem_id
+            OR event.source_occurred_at_utc != attempt.completed_at_utc
+            OR attempt.attempt_status != 'completed'
+            OR attempt.attempt_type NOT IN ('early_check', 'first_cold_start', 'long_term_review')
+            OR (attempt.attempt_type = 'early_check' AND EXISTS (
+                    SELECT 1 FROM scheduled_review_ordinal_facts fact
+                    WHERE fact.review_attempt_id = attempt.id
+                ))
+            OR (attempt.attempt_type IN ('first_cold_start', 'long_term_review') AND NOT EXISTS (
+                    SELECT 1 FROM scheduled_review_ordinal_facts fact
+                    WHERE fact.review_attempt_id = attempt.id
+                      AND fact.problem_id = attempt.problem_id
+                ))",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_s4_source != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let grants: Vec<(String, i64, i64, String, String, i64, String)> = sqlx::query_as(
+        "SELECT reward_event_id, xp_amount, coin_amount, decision_reason,
+                policy_key, policy_version, decided_at_utc
+         FROM reward_grants",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (_, xp, coin, reason, policy, version, decided_at) in &grants {
+        if !(0..=MAX_EXACT_REWARD_AMOUNT).contains(xp)
+            || !(0..=MAX_EXACT_REWARD_AMOUNT).contains(coin)
+            || reason.trim().is_empty()
+            || policy.trim().is_empty()
+            || *version <= 0
+            || parse_reward_utc_millis(decided_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let entries: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, resource_kind, delta, recorded_at_utc FROM reward_ledger_entries",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (id, resource, delta, recorded_at) in &entries {
+        if uuid::Uuid::parse_str(id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || !matches!(resource.as_str(), "xp" | "coin")
+            || *delta == 0
+            || !(-MAX_EXACT_REWARD_AMOUNT..=MAX_EXACT_REWARD_AMOUNT).contains(delta)
+            || parse_reward_utc_millis(recorded_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_ledger_origin_participation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM reward_grant_ledger_origins origin
+                WHERE origin.ledger_entry_id = entry.id) != 1",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_ledger_origin_participation != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_reward_links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+             SELECT grant.reward_event_id AS authority_id
+             FROM reward_grants grant
+             LEFT JOIN reward_events event ON event.id = grant.reward_event_id
+             WHERE event.id IS NULL
+             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM reward_grant_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN reward_grants grant ON grant.reward_event_id = origin.reward_event_id
+             WHERE entry.id IS NULL
+                OR grant.reward_event_id IS NULL
+                OR entry.resource_kind != origin.resource_kind
+                OR entry.delta <= 0
+                OR entry.delta != CASE origin.resource_kind
+                    WHEN 'xp' THEN grant.xp_amount
+                    WHEN 'coin' THEN grant.coin_amount
+                    ELSE NULL
+                END
+             UNION ALL
+             SELECT source.problem_completion_occurrence_id
+             FROM reward_problem_completion_event_sources source
+             GROUP BY source.problem_completion_occurrence_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.review_attempt_id
+             FROM reward_review_event_sources source
+             GROUP BY source.review_attempt_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.reward_event_id
+             FROM reward_problem_completion_event_sources source
+             GROUP BY source.reward_event_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.reward_event_id
+             FROM reward_review_event_sources source
+             GROUP BY source.reward_event_id
+             HAVING COUNT(*) != 1
+         ) invalid",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_reward_links != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_grant_effect: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+             SELECT grant.reward_event_id,
+                    grant.xp_amount,
+                    grant.coin_amount,
+                    COALESCE(SUM(CASE WHEN origin.resource_kind = 'xp' THEN entry.delta ELSE 0 END), 0) AS xp_effect,
+                    COALESCE(SUM(CASE WHEN origin.resource_kind = 'coin' THEN entry.delta ELSE 0 END), 0) AS coin_effect,
+                    SUM(CASE WHEN origin.resource_kind = 'xp' THEN 1 ELSE 0 END) AS xp_count,
+                    SUM(CASE WHEN origin.resource_kind = 'coin' THEN 1 ELSE 0 END) AS coin_count
+             FROM reward_grants grant
+             LEFT JOIN reward_grant_ledger_origins origin
+               ON origin.reward_event_id = grant.reward_event_id
+             LEFT JOIN reward_ledger_entries entry
+               ON entry.id = origin.ledger_entry_id
+              AND entry.resource_kind = origin.resource_kind
+             GROUP BY grant.reward_event_id
+         ) effect
+         WHERE effect.xp_effect != effect.xp_amount
+            OR effect.coin_effect != effect.coin_amount
+            OR effect.xp_count != CASE WHEN effect.xp_amount > 0 THEN 1 ELSE 0 END
+            OR effect.coin_count != CASE WHEN effect.coin_amount > 0 THEN 1 ELSE 0 END",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_grant_effect != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let pre_activation_positive_grant: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_grants grant
+         JOIN reward_events event ON event.id = grant.reward_event_id
+         WHERE event.activation_relation = 'pre_activation'
+           AND (grant.xp_amount != 0 OR grant.coin_amount != 0)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if pre_activation_positive_grant != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
 async fn validate_external_identity_fk(
     pool: &SqlitePool,
     table: &str,
@@ -10767,6 +11335,15 @@ async fn validate_table_columns(
             "PRAGMA table_xinfo('scheduled_review_ordinal_states')"
         }
         "scheduled_review_ordinal_facts" => "PRAGMA table_xinfo('scheduled_review_ordinal_facts')",
+        "reward_activation_state" => "PRAGMA table_xinfo('reward_activation_state')",
+        "reward_events" => "PRAGMA table_xinfo('reward_events')",
+        "reward_problem_completion_event_sources" => {
+            "PRAGMA table_xinfo('reward_problem_completion_event_sources')"
+        }
+        "reward_review_event_sources" => "PRAGMA table_xinfo('reward_review_event_sources')",
+        "reward_grants" => "PRAGMA table_xinfo('reward_grants')",
+        "reward_ledger_entries" => "PRAGMA table_xinfo('reward_ledger_entries')",
+        "reward_grant_ledger_origins" => "PRAGMA table_xinfo('reward_grant_ledger_origins')",
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -11253,9 +11830,9 @@ mod tests {
             inspect_schema_version(&fresh_pool)
                 .await
                 .expect("fresh version"),
-            29
+            30
         );
-        validate_schema_contract(&fresh_pool, 29)
+        validate_schema_contract(&fresh_pool, 30)
             .await
             .expect("fresh schema contract");
         verify_integrity(&fresh_pool)
@@ -11273,7 +11850,7 @@ mod tests {
                 .fetch_one(&fresh_pool)
                 .await
                 .expect("fresh ledger");
-        assert_eq!(applied_before, 29);
+        assert_eq!(applied_before, 30);
         let migration29 = MIGRATOR
             .iter()
             .find(|migration| migration.version == 29)
@@ -11286,7 +11863,7 @@ mod tests {
         .expect("migration 29 checksum");
         assert_eq!(recorded_checksum, migration29.checksum.as_ref());
 
-        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 29)
+        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 30)
             .await
             .expect("fresh reopen");
         let applied_after: i64 =
@@ -11300,20 +11877,20 @@ mod tests {
         let (existing_path, existing_pool) = s0_migrate_from_version(&existing, 23).await;
         let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 23)
             .await
-            .expect("23 to 29 migration");
+            .expect("23 to 30 migration");
         assert_eq!(
             inspect_schema_version(&existing_pool)
                 .await
                 .expect("upgraded version"),
-            29
+            30
         );
-        validate_schema_contract(&existing_pool, 29)
+        validate_schema_contract(&existing_pool, 30)
             .await
             .expect("upgraded schema contract");
         verify_integrity(&existing_pool)
             .await
             .expect("upgraded integrity");
-        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 29)
+        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 30)
             .await
             .expect("existing 26 second reopen");
         assert_eq!(
@@ -11321,7 +11898,277 @@ mod tests {
                 .fetch_one(&existing_pool)
                 .await
                 .expect("existing ledger"),
-            29
+            30
+        );
+    }
+
+    #[test]
+    fn r2c1_reward_timestamp_parser_and_activation_boundary_are_canonical() {
+        let before = parse_reward_utc_millis("2026-08-24T12:34:56.499Z").expect(".499");
+        let equal = parse_reward_utc_millis("2026-08-24T12:34:56.500Z").expect(".500");
+        let after = parse_reward_utc_millis("2026-08-24T12:34:56.501Z").expect(".501");
+        assert_eq!(
+            reward_activation_relation(before, equal),
+            RewardActivationRelation::PreActivation
+        );
+        assert_eq!(
+            reward_activation_relation(equal, equal),
+            RewardActivationRelation::PreActivation
+        );
+        assert_eq!(
+            reward_activation_relation(after, equal),
+            RewardActivationRelation::PostActivation
+        );
+        for rejected in [
+            "2026-08-24T12:34:56Z",
+            "2026-08-24T12:34:56.50Z",
+            "2026-08-24T12:34:56.5000Z",
+            "2026-08-24T12:34:56.500+00:00",
+            "2026-08-24t12:34:56.500Z",
+            "2026-02-30T12:34:56.500Z",
+        ] {
+            assert!(parse_reward_utc_millis(rejected).is_none(), "{rejected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn r2c1_migration30_creates_exact_reward_inventory_without_shared_schema_changes() {
+        let directory = TempDir::new().expect("schema 29 database");
+        let (path, pool) = s0_migrate_from_version(&directory, 29).await;
+        let shared_before: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name NOT LIKE 'reward_%' AND tbl_name NOT LIKE 'reward_%'
+             ORDER BY type, name, tbl_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("schema 29 non-Reward schema");
+        let pool = run_migrations(&path, pool, &MIGRATOR, 29)
+            .await
+            .expect("schema 29 to 30");
+        let shared_after: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name NOT LIKE 'reward_%' AND tbl_name NOT LIKE 'reward_%'
+             ORDER BY type, name, tbl_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("schema 30 non-Reward schema");
+        assert_eq!(shared_after, shared_before);
+
+        let reward_tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'reward_%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("Reward tables");
+        assert_eq!(
+            reward_tables,
+            vec![
+                "reward_activation_state",
+                "reward_events",
+                "reward_grant_ledger_origins",
+                "reward_grants",
+                "reward_ledger_entries",
+                "reward_problem_completion_event_sources",
+                "reward_review_event_sources",
+            ]
+        );
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 30);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("schema generation"),
+            30
+        );
+        validate_schema_contract(&pool, 30)
+            .await
+            .expect("schema 30 contract");
+        verify_integrity(&pool).await.expect("schema 30 integrity");
+    }
+
+    #[tokio::test]
+    async fn r2c1_s3_grant_ledger_and_immutability_guards_enforce_local_contract() {
+        let directory = TempDir::new().expect("schema 30 database");
+        let (_path, pool) = s0_migrate_from_version(&directory, 30).await;
+        sqlx::raw_sql(
+            "INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'P1', 'https://example.test/p1', 'personal');
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (2, 'P2', 'https://example.test/p2', 'personal');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000101', 1, 'learning_completion', '2026-08-24T12:34:56.499Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000102', 1, 'learning_completion', '2026-08-24T12:34:56.501Z');
+             UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1;",
+        )
+        .execute(&pool)
+        .await
+        .expect("Reward fixture");
+
+        let pre_event = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 1, '2026-08-24T12:34:56.499Z', 'pre_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&pre_event)
+            .execute(&pool)
+            .await
+            .expect("pre-activation event");
+        sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?, '00000000-0000-0000-0000-000000000101')")
+            .bind(&pre_event)
+            .execute(&pool)
+            .await
+            .expect("valid S3 binding");
+        sqlx::query("INSERT INTO reward_grants (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key, policy_version, decided_at_utc) VALUES (?, 0, 0, 'pre-activation', 'reward-core-v1', 1, '2026-08-24T12:34:56.700Z')")
+            .bind(&pre_event)
+            .execute(&pool)
+            .await
+            .expect("zero grant");
+        assert!(sqlx::query("INSERT INTO reward_grants (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key, policy_version, decided_at_utc) VALUES (?, 1, 0, 'duplicate', 'reward-core-v1', 1, '2026-08-24T12:34:56.700Z')").bind(&pre_event).execute(&pool).await.is_err());
+
+        let mismatch_event = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 2, '2026-08-24T12:34:56.499Z', 'pre_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&mismatch_event)
+            .execute(&pool)
+            .await
+            .expect("mismatch event fixture");
+        assert!(sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?, '00000000-0000-0000-0000-000000000101')").bind(&mismatch_event).execute(&pool).await.is_err());
+
+        let duplicate_source_event = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 1, '2026-08-24T12:34:56.499Z', 'pre_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&duplicate_source_event)
+            .execute(&pool)
+            .await
+            .expect("duplicate source event fixture");
+        assert!(sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?, '00000000-0000-0000-0000-000000000101')").bind(&duplicate_source_event).execute(&pool).await.is_err());
+
+        let post_event = uuid::Uuid::now_v7().to_string();
+        let ledger_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 1, '2026-08-24T12:34:56.501Z', 'post_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&post_event)
+            .execute(&pool)
+            .await
+            .expect("post-activation event");
+        sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?, '00000000-0000-0000-0000-000000000102')")
+            .bind(&post_event)
+            .execute(&pool)
+            .await
+            .expect("post S3 binding");
+        sqlx::query("INSERT INTO reward_grants (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key, policy_version, decided_at_utc) VALUES (?, 3, 0, 'eligible', 'reward-core-v1', 1, '2026-08-24T12:34:56.700Z')")
+            .bind(&post_event)
+            .execute(&pool)
+            .await
+            .expect("positive grant");
+        assert!(sqlx::query("INSERT INTO reward_ledger_entries (id, resource_kind, delta, recorded_at_utc) VALUES (?, 'bad', 3, '2026-08-24T12:34:56.700Z')").bind(uuid::Uuid::now_v7().to_string()).execute(&pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO reward_ledger_entries (id, resource_kind, delta, recorded_at_utc) VALUES (?, 'xp', 0, '2026-08-24T12:34:56.700Z')").bind(uuid::Uuid::now_v7().to_string()).execute(&pool).await.is_err());
+        sqlx::query("INSERT INTO reward_ledger_entries (id, resource_kind, delta, recorded_at_utc) VALUES (?, 'xp', 3, '2026-08-24T12:34:56.700Z')")
+            .bind(&ledger_id)
+            .execute(&pool)
+            .await
+            .expect("ledger entry");
+        assert!(sqlx::query("INSERT INTO reward_grant_ledger_origins (ledger_entry_id, reward_event_id, resource_kind) VALUES (?, ?, 'coin')").bind(&ledger_id).bind(&post_event).execute(&pool).await.is_err());
+        sqlx::query("INSERT INTO reward_grant_ledger_origins (ledger_entry_id, reward_event_id, resource_kind) VALUES (?, ?, 'xp')")
+            .bind(&ledger_id)
+            .bind(&post_event)
+            .execute(&pool)
+            .await
+            .expect("typed grant origin");
+
+        for statement in [
+            "UPDATE reward_events SET problem_id = 2",
+            "DELETE FROM reward_events",
+            "UPDATE reward_problem_completion_event_sources SET problem_completion_occurrence_id = problem_completion_occurrence_id",
+            "DELETE FROM reward_problem_completion_event_sources",
+            "UPDATE reward_grants SET xp_amount = xp_amount",
+            "DELETE FROM reward_grants",
+            "UPDATE reward_ledger_entries SET delta = delta",
+            "DELETE FROM reward_ledger_entries",
+            "UPDATE reward_grant_ledger_origins SET resource_kind = resource_kind",
+            "DELETE FROM reward_grant_ledger_origins",
+            "DELETE FROM reward_activation_state",
+            "UPDATE reward_activation_state SET activation_status = 'inactive', activated_at_utc = NULL",
+        ] {
+            assert!(sqlx::query(statement).execute(&pool).await.is_err(), "{statement}");
+        }
+    }
+
+    #[tokio::test]
+    async fn r2c1_s4_binding_and_cross_source_exclusivity_are_enforced() {
+        let directory = TempDir::new().expect("schema 30 database");
+        let (_path, pool) = s0_migrate_from_version(&directory, 30).await;
+        sqlx::raw_sql(
+            "INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'P1', 'https://example.test/p1', 'personal');
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-24T00:00:00.000Z');
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000201', 1, 1, 'active', 1, 1, '2026-08-24');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000202', 1, '00000000-0000-0000-0000-000000000201', 'early_check', 'completed', '2026-08-24', 1, 1, '2026-08-24T12:00:00.000Z', '2026-08-24T12:34:56.501Z', 'mastered', '2026-08-24', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000203', 1, 'learning_completion', '2026-08-24T12:34:56.501Z');
+             UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1;",
+        )
+        .execute(&pool)
+        .await
+        .expect("S4 fixture");
+        let event = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 1, '2026-08-24T12:34:56.501Z', 'post_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&event)
+            .execute(&pool)
+            .await
+            .expect("S4 event");
+        sqlx::query("INSERT INTO reward_review_event_sources (reward_event_id, review_attempt_id, problem_id) VALUES (?, '00000000-0000-0000-0000-000000000202', 1)")
+            .bind(&event)
+            .execute(&pool)
+            .await
+            .expect("valid S4 composite binding");
+        assert!(sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?, '00000000-0000-0000-0000-000000000203')").bind(&event).execute(&pool).await.is_err());
+
+        let wrong_time_event = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, 1, '2026-08-24T12:34:56.502Z', 'post_activation', '2026-08-24T12:34:56.600Z')")
+            .bind(&wrong_time_event)
+            .execute(&pool)
+            .await
+            .expect("invalid S4 event fixture");
+        assert!(sqlx::query("INSERT INTO reward_review_event_sources (reward_event_id, review_attempt_id, problem_id) VALUES (?, '00000000-0000-0000-0000-000000000202', 1)").bind(&wrong_time_event).execute(&pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn r2c1_startup_rejects_incomplete_reward_graph_without_repair() {
+        let directory = TempDir::new().expect("Reward corruption database");
+        let corrupt_event = uuid::Uuid::now_v7().to_string();
+        {
+            let runtime = start_database(directory.path()).await;
+            assert_eq!(
+                runtime.status(),
+                &StartupGateStatus::Ready { schema_version: 30 }
+            );
+            let pool = runtime._pool.as_ref().expect("ready pool");
+            sqlx::query("UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1")
+                .execute(pool)
+                .await
+                .expect("activate Reward");
+            sqlx::query("INSERT INTO reward_events (id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?, '2026-08-24T12:34:56.501Z', 'post_activation', '2026-08-24T12:34:56.600Z')")
+                .bind(&corrupt_event)
+                .execute(pool)
+                .await
+                .expect("inject incomplete event graph");
+        }
+
+        let blocked = start_database(directory.path()).await;
+        assert_eq!(
+            blocked.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+        let inspection = connect_read_only(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("inspect blocked database");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reward_events WHERE id = ?")
+                .bind(&corrupt_event)
+                .fetch_one(&inspection)
+                .await
+                .expect("corrupt event remains"),
+            1,
+            "startup validation must not repair Reward authority"
         );
     }
 
@@ -11342,12 +12189,12 @@ mod tests {
         .expect("schema 27 historical-like fixture");
         let pool = run_migrations(&path, pool, &MIGRATOR, 27)
             .await
-            .expect("migration 29");
+            .expect("migration 30");
 
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 29);
-        validate_schema_contract(&pool, 29)
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 30);
+        validate_schema_contract(&pool, 30)
             .await
-            .expect("schema 29 contract");
+            .expect("schema 30 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
@@ -11355,7 +12202,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            29
+            30
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences",)
@@ -11430,7 +12277,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = runtime._pool.as_ref().expect("upgraded pool");
         assert_eq!(
@@ -11440,7 +12287,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("schema generation"),
-            29
+            30
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -11472,9 +12319,9 @@ mod tests {
             .expect("empty ordinal authority"),
             0
         );
-        validate_schema_contract(pool, 29)
+        validate_schema_contract(pool, 30)
             .await
-            .expect("schema 29 contract");
+            .expect("schema 30 contract");
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
         let backups: Vec<PathBuf> = fs::read_dir(&backup_directory)
@@ -11507,7 +12354,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let reopened_pool = reopened._pool.as_ref().expect("reopened pool");
         assert_eq!(
@@ -11570,7 +12417,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = runtime._pool.as_ref().expect("activated pool");
         let activated: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -11642,7 +12489,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = reopened._pool.as_ref().expect("reopened pool");
         let durable: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -13114,16 +13961,16 @@ mod tests {
             26,
         )
         .await
-        .expect("migration 29");
+        .expect("migration 30");
         assert_eq!(
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            29
+            30
         );
-        validate_schema_contract(&runtime_pool, 29)
+        validate_schema_contract(&runtime_pool, 30)
             .await
-            .expect("schema 29 contract");
+            .expect("schema 30 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -13139,7 +13986,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
     }
 
@@ -15107,14 +15954,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 29);
+        assert_eq!(ledger_count, 30);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -15127,7 +15974,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -15159,7 +16006,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-29-"));
+            .starts_with("schema-10-to-30-"));
     }
 
     #[tokio::test]
@@ -19799,7 +20646,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
     }
 
@@ -19865,7 +20712,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -19898,7 +20745,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -19943,7 +20790,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -20108,7 +20955,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
     }
 
@@ -20320,7 +21167,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 29);
+        assert_eq!(preview.supported_schema_version, 30);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -20802,7 +21649,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -20894,7 +21741,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-29-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-30-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -21154,7 +22001,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -21188,7 +22035,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -21897,7 +22744,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 29 }
+            &StartupGateStatus::Ready { schema_version: 30 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
