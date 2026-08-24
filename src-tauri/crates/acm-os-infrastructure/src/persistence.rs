@@ -124,8 +124,27 @@ pub enum RewardProcessingError {
     DecisionInvalid,
     InvalidLimit,
     DecisionConflict,
+    PositiveClaimAlreadyTaken,
     IntegrityViolation,
     DatabaseFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ProblemSolvedEvaluation {
+    pub problem_completion_occurrence_id: String,
+    pub problem_id: i64,
+    pub qualification: String,
+    pub reason_code: String,
+    pub policy_key: String,
+    pub policy_version: i64,
+    pub evaluated_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ProblemSolvedPositiveClaim {
+    pub problem_id: i64,
+    pub reward_event_id: String,
+    pub claimed_at_utc: String,
 }
 
 fn parse_reward_utc_millis(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
@@ -8174,6 +8193,166 @@ impl DatabaseRuntime {
         Ok(account)
     }
 
+    pub async fn create_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        qualification: &str,
+        reason_code: &str,
+        evaluated_at_utc: &str,
+    ) -> Result<ProblemSolvedEvaluation, RewardProcessingError> {
+        if parse_reward_utc_millis(evaluated_at_utc).is_none()
+            || !matches!(qualification, "qualifying" | "non_qualifying")
+            || !matches!(
+                (qualification, reason_code),
+                ("qualifying", "explicitly_accepted_digested")
+                    | ("non_qualifying", "mechanical_reentry")
+                    | ("non_qualifying", "insufficient_digestion")
+                    | ("non_qualifying", "other")
+            )
+        {
+            return Err(RewardProcessingError::DecisionInvalid);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let existing: Option<ProblemSolvedEvaluation> = sqlx::query_as(
+            "SELECT problem_completion_occurrence_id, problem_id, qualification,
+                    reason_code, policy_key, policy_version, evaluated_at_utc
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if let Some(existing) = existing {
+            let identical = existing.problem_id == problem_id
+                && existing.qualification == qualification
+                && existing.reason_code == reason_code
+                && existing.policy_key == "problem_solved_v1"
+                && existing.policy_version == 1
+                && existing.evaluated_at_utc == evaluated_at_utc;
+            if !identical {
+                return Err(RewardProcessingError::DecisionConflict);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            return Ok(existing);
+        }
+        sqlx::query(
+            "INSERT INTO reward_problem_completion_evaluations
+             (problem_completion_occurrence_id, problem_id, qualification, reason_code,
+              policy_key, policy_version, evaluated_at_utc)
+             VALUES (?1, ?2, ?3, ?4, 'problem_solved_v1', 1, ?5)",
+        )
+        .bind(occurrence_id)
+        .bind(problem_id)
+        .bind(qualification)
+        .bind(reason_code)
+        .bind(evaluated_at_utc)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+                RewardProcessingError::DecisionConflict
+            } else {
+                RewardProcessingError::DatabaseFailure
+            }
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(ProblemSolvedEvaluation {
+            problem_completion_occurrence_id: occurrence_id.to_owned(),
+            problem_id,
+            qualification: qualification.to_owned(),
+            reason_code: reason_code.to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+            evaluated_at_utc: evaluated_at_utc.to_owned(),
+        })
+    }
+
+    pub async fn load_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluation>, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        sqlx::query_as(
+            "SELECT problem_completion_occurrence_id, problem_id, qualification,
+                    reason_code, policy_key, policy_version, evaluated_at_utc
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)
+    }
+
+    pub async fn load_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        sqlx::query_as(
+            "SELECT problem_id, reward_event_id, claimed_at_utc
+             FROM reward_problem_solved_positive_claims
+             WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)
+    }
+
+    pub async fn create_reward_problem_completion_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        qualification: &str,
+        reason_code: &str,
+        evaluated_at_utc: &str,
+    ) -> Result<ProblemSolvedEvaluation, RewardProcessingError> {
+        self.create_problem_solved_evaluation(
+            occurrence_id,
+            problem_id,
+            qualification,
+            reason_code,
+            evaluated_at_utc,
+        )
+        .await
+    }
+
+    pub async fn load_reward_problem_completion_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluation>, RewardProcessingError> {
+        self.load_problem_solved_evaluation(occurrence_id).await
+    }
+
+    pub async fn load_reward_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+        self.load_problem_solved_positive_claim(problem_id).await
+    }
+
     pub async fn process_reward(
         &self,
         source: &RewardSource,
@@ -8308,7 +8487,7 @@ impl DatabaseRuntime {
             return Err(RewardProcessingError::DatabaseFailure);
         }
 
-        sqlx::query(
+        let grant_insert = sqlx::query(
             "INSERT INTO reward_grants
              (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key,
               policy_version, decided_at_utc)
@@ -8322,8 +8501,37 @@ impl DatabaseRuntime {
         .bind(decision.policy_version)
         .bind(&now)
         .execute(&mut *transaction)
-        .await
-        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        .await;
+        if let Err(error) = grant_insert {
+            let positive_candidate =
+                matches!(source, RewardSource::ProblemCompletionOccurrence { .. })
+                    && decision.xp_amount == 100
+                    && decision.coin_amount == 100
+                    && decision.decision_reason == "qualified_positive"
+                    && decision.policy_key == "problem_solved_v1"
+                    && decision.policy_version == 1;
+            let problem_completion_learning =
+                matches!(source, RewardSource::ProblemCompletionOccurrence { .. })
+                    && decision.decision_reason == "qualified_positive";
+            drop(transaction);
+            if positive_candidate && problem_completion_learning {
+                if let Some(_claim) = load_valid_positive_claim(pool, resolved.problem_id).await? {
+                    return Err(RewardProcessingError::PositiveClaimAlreadyTaken);
+                }
+                return Err(RewardProcessingError::DecisionInvalid);
+            }
+            if problem_completion_learning {
+                return Err(RewardProcessingError::DecisionInvalid);
+            }
+            return Err(
+                if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation() || database.is_check_violation() || database.is_foreign_key_violation())
+                {
+                    RewardProcessingError::DecisionInvalid
+                } else {
+                    RewardProcessingError::DatabaseFailure
+                },
+            );
+        }
         fail_reward_processing_at(failure, RewardFailurePoint::AfterGrant)?;
 
         let mut ledger_ids = Vec::new();
@@ -8560,6 +8768,190 @@ fn ensure_reward_decision_matches(
     Ok(())
 }
 
+async fn load_valid_positive_claim(
+    pool: &SqlitePool,
+    problem_id: i64,
+) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+    let claim: Option<ProblemSolvedPositiveClaim> = sqlx::query_as(
+        "SELECT problem_id, reward_event_id, claimed_at_utc
+         FROM reward_problem_solved_positive_claims
+         WHERE problem_id = ?1",
+    )
+    .bind(problem_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    let valid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_problem_solved_positive_claims claim
+         JOIN reward_events event
+           ON event.id = claim.reward_event_id AND event.problem_id = claim.problem_id
+         JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+          AND evaluation.problem_id = claim.problem_id
+         JOIN reward_grants grant ON grant.reward_event_id = event.id
+         WHERE claim.problem_id = ?1
+           AND event.activation_relation = 'post_activation'
+           AND occurrence.semantic_kind = 'learning_completion'
+           AND evaluation.qualification = 'qualifying'
+           AND evaluation.reason_code = 'explicitly_accepted_digested'
+           AND evaluation.policy_key = 'problem_solved_v1'
+           AND evaluation.policy_version = 1
+           AND grant.xp_amount = 100 AND grant.coin_amount = 100
+           AND grant.decision_reason = 'qualified_positive'
+           AND grant.policy_key = 'problem_solved_v1'
+           AND grant.policy_version = 1",
+    )
+    .bind(problem_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    if valid == 1 {
+        Ok(Some(claim))
+    } else {
+        Err(RewardProcessingError::IntegrityViolation)
+    }
+}
+
+async fn schema_generation_at_least_31(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<bool, RewardProcessingError> {
+    let version: i64 =
+        sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    Ok(version >= 31)
+}
+
+async fn validate_problem_solved_event_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    event_id: &str,
+    source: &RewardSource,
+    relation: RewardActivationRelation,
+    xp: i64,
+    coin: i64,
+    decision_reason: &str,
+    policy_key: &str,
+    policy_version: i64,
+) -> Result<(), RewardProcessingError> {
+    let RewardSource::ProblemCompletionOccurrence { occurrence_id } = source else {
+        return Ok(());
+    };
+    let occurrence: Option<(i64, String)> = sqlx::query_as(
+        "SELECT problem_id, semantic_kind FROM problem_completion_occurrences WHERE id = ?1",
+    )
+    .bind(occurrence_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some((problem_id, semantic_kind)) = occurrence else {
+        return Err(RewardProcessingError::IntegrityViolation);
+    };
+    if semantic_kind != "learning_completion" {
+        return Ok(());
+    }
+    let evaluation: Option<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT qualification, reason_code, policy_key, policy_version
+         FROM reward_problem_completion_evaluations
+         WHERE problem_completion_occurrence_id = ?1",
+    )
+    .bind(occurrence_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims WHERE problem_id = ?1",
+    )
+    .bind(problem_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let event_claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims WHERE reward_event_id = ?1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+
+    if relation == RewardActivationRelation::PreActivation {
+        if xp != 0
+            || coin != 0
+            || decision_reason != "pre_activation"
+            || policy_key != "problem_solved_v1"
+            || policy_version != 1
+            || event_claim_count != 0
+        {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        return Ok(());
+    }
+
+    let Some((qualification, reason_code, evaluation_policy, evaluation_version)) = evaluation
+    else {
+        return Err(RewardProcessingError::IntegrityViolation);
+    };
+    if evaluation_policy != "problem_solved_v1" || evaluation_version != 1 {
+        return Err(RewardProcessingError::IntegrityViolation);
+    }
+    match qualification.as_str() {
+        "non_qualifying" => {
+            if reason_code == "mechanical_reentry"
+                || reason_code == "insufficient_digestion"
+                || reason_code == "other"
+            {
+                if xp != 0
+                    || coin != 0
+                    || decision_reason != "non_qualifying"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 0
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+        }
+        "qualifying" => {
+            if reason_code != "explicitly_accepted_digested" {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            if xp == 100 && coin == 100 {
+                if decision_reason != "qualified_positive"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 1
+                    || claim_count != 1
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else if xp == 0 && coin == 0 {
+                if decision_reason != "already_rewarded"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 0
+                    || claim_count != 1
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+        }
+        _ => return Err(RewardProcessingError::IntegrityViolation),
+    }
+    Ok(())
+}
+
 async fn validate_reward_event_transaction(
     connection: &mut sqlx::SqliteConnection,
     event_id: &str,
@@ -8569,12 +8961,26 @@ async fn validate_reward_event_transaction(
     created_ledger_ids: &[String],
     inject_failure: bool,
 ) -> Result<(), RewardProcessingError> {
-    let row: Option<(i64, String, String, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+    let row: Option<(
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+    )> = sqlx::query_as(
         "SELECT event.problem_id, event.source_occurred_at_utc, event.activation_relation,
                 (SELECT COUNT(*) FROM reward_problem_completion_event_sources s WHERE s.reward_event_id = event.id)
                   + (SELECT COUNT(*) FROM reward_review_event_sources s WHERE s.reward_event_id = event.id),
                 (SELECT COUNT(*) FROM reward_grants g WHERE g.reward_event_id = event.id),
                 grant.xp_amount, grant.coin_amount,
+                grant.decision_reason, grant.policy_key, grant.policy_version,
                 COALESCE(SUM(CASE WHEN origin.resource_kind = 'xp' THEN entry.delta ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN origin.resource_kind = 'coin' THEN entry.delta ELSE 0 END), 0)
          FROM reward_events event
@@ -8588,8 +8994,20 @@ async fn validate_reward_event_transaction(
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| RewardProcessingError::DatabaseFailure)?;
-    let Some((problem, source_time, stored_relation, adapters, grants, xp, coin, xp_sum, coin_sum)) =
-        row
+    let Some((
+        problem,
+        source_time,
+        stored_relation,
+        adapters,
+        grants,
+        xp,
+        coin,
+        decision_reason,
+        policy_key,
+        policy_version,
+        xp_sum,
+        coin_sum,
+    )) = row
     else {
         return Err(RewardProcessingError::IntegrityViolation);
     };
@@ -8672,6 +9090,20 @@ async fn validate_reward_event_transaction(
         || inject_failure
     {
         return Err(RewardProcessingError::IntegrityViolation);
+    }
+    if schema_generation_at_least_31(connection).await? {
+        validate_problem_solved_event_transaction(
+            connection,
+            event_id,
+            source,
+            relation,
+            xp,
+            coin,
+            &decision_reason,
+            &policy_key,
+            policy_version,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -9982,6 +10414,7 @@ async fn validate_schema_contract(
             | 28
             | 29
             | 30
+            | 31
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -10125,6 +10558,9 @@ async fn validate_schema_contract(
     }
     if schema_version >= 30 {
         validate_reward_durable_core_contract(pool).await?;
+    }
+    if schema_version >= 31 {
+        validate_problem_solved_reward_contract(pool).await?;
     }
     Ok(())
 }
@@ -10704,6 +11140,71 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "trigger".to_owned(),
                 "reward_review_sources_no_update".to_owned(),
                 "reward_review_event_sources".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 31 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "reward_problem_completion_evaluations_by_problem".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_problem_solved_positive_claims_by_event".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_insert_guard".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_no_delete".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_no_update".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_insert_guard".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_no_delete".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_no_update".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_problem_solved_insert_guard".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_problem_solved_positive_claim".to_owned(),
+                "reward_grants".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -12032,6 +12533,186 @@ async fn validate_reward_durable_core_contract(
     Ok(())
 }
 
+async fn validate_problem_solved_reward_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "reward_problem_completion_evaluations",
+        &[
+            "problem_completion_occurrence_id",
+            "problem_id",
+            "qualification",
+            "reason_code",
+            "policy_key",
+            "policy_version",
+            "evaluated_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "reward_problem_solved_positive_claims",
+        &["problem_id", "reward_event_id", "claimed_at_utc"],
+    )
+    .await?;
+    validate_strong_identity_unique(
+        pool,
+        "reward_problem_solved_positive_claims",
+        &["reward_event_id"],
+    )
+    .await?;
+
+    let evaluation_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_completion_evaluations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if evaluation_fks.len() != 2
+        || evaluation_fks.iter().any(|fk| {
+            fk.2 == "problem_completion_occurrences"
+                && fk.3 == "problem_completion_occurrence_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || evaluation_fks.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let claim_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_solved_positive_claims')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if claim_fks.len() != 3
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "reward_event_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "problem_id"
+                && fk.4 == "problem_id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_evaluations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_completion_evaluations evaluation
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = evaluation.problem_completion_occurrence_id
+         WHERE occurrence.id IS NULL
+            OR occurrence.problem_id != evaluation.problem_id
+            OR occurrence.semantic_kind != 'learning_completion'
+            OR (evaluation.qualification = 'qualifying'
+                AND evaluation.reason_code != 'explicitly_accepted_digested')
+            OR (evaluation.qualification = 'non_qualifying'
+                AND evaluation.reason_code NOT IN ('mechanical_reentry', 'insufficient_digestion', 'other'))
+            OR evaluation.policy_key != 'problem_solved_v1'
+            OR evaluation.policy_version != 1
+            OR length(evaluation.evaluated_at_utc) != 24",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_evaluations != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let evaluation_timestamps: Vec<String> =
+        sqlx::query_scalar("SELECT evaluated_at_utc FROM reward_problem_completion_evaluations")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if evaluation_timestamps
+        .iter()
+        .any(|timestamp| parse_reward_utc_millis(timestamp).is_none())
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let invalid_claims: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims claim
+         LEFT JOIN reward_events event
+           ON event.id = claim.reward_event_id AND event.problem_id = claim.problem_id
+         LEFT JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         LEFT JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+          AND evaluation.problem_id = claim.problem_id
+         LEFT JOIN reward_grants grant ON grant.reward_event_id = event.id
+         WHERE event.id IS NULL
+            OR event.activation_relation != 'post_activation'
+            OR occurrence.semantic_kind != 'learning_completion'
+            OR evaluation.qualification != 'qualifying'
+            OR evaluation.reason_code != 'explicitly_accepted_digested'
+            OR grant.xp_amount != 100 OR grant.coin_amount != 100
+            OR grant.decision_reason != 'qualified_positive'
+            OR grant.policy_key != 'problem_solved_v1'
+            OR grant.policy_version != 1
+            OR length(claim.claimed_at_utc) != 24",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_claims != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let claim_timestamps: Vec<String> =
+        sqlx::query_scalar("SELECT claimed_at_utc FROM reward_problem_solved_positive_claims")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if claim_timestamps
+        .iter()
+        .any(|timestamp| parse_reward_utc_millis(timestamp).is_none())
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let positive_without_claim: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_grants grant
+         JOIN reward_events event ON event.id = grant.reward_event_id
+         JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+         WHERE occurrence.semantic_kind = 'learning_completion'
+           AND event.activation_relation = 'post_activation'
+           AND grant.xp_amount = 100 AND grant.coin_amount = 100
+           AND grant.decision_reason = 'qualified_positive'
+           AND evaluation.qualification = 'qualifying'
+           AND NOT EXISTS (
+               SELECT 1 FROM reward_problem_solved_positive_claims claim
+               WHERE claim.reward_event_id = event.id
+           )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if positive_without_claim != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
 async fn validate_external_identity_fk(
     pool: &SqlitePool,
     table: &str,
@@ -12141,6 +12822,12 @@ async fn validate_table_columns(
         "reward_grants" => "PRAGMA table_xinfo('reward_grants')",
         "reward_ledger_entries" => "PRAGMA table_xinfo('reward_ledger_entries')",
         "reward_grant_ledger_origins" => "PRAGMA table_xinfo('reward_grant_ledger_origins')",
+        "reward_problem_completion_evaluations" => {
+            "PRAGMA table_xinfo('reward_problem_completion_evaluations')"
+        }
+        "reward_problem_solved_positive_claims" => {
+            "PRAGMA table_xinfo('reward_problem_solved_positive_claims')"
+        }
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -12627,9 +13314,9 @@ mod tests {
             inspect_schema_version(&fresh_pool)
                 .await
                 .expect("fresh version"),
-            30
+            31
         );
-        validate_schema_contract(&fresh_pool, 30)
+        validate_schema_contract(&fresh_pool, 31)
             .await
             .expect("fresh schema contract");
         verify_integrity(&fresh_pool)
@@ -12647,7 +13334,7 @@ mod tests {
                 .fetch_one(&fresh_pool)
                 .await
                 .expect("fresh ledger");
-        assert_eq!(applied_before, 30);
+        assert_eq!(applied_before, 31);
         let migration29 = MIGRATOR
             .iter()
             .find(|migration| migration.version == 29)
@@ -12660,7 +13347,7 @@ mod tests {
         .expect("migration 29 checksum");
         assert_eq!(recorded_checksum, migration29.checksum.as_ref());
 
-        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 30)
+        let fresh_pool = run_migrations(&fresh_path, fresh_pool, &MIGRATOR, 31)
             .await
             .expect("fresh reopen");
         let applied_after: i64 =
@@ -12674,20 +13361,20 @@ mod tests {
         let (existing_path, existing_pool) = s0_migrate_from_version(&existing, 23).await;
         let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 23)
             .await
-            .expect("23 to 30 migration");
+            .expect("23 to 31 migration");
         assert_eq!(
             inspect_schema_version(&existing_pool)
                 .await
                 .expect("upgraded version"),
-            30
+            31
         );
-        validate_schema_contract(&existing_pool, 30)
+        validate_schema_contract(&existing_pool, 31)
             .await
             .expect("upgraded schema contract");
         verify_integrity(&existing_pool)
             .await
             .expect("upgraded integrity");
-        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 30)
+        let existing_pool = run_migrations(&existing_path, existing_pool, &MIGRATOR, 31)
             .await
             .expect("existing 26 second reopen");
         assert_eq!(
@@ -12695,7 +13382,7 @@ mod tests {
                 .fetch_one(&existing_pool)
                 .await
                 .expect("existing ledger"),
-            30
+            31
         );
     }
 
@@ -12742,7 +13429,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(
@@ -12750,10 +13437,10 @@ mod tests {
              INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-24T00:00:00.000Z');
              INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000301', 1, 1, 'active', 1, 1, '2026-08-24');
              INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000302', 1, '00000000-0000-0000-0000-000000000301', 'early_check', 'completed', '2026-08-24', 1, 1, '2026-08-24T12:00:00.000Z', '2026-08-24T12:34:56.502Z', 'mastered', '2026-08-24', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
-             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000311', 1, 'learning_completion', '2026-08-24T12:34:56.501Z');
-             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000312', 1, 'learning_completion', '2026-08-24T12:34:56.503Z');
-             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000313', 1, 'learning_completion', '2026-08-24T12:34:56.499Z');
-             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000314', 1, 'learning_completion', '2026-02-30T12:34:56.500Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000311', 1, 'contest_personal_solve', '2026-08-24T12:34:56.501Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000312', 1, 'contest_personal_solve', '2026-08-24T12:34:56.503Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000313', 1, 'contest_personal_solve', '2026-08-24T12:34:56.499Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000314', 1, 'contest_personal_solve', '2026-02-30T12:34:56.500Z');
              UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1;",
         )
         .execute(pool)
@@ -13038,11 +13725,392 @@ mod tests {
         assert_eq!(counts, (1, 1, 2));
     }
 
+    async fn r3c1_runtime_with_learning_source(directory: &TempDir) -> DatabaseRuntime {
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::raw_sql(
+            "INSERT INTO problems (id, title, source_url, identity_type)
+             VALUES (1, 'P1', 'https://example.test/p1', 'personal');
+             INSERT INTO problem_completion_occurrences
+                 (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000701', 1,
+                     'learning_completion', '2026-08-24T12:34:56.501Z');
+             UPDATE reward_activation_state
+             SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z'
+             WHERE singleton = 1;",
+        )
+        .execute(pool)
+        .await
+        .expect("R3C1 source fixture");
+        runtime
+    }
+
+    #[tokio::test]
+    async fn r3c1_qualifying_learning_completion_creates_claim_and_typed_ledger() {
+        let directory = TempDir::new().expect("R3C1 database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let evaluation = runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000701",
+                1,
+                "qualifying",
+                "explicitly_accepted_digested",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .expect("evaluation");
+        assert_eq!(evaluation.policy_key, "problem_solved_v1");
+        let result = runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000701".to_owned(),
+                },
+                &RewardDecision {
+                    xp_amount: 100,
+                    coin_amount: 100,
+                    decision_reason: "qualified_positive".to_owned(),
+                    policy_key: "problem_solved_v1".to_owned(),
+                    policy_version: 1,
+                },
+            )
+            .await
+            .expect("positive ProblemSolved reward");
+        assert_eq!(result.ledger_entry_ids.len(), 2);
+        let claim = runtime
+            .load_problem_solved_positive_claim(1)
+            .await
+            .expect("claim load")
+            .expect("claim exists");
+        assert_eq!(claim.reward_event_id, result.reward_event_id);
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        assert!(sqlx::query("UPDATE reward_problem_solved_positive_claims SET claimed_at_utc = '2026-08-24T12:34:56.700Z' WHERE problem_id = 1").execute(pool).await.is_err());
+        assert!(sqlx::query(
+            "DELETE FROM reward_problem_solved_positive_claims WHERE problem_id = 1"
+        )
+        .execute(pool)
+        .await
+        .is_err());
+        assert!(sqlx::query("INSERT INTO reward_problem_solved_positive_claims (problem_id, reward_event_id, claimed_at_utc) VALUES (1, '00000000-0000-0000-0000-000000000799', '2026-08-24T12:34:56.700Z')").execute(pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn r3c1_learning_completion_requires_immutable_evaluation_and_rejects_contest_kind() {
+        let directory = TempDir::new().expect("R3C1 database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000701".to_owned(),
+        };
+        let arbitrary_positive = RewardDecision {
+            xp_amount: 1,
+            coin_amount: 1,
+            decision_reason: "qualified_positive".to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+        };
+        assert_eq!(
+            runtime.process_reward(&source, &arbitrary_positive).await,
+            Err(RewardProcessingError::DecisionInvalid)
+        );
+        let evaluation = runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000701",
+                1,
+                "non_qualifying",
+                "insufficient_digestion",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .expect("non-qualifying evaluation");
+        assert_eq!(evaluation.qualification, "non_qualifying");
+        assert_eq!(
+            runtime
+                .create_problem_solved_evaluation(
+                    "00000000-0000-0000-0000-000000000701",
+                    1,
+                    "qualifying",
+                    "explicitly_accepted_digested",
+                    "2026-08-24T12:34:56.600Z",
+                )
+                .await,
+            Err(RewardProcessingError::DecisionConflict)
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000702', 1,
+                     'contest_personal_solve', '2026-08-24T12:34:56.502Z')",
+        )
+        .execute(pool)
+        .await
+        .expect("contest occurrence");
+        assert!(runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000702",
+                1,
+                "qualifying",
+                "explicitly_accepted_digested",
+                "2026-08-24T12:34:56.601Z",
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn r3c1_positive_claim_conflict_rolls_back_and_returns_typed_outcome() {
+        let directory = TempDir::new().expect("R3C1 conflict database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000703', 1,
+                     'learning_completion', '2026-08-24T12:34:56.502Z');",
+        )
+        .execute(pool)
+        .await
+        .expect("second occurrence");
+        for occurrence in [
+            "00000000-0000-0000-0000-000000000701",
+            "00000000-0000-0000-0000-000000000703",
+        ] {
+            runtime
+                .create_problem_solved_evaluation(
+                    occurrence,
+                    1,
+                    "qualifying",
+                    "explicitly_accepted_digested",
+                    "2026-08-24T12:34:56.600Z",
+                )
+                .await
+                .expect("qualifying evaluation");
+        }
+        let decision = RewardDecision {
+            xp_amount: 100,
+            coin_amount: 100,
+            decision_reason: "qualified_positive".to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+        };
+        let first = runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000701".to_owned(),
+                },
+                &decision,
+            )
+            .await
+            .expect("first winner");
+        assert_eq!(first.disposition, RewardProcessingDisposition::Created);
+        let second = runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000703".to_owned(),
+                },
+                &decision,
+            )
+            .await;
+        assert_eq!(
+            second,
+            Err(RewardProcessingError::PositiveClaimAlreadyTaken)
+        );
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_solved_positive_claims),
+                    (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries),
+                    (SELECT COUNT(*) FROM reward_grant_ledger_origins)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("winner counts");
+        assert_eq!(counts, (1, 1, 1, 2, 2));
+        assert_eq!(
+            runtime
+                .load_problem_solved_positive_claim(1)
+                .await
+                .expect("winner reload")
+                .expect("winner claim")
+                .reward_event_id,
+            first.reward_event_id
+        );
+    }
+
+    #[tokio::test]
+    async fn r3c1_zero_positive_matrix_and_policy_guards_are_closed() {
+        let directory = TempDir::new().expect("R3C1 matrix database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000701".to_owned(),
+        };
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query("INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000704', 1, 'learning_completion', '2026-08-24T12:34:56.499Z')").execute(pool).await.expect("pre-activation occurrence");
+        let pre_source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000704".to_owned(),
+        };
+        let zero = |reason: &str| RewardDecision {
+            xp_amount: 0,
+            coin_amount: 0,
+            decision_reason: reason.to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+        };
+        assert!(runtime
+            .process_reward(&pre_source, &zero("pre_activation"))
+            .await
+            .is_ok());
+        assert!(runtime
+            .process_reward(
+                &pre_source,
+                &RewardDecision {
+                    xp_amount: 100,
+                    coin_amount: 100,
+                    decision_reason: "qualified_positive".to_owned(),
+                    policy_key: "problem_solved_v1".to_owned(),
+                    policy_version: 1
+                }
+            )
+            .await
+            .is_err());
+        assert!(runtime
+            .process_reward(&source, &zero("pre_activation"))
+            .await
+            .is_err());
+        assert!(runtime
+            .process_reward(&source, &zero("already_rewarded"))
+            .await
+            .is_err());
+        assert_eq!(
+            runtime
+                .process_reward(
+                    &source,
+                    &RewardDecision {
+                        xp_amount: 99,
+                        coin_amount: 100,
+                        decision_reason: "qualified_positive".to_owned(),
+                        policy_key: "problem_solved_v1".to_owned(),
+                        policy_version: 1
+                    }
+                )
+                .await,
+            Err(RewardProcessingError::DecisionInvalid)
+        );
+        assert_eq!(
+            runtime
+                .process_reward(
+                    &source,
+                    &RewardDecision {
+                        xp_amount: 100,
+                        coin_amount: 100,
+                        decision_reason: "qualified_positive".to_owned(),
+                        policy_key: "wrong".to_owned(),
+                        policy_version: 1
+                    }
+                )
+                .await,
+            Err(RewardProcessingError::DecisionInvalid)
+        );
+        runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000701",
+                1,
+                "non_qualifying",
+                "mechanical_reentry",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .expect("mechanical reason");
+        assert!(runtime
+            .process_reward(&source, &zero("non_qualifying"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn r3c1_evaluation_and_claim_authority_guards_are_immutable() {
+        let directory = TempDir::new().expect("R3C1 authority database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let occurrence = "00000000-0000-0000-0000-000000000701";
+        let first = runtime
+            .create_problem_solved_evaluation(
+                occurrence,
+                1,
+                "non_qualifying",
+                "other",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .expect("evaluation");
+        assert_eq!(
+            runtime
+                .create_problem_solved_evaluation(
+                    occurrence,
+                    1,
+                    "non_qualifying",
+                    "other",
+                    "2026-08-24T12:34:56.600Z"
+                )
+                .await
+                .expect("idempotent retry"),
+            first
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        assert!(sqlx::query("UPDATE reward_problem_completion_evaluations SET reason_code = 'mechanical_reentry' WHERE problem_completion_occurrence_id = ?1").bind(occurrence).execute(pool).await.is_err());
+        assert!(sqlx::query("DELETE FROM reward_problem_completion_evaluations WHERE problem_completion_occurrence_id = ?1").bind(occurrence).execute(pool).await.is_err());
+        assert!(runtime
+            .create_problem_solved_evaluation(
+                occurrence,
+                1,
+                "qualifying",
+                "explicitly_accepted_digested",
+                "2026-08-24T12:34:56.600Z"
+            )
+            .await
+            .is_err());
+        assert!(runtime
+            .create_problem_solved_evaluation(
+                occurrence,
+                2,
+                "non_qualifying",
+                "other",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .is_err());
+        assert!(runtime
+            .create_problem_solved_evaluation(
+                occurrence,
+                1,
+                "qualifying",
+                "other",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .is_err());
+        assert!(runtime
+            .create_problem_solved_evaluation(
+                occurrence,
+                1,
+                "non_qualifying",
+                "other",
+                "2026-08-24T12:34:56Z",
+            )
+            .await
+            .is_err());
+    }
+
     async fn r2c3_runtime_with_pending_sources(directory: &TempDir) -> DatabaseRuntime {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(
@@ -13256,12 +14324,22 @@ mod tests {
                 "INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'P1', 'https://example.test/p1', 'personal');
                  INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'learning', '2026-08-24T00:00:00.000Z');
                  INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000510', 1, 'learning_completion', '2026-08-24T12:34:56.501Z');
-                 INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000511', 1, 'learning_completion', '2026-08-24T12:34:56.502Z');",
+                 INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000511', 1, 'learning_completion', '2026-08-24T12:34:56.502Z');
+                 INSERT INTO reward_problem_completion_evaluations (problem_completion_occurrence_id, problem_id, qualification, reason_code, policy_key, policy_version, evaluated_at_utc) VALUES ('00000000-0000-0000-0000-000000000510', 1, 'qualifying', 'explicitly_accepted_digested', 'problem_solved_v1', 1, '2026-08-24T12:34:56.600Z');
+                 INSERT INTO reward_problem_completion_evaluations (problem_completion_occurrence_id, problem_id, qualification, reason_code, policy_key, policy_version, evaluated_at_utc) VALUES ('00000000-0000-0000-0000-000000000511', 1, 'non_qualifying', 'other', 'problem_solved_v1', 1, '2026-08-24T12:34:56.601Z');",
             )
             .execute(pool)
             .await
             .expect("missed Shared facts");
-            runtime.activate_reward().await.expect("activate Reward");
+            sqlx::query(
+                "UPDATE reward_activation_state
+                 SET activation_status = 'active',
+                     activated_at_utc = '2026-08-24T12:34:56.500Z'
+                 WHERE singleton = 1",
+            )
+            .execute(pool)
+            .await
+            .expect("activate Reward before recovered sources");
         }
         let s3 = RewardSource::ProblemCompletionOccurrence {
             occurrence_id: "00000000-0000-0000-0000-000000000510".to_owned(),
@@ -13272,12 +14350,18 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pending = runtime.list_pending_reward_sources(10).await.unwrap();
         assert!(pending.contains(&s3));
         assert!(pending.contains(&zero_source));
-        let positive = reward_decision(4, 6);
+        let positive = RewardDecision {
+            xp_amount: 100,
+            coin_amount: 100,
+            decision_reason: "qualified_positive".to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+        };
         let first = runtime
             .process_reward(&s3, &positive)
             .await
@@ -13292,7 +14376,16 @@ mod tests {
             RewardProcessingDisposition::AlreadyProcessed
         );
         runtime
-            .process_reward(&zero_source, &reward_decision(0, 0))
+            .process_reward(
+                &zero_source,
+                &RewardDecision {
+                    xp_amount: 0,
+                    coin_amount: 0,
+                    decision_reason: "non_qualifying".to_owned(),
+                    policy_key: "problem_solved_v1".to_owned(),
+                    policy_version: 1,
+                },
+            )
             .await
             .expect("zero recovered source");
         let pending = runtime.list_pending_reward_sources(10).await.unwrap();
@@ -13416,7 +14509,7 @@ mod tests {
             let occurrence = uuid::Uuid::now_v7().to_string();
             let event = uuid::Uuid::now_v7().to_string();
             let ledger = uuid::Uuid::now_v7().to_string();
-            sqlx::query("INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES (?1, 1, 'learning_completion', '2026-08-24T00:00:00.001Z')").bind(&occurrence).execute(&mut *transaction).await.unwrap();
+            sqlx::query("INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES (?1, 1, 'contest_personal_solve', '2026-08-24T00:00:00.001Z')").bind(&occurrence).execute(&mut *transaction).await.unwrap();
             sqlx::query("INSERT INTO reward_events (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc) VALUES (?1, 1, '2026-08-24T00:00:00.001Z', 'post_activation', '2026-08-24T00:00:00.002Z')").bind(&event).execute(&mut *transaction).await.unwrap();
             sqlx::query("INSERT INTO reward_problem_completion_event_sources (reward_event_id, problem_completion_occurrence_id) VALUES (?1, ?2)").bind(&event).bind(&occurrence).execute(&mut *transaction).await.unwrap();
             sqlx::query("INSERT INTO reward_grants (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key, policy_version, decided_at_utc) VALUES (?1, ?2, 0, 'overflow fixture', 'test-policy', 1, '2026-08-24T00:00:00.002Z')").bind(&event).bind(MAX_EXACT_REWARD_AMOUNT).execute(&mut *transaction).await.unwrap();
@@ -13489,7 +14582,7 @@ mod tests {
         let competitor = DatabaseRuntime {
             _pool: Some(second_pool),
             _startup_lock: None,
-            status: StartupGateStatus::Ready { schema_version: 30 },
+            status: StartupGateStatus::Ready { schema_version: 31 },
             markdown_projection_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             recovery_root: None,
             app_private_data: Some(directory.path().to_owned()),
@@ -13689,11 +14782,13 @@ mod tests {
                 "reward_grant_ledger_origins",
                 "reward_grants",
                 "reward_ledger_entries",
+                "reward_problem_completion_evaluations",
                 "reward_problem_completion_event_sources",
+                "reward_problem_solved_positive_claims",
                 "reward_review_event_sources",
             ]
         );
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 30);
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 31);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
@@ -13701,9 +14796,9 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            30
+            31
         );
-        validate_schema_contract(&pool, 30)
+        validate_schema_contract(&pool, 31)
             .await
             .expect("schema 30 contract");
         verify_integrity(&pool).await.expect("schema 30 integrity");
@@ -13853,7 +14948,7 @@ mod tests {
             let runtime = start_database(directory.path()).await;
             assert_eq!(
                 runtime.status(),
-                &StartupGateStatus::Ready { schema_version: 30 }
+                &StartupGateStatus::Ready { schema_version: 31 }
             );
             let pool = runtime._pool.as_ref().expect("ready pool");
             sqlx::query("UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1")
@@ -13907,8 +15002,8 @@ mod tests {
             .await
             .expect("migration 30");
 
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 30);
-        validate_schema_contract(&pool, 30)
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 31);
+        validate_schema_contract(&pool, 31)
             .await
             .expect("schema 30 contract");
         assert_eq!(
@@ -13918,7 +15013,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            30
+            31
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences",)
@@ -13993,7 +15088,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = runtime._pool.as_ref().expect("upgraded pool");
         assert_eq!(
@@ -14003,7 +15098,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("schema generation"),
-            30
+            31
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -14035,9 +15130,9 @@ mod tests {
             .expect("empty ordinal authority"),
             0
         );
-        validate_schema_contract(pool, 30)
+        validate_schema_contract(pool, 31)
             .await
-            .expect("schema 30 contract");
+            .expect("schema 31 contract");
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
         let backups: Vec<PathBuf> = fs::read_dir(&backup_directory)
@@ -14070,7 +15165,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let reopened_pool = reopened._pool.as_ref().expect("reopened pool");
         assert_eq!(
@@ -14133,7 +15228,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = runtime._pool.as_ref().expect("activated pool");
         let activated: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -14205,7 +15300,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = reopened._pool.as_ref().expect("reopened pool");
         let durable: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -15677,16 +16772,16 @@ mod tests {
             26,
         )
         .await
-        .expect("migration 30");
+        .expect("migration 31");
         assert_eq!(
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            30
+            31
         );
-        validate_schema_contract(&runtime_pool, 30)
+        validate_schema_contract(&runtime_pool, 31)
             .await
-            .expect("schema 30 contract");
+            .expect("schema 31 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -15702,7 +16797,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
     }
 
@@ -17670,14 +18765,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 30);
+        assert_eq!(ledger_count, 31);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -17690,7 +18785,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -17722,7 +18817,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-30-"));
+            .starts_with("schema-10-to-31-"));
     }
 
     #[tokio::test]
@@ -22362,7 +23457,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
     }
 
@@ -22428,7 +23523,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -22461,7 +23556,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -22506,7 +23601,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -22671,7 +23766,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
     }
 
@@ -22883,7 +23978,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 30);
+        assert_eq!(preview.supported_schema_version, 31);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -23365,7 +24460,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -23457,7 +24552,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-30-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-31-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -23717,7 +24812,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -23751,7 +24846,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -24460,7 +25555,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 30 }
+            &StartupGateStatus::Ready { schema_version: 31 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
