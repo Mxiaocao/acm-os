@@ -11415,6 +11415,371 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s4h_empty_schema28_upgrades_once_with_backup_ledger_and_reopen() {
+        let directory = TempDir::new().expect("schema 28 app data");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("schema 28 database");
+        MIGRATOR
+            .run_to(28, &pool)
+            .await
+            .expect("authentic schema 28");
+        pool.close().await;
+
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::Ready { schema_version: 29 }
+        );
+        let pool = runtime._pool.as_ref().expect("upgraded pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("schema generation"),
+            29
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("migration 29 ledger row"),
+            1
+        );
+        let migration29 = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 29)
+            .expect("migration 29");
+        let checksum: Vec<u8> = sqlx::query_scalar(
+            "SELECT checksum FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("migration 29 checksum");
+        assert_eq!(checksum, migration29.checksum.as_ref());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT (SELECT COUNT(*) FROM scheduled_review_ordinal_states) +
+                        (SELECT COUNT(*) FROM scheduled_review_ordinal_facts)",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("empty ordinal authority"),
+            0
+        );
+        validate_schema_contract(pool, 29)
+            .await
+            .expect("schema 29 contract");
+
+        let backup_directory = directory.path().join("backups").join("pre-migration");
+        let backups: Vec<PathBuf> = fs::read_dir(&backup_directory)
+            .expect("pre-migration backup directory")
+            .map(|entry| entry.expect("backup entry").path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup = connect_read_only(&backups[0])
+            .await
+            .expect("schema 28 backup");
+        assert_eq!(
+            inspect_schema_version(&backup)
+                .await
+                .expect("backup version"),
+            28
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scheduled_review_ordinal_states'",
+            )
+            .fetch_one(&backup)
+            .await
+            .expect("pre-activation backup"),
+            0
+        );
+        backup.close().await;
+        drop(runtime);
+
+        let reopened = start_database(directory.path()).await;
+        assert_eq!(
+            reopened.status(),
+            &StartupGateStatus::Ready { schema_version: 29 }
+        );
+        let reopened_pool = reopened._pool.as_ref().expect("reopened pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+            )
+            .fetch_one(reopened_pool)
+            .await
+            .expect("single activation ledger row"),
+            1
+        );
+        assert_eq!(
+            fs::read_dir(backup_directory)
+                .expect("stable backup directory")
+                .count(),
+            1,
+            "reopen must not create a second activation backup"
+        );
+    }
+
+    #[tokio::test]
+    async fn s4h_schema28_history_activates_independent_durable_sequences() {
+        let directory = TempDir::new().expect("historical schema 28 app data");
+        let database_path = directory.path().join(DATABASE_FILENAME);
+        let pool = connect_read_write(&database_path)
+            .await
+            .expect("schema 28 database");
+        MIGRATOR
+            .run_to(28, &pool)
+            .await
+            .expect("authentic schema 28");
+        sqlx::raw_sql(
+            "INSERT INTO contests (id, title, source_url, import_status) VALUES (1, 'Historical contest', 'https://example.test/contest/1', 'complete');
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'Problem A', 'https://example.test/problem/1', 'personal');
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (2, 'Problem B', 'https://example.test/problem/2', 'personal');
+             INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) VALUES (1, 'codeforces', '1');
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (1, 'codeforces', '1', 'A');
+             INSERT INTO problem_external_identities (problem_id, platform, external_contest_key, external_problem_key) VALUES (2, 'codeforces', '1', 'B');
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-01T00:00:00.000Z');
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (2, 'long_term_review', '2026-08-01T00:00:00.000Z');
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000101', 1, 1, 'active', 1, 1, '2026-08-20');
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000201', 2, 1, 'active', 1, 1, '2026-08-20');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000111', 1, '00000000-0000-0000-0000-000000000101', 'first_cold_start', 'completed', '2026-08-01', 0, 1, '2026-08-01T00:00:00.000Z', '2026-08-01T00:01:00.000Z', 'mastered', '2026-08-01', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000112', 1, '00000000-0000-0000-0000-000000000101', 'long_term_review', 'completed', '2026-08-02', 0, 1, '2026-08-02T00:00:00.000Z', '2026-08-02T00:01:00.000Z', 'partial', '2026-08-02', 1, 'accepted', 'accepted', 1, 1, 0, 'independent', 'solving_hint', '[\"partial\"]');
+             INSERT INTO review_failure_reasons (review_attempt_id, reason_code) VALUES ('00000000-0000-0000-0000-000000000112', 'key_property_blocked');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000113', 1, '00000000-0000-0000-0000-000000000101', 'long_term_review', 'completed', '2026-08-03', 0, 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:01:00.000Z', 'fail', '2026-08-03', 0, 'wrong_answer', 'wrong_answer', 1, 0, 0, 'independent', 'none', '[\"fail\"]');
+             INSERT INTO review_failure_reasons (review_attempt_id, reason_code) VALUES ('00000000-0000-0000-0000-000000000113', 'implementation_error');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000114', 1, '00000000-0000-0000-0000-000000000101', 'early_check', 'completed', '2026-08-04', 1, 1, '2026-08-04T00:00:00.000Z', '2026-08-04T00:01:00.000Z', 'mastered', '2026-08-04', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc) VALUES ('00000000-0000-0000-0000-000000000115', 1, '00000000-0000-0000-0000-000000000101', 'long_term_review', 'void', '2026-08-05', 0, 1, '2026-08-05T00:00:00.000Z', '2026-08-05T00:01:00.000Z');
+             INSERT INTO review_void_events (id, review_attempt_id, reason) VALUES ('00000000-0000-0000-0000-000000000116', '00000000-0000-0000-0000-000000000115', 'historical void');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES ('00000000-0000-0000-0000-000000000117', 1, '00000000-0000-0000-0000-000000000101', 'long_term_review', 'in_progress', '2026-08-20', 0, 1, '2026-08-10T00:00:00.000Z');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000211', 2, '00000000-0000-0000-0000-000000000201', 'long_term_review', 'completed', '2026-08-06', 0, 1, '2026-08-06T00:00:00.000Z', '2026-08-06T00:01:00.000Z', 'mastered', '2026-08-06', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc) VALUES ('00000000-0000-0000-0000-000000000217', 2, '00000000-0000-0000-0000-000000000201', 'long_term_review', 'in_progress', '2026-08-20', 0, 1, '2026-08-10T00:00:00.000Z');",
+        )
+        .execute(&pool)
+        .await
+        .expect("representative schema 28 history");
+        pool.close().await;
+
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::Ready { schema_version: 29 }
+        );
+        let pool = runtime._pool.as_ref().expect("activated pool");
+        let activated: Vec<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT problem_id, historical_baseline, last_allocated
+             FROM scheduled_review_ordinal_states ORDER BY problem_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("activation baselines");
+        assert_eq!(activated, vec![(1, 3, 3), (2, 1, 1)]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scheduled_review_ordinal_facts")
+                .fetch_one(pool)
+                .await
+                .expect("no historical facts"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM review_attempts WHERE attempt_status = 'completed'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("preserved completed history"),
+            5
+        );
+
+        complete_review(
+            &runtime,
+            "00000000-0000-0000-0000-000000000117",
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-20").expect("completion date"),
+        )
+        .await
+        .expect("pre-activation attempt completes after activation");
+        complete_review(
+            &runtime,
+            "00000000-0000-0000-0000-000000000217",
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-20").expect("completion date"),
+        )
+        .await
+        .expect("independent problem completion");
+        let facts: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT problem_id, ordinal FROM scheduled_review_ordinal_facts
+             ORDER BY problem_id, ordinal",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("post-activation facts");
+        assert_eq!(facts, vec![(1, 4), (2, 2)]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM scheduled_review_ordinal_facts
+                 WHERE review_attempt_id IN (
+                    '00000000-0000-0000-0000-000000000111',
+                    '00000000-0000-0000-0000-000000000112',
+                    '00000000-0000-0000-0000-000000000113',
+                    '00000000-0000-0000-0000-000000000211'
+                 )",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("historical attempts remain unordinalized"),
+            0
+        );
+        drop(runtime);
+
+        let reopened = start_database(directory.path()).await;
+        assert_eq!(
+            reopened.status(),
+            &StartupGateStatus::Ready { schema_version: 29 }
+        );
+        let pool = reopened._pool.as_ref().expect("reopened pool");
+        let durable: Vec<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT problem_id, historical_baseline, last_allocated
+             FROM scheduled_review_ordinal_states ORDER BY problem_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("durable authority");
+        assert_eq!(durable, vec![(1, 3, 4), (2, 1, 2)]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("one activation epoch"),
+            1
+        );
+        validate_scheduled_review_ordinal_contract(pool)
+            .await
+            .expect("durable ordinal contract");
+    }
+
+    #[tokio::test]
+    async fn s4h_failed_migration29_preserves_schema28_generation_ledger_and_data() {
+        let directory = TempDir::new().expect("schema 28 database");
+        let (path, pool) = s0_migrate_from_version(&directory, 28).await;
+        sqlx::query(
+            "INSERT INTO problems (id, title, source_url, identity_type)
+             VALUES (1, 'Preserved problem', 'https://example.test/problem/1', 'personal')",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema 28 business data");
+        let broken = Migrator::with_migrations(vec![Migration::new(
+            29,
+            "create_scheduled_review_ordinal_authority".into(),
+            MigrationType::Simple,
+            "UPDATE app_metadata SET schema_generation = 29;
+             CREATE TABLE scheduled_review_ordinal_states ("
+                .into_sql_str(),
+            false,
+        )]);
+
+        assert!(matches!(
+            run_migrations(&path, pool, &broken, 28).await,
+            Err(StartupRecoveryReason::MigrationFailed)
+        ));
+        let inspection = connect_read_only(&path)
+            .await
+            .expect("inspect failed activation");
+        assert_eq!(
+            inspect_schema_version(&inspection).await.expect("version"),
+            28
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("unchanged generation"),
+            28
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("failed activation ledger"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problems WHERE id = 1")
+                .fetch_one(&inspection)
+                .await
+                .expect("preserved data"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'scheduled_review_ordinal_states'",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("no partial authority table"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn s4h_schema29_generation_mismatch_fails_closed_without_repair() {
+        let directory = TempDir::new().expect("schema 29 app data");
+        {
+            let runtime = start_database(directory.path()).await;
+            let pool = runtime._pool.as_ref().expect("ready pool");
+            sqlx::query("UPDATE app_metadata SET schema_generation = 28 WHERE singleton = 1")
+                .execute(pool)
+                .await
+                .expect("inject generation mismatch");
+        }
+
+        let blocked = start_database(directory.path()).await;
+        assert_eq!(
+            blocked.status(),
+            &StartupGateStatus::RecoveryRequired {
+                reason: StartupRecoveryReason::IntegrityCheckFailed,
+            }
+        );
+        let inspection = connect_read_only(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("inspect blocked database");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("mismatch remains committed"),
+            28,
+            "startup must not silently repair schema metadata"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 29 AND success = 1",
+            )
+            .fetch_one(&inspection)
+            .await
+            .expect("ledger remains authoritative"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn s4d_storage_guards_enforce_append_only_and_post_activation_completion_boundary() {
         let directory = TempDir::new().expect("schema 29 database");
         let (_path, pool) = s0_migrate_from_version(&directory, 29).await;
