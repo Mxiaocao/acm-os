@@ -764,6 +764,7 @@ pub enum ReviewAttemptStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewHistoryItem {
     pub attempt: ReviewAttempt,
+    pub stable_scheduled_review_ordinal: Option<u64>,
     pub status: ReviewAttemptStatus,
     pub judgement: Option<acm_os_domain::ReviewJudgement>,
     pub completion_input: Option<ReviewCompletionInput>,

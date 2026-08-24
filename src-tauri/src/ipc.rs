@@ -715,6 +715,7 @@ pub struct ReviewCompletionFactsDto {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewHistoryItemDto {
     attempt: ReviewAttemptDto,
+    stable_scheduled_review_ordinal: Option<u64>,
     status: &'static str,
     judgement: Option<&'static str>,
     completion_facts: Option<ReviewCompletionFactsDto>,
@@ -2739,6 +2740,7 @@ fn problem_mastery_projection_dto(
 fn review_history_item_dto(item: acm_os_application::ReviewHistoryItem) -> ReviewHistoryItemDto {
     ReviewHistoryItemDto {
         attempt: review_attempt_dto(item.attempt),
+        stable_scheduled_review_ordinal: item.stable_scheduled_review_ordinal,
         status: match item.status {
             acm_os_application::ReviewAttemptStatus::InProgress => "inProgress",
             acm_os_application::ReviewAttemptStatus::Completed => "completed",
