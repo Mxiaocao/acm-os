@@ -1835,6 +1835,7 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
     listContestLibraryPlacements(contestId).then(setPlacements).catch((error) => setPlacementError(contestLibraryErrorMessage(error)));
   };
   useEffect(() => { getContestDetail(contestId).then(setDetail).catch(() => setFailed(true)); loadPlacements(); }, [contestId]);
+  useEffect(() => { if (detail) headingRef.current?.focus(); }, [detail]);
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Contest is unavailable</h1><p>The local contest detail could not be read.</p></section>;
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading contest</h1></section>;
   const submitFacts = async (event: FormEvent<HTMLFormElement>) => {

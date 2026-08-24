@@ -53,6 +53,28 @@ const readyFoundation = {
   foundation: { status: "ready", core: "acm-os" },
 };
 
+test("Contest Detail focuses the final heading after async detail loading", { concurrency: false }, async () => {
+  let resolveDetail;
+  const detailPromise = new Promise((resolve) => { resolveDetail = resolve; });
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detailPromise;
+    if (command === "contest_library_list_placements") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests/1979");
+  try {
+    await settle();
+    assert.equal(view.document.querySelector("h1")?.textContent, "Loading contest");
+    assert.equal(view.document.activeElement, view.document.querySelector("h1"));
+    await act(async () => resolveDetail({ contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null, archived: false }));
+    await settle();
+    const heading = view.document.querySelector("h1");
+    assert.equal(heading?.textContent, "Contest");
+    assert.equal(view.document.activeElement, heading);
+  } finally { await view.cleanup(); }
+});
+
 test("Contest AI analysis previews before explicit save and preserves failed raw text", { concurrency: false }, async () => {
   const calls = [];
   let detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null };
