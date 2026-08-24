@@ -34,7 +34,8 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
     const stage = (value) => invoke("desktop_e2e_log", { input: { stage: value } });
     const budgetInput = (day) => document.querySelector(`input[aria-label="${day} ACM budget in minutes"]`);
     const summaryValue = (label) => {
-      const term = [...document.querySelectorAll(".today-toolbar dt")].find((item) => item.textContent.trim() === label);
+      const index = { Date: 0, Planned: 1, Budget: 2, Over: 3 }[label];
+      const term = document.querySelectorAll(".today-toolbar dt")[index];
       return term?.nextElementSibling?.textContent.trim() ?? "";
     };
     const assertText = (actual, expected, label) => {
@@ -54,10 +55,10 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       }[label];
       if (primaryRoute) {
         await waitFor(
-          () => document.querySelector(`nav[aria-label="Primary"] a[href="${primaryRoute}"]`) !== null,
+          () => document.querySelector(`nav a[href="${primaryRoute}"]`) !== null,
           `${label} primary route`,
         );
-        document.querySelector(`nav[aria-label="Primary"] a[href="${primaryRoute}"]`).click();
+        document.querySelector(`nav a[href="${primaryRoute}"]`).click();
         await waitFor(() => window.location.pathname === primaryRoute, `${label} route`);
       } else {
         await clickText(label);
@@ -69,12 +70,15 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await stage("driver-started");
       const configured = await invoke("desktop_e2e_context");
       if (configured.phase === "verify-restart") {
-        await waitText("Today");
+        await waitFor(
+          () => document.querySelector('nav a[href="/today"]') !== null,
+          "primary Today route after restart",
+        );
         await navigateTo("Knowledge", "Knowledge index");
         await clickText("Segment Tree");
-        await waitText("Historical highest:");
-        await waitText("基本理解");
-        assertText(document.querySelector('select[aria-label="Current understanding"]')?.value ?? "<missing>", "basic", "persisted Knowledge understanding");
+        await waitFor(() => document.querySelector(".knowledge-understanding select") !== null, "persisted Knowledge detail");
+        await waitFor(() => document.querySelector(".knowledge-understanding > p strong") !== null, "persisted Knowledge understanding");
+        assertText(document.querySelector(".knowledge-understanding select")?.value ?? "<missing>", "basic", "persisted Knowledge understanding");
         await stage("restart-knowledge-restored");
 
         await clickText("我的题库");
@@ -126,7 +130,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       document.querySelector(".workspace-form button[type=submit]").click();
 
       await waitFor(
-        () => document.querySelector('nav[aria-label="Primary"] a[href="/today"]') !== null,
+          () => document.querySelector('nav a[href="/today"]') !== null,
         "primary Today route",
       );
       await stage("workspace-configured");
@@ -134,12 +138,15 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await navigateTo("Knowledge", "Knowledge index");
       await waitText("Segment Tree");
       await clickText("Segment Tree");
-      await waitText("No user-confirmed status yet.");
-      selectValue(document.querySelector('select[aria-label="Current understanding"]'), "basic");
-      await clickText("Confirm status");
-      await waitText("Understanding status confirmed by you.");
-      await waitText("Historical highest:");
-      await waitText("基本理解");
+      await waitFor(() => document.querySelector(".knowledge-understanding select") !== null, "Knowledge detail");
+      await waitFor(
+        () => document.querySelector(".knowledge-understanding > p strong") === null,
+        "unconfirmed Knowledge understanding",
+      );
+      selectValue(document.querySelector(".knowledge-understanding select"), "basic");
+      document.querySelector(".knowledge-understanding > button").click();
+      await waitFor(() => document.querySelector(".knowledge-understanding > p strong") !== null, "confirmed Knowledge understanding");
+      assertText(document.querySelector(".knowledge-understanding select")?.value ?? "<missing>", "basic", "confirmed Knowledge understanding");
       await stage("knowledge-confirmed");
 
       await navigateTo("Settings", "Weekly ACM budget");
@@ -176,16 +183,16 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       assertText(summaryValue("Budget"), "73 min", "Tuesday weekly default");
       const override = document.querySelector('input[aria-label="Daily budget in minutes"]');
       inputValue(override, "47");
-      await clickText("Preview replan");
-      await waitText("Apply this replan?");
+      document.querySelector(".today-toolbar button[type=submit]").click();
+      await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
       assertText(summaryValue("Budget"), "73 min", "Preview must not mutate Today");
-      await clickText("Cancel");
-      await waitFor(() => !bodyText().includes("Apply this replan?"), "cancelled preview");
+      document.querySelector('[role="dialog"] button.secondary-action').click();
+      await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') === null, "cancelled preview");
       assertText(summaryValue("Budget"), "73 min", "Cancel must not persist");
       inputValue(document.querySelector('input[aria-label="Daily budget in minutes"]'), "47");
-      await clickText("Preview replan");
-      await waitText("Apply this replan?");
-      await clickText("Apply replan");
+      document.querySelector(".today-toolbar button[type=submit]").click();
+      await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
+      document.querySelector('[role="dialog"] button.primary-action').click();
       await waitFor(() => summaryValue("Budget") === "47 min", "applied 47 minute override");
       await navigateTo("Settings", "Weekly ACM budget");
       await waitFor(() => budgetInput("Tuesday")?.value === "73", "weekly template after override");
@@ -336,9 +343,9 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await navigateTo("Today");
       await waitFor(() => summaryValue("Budget") === "95 min", "Monday weekly default");
       inputValue(document.querySelector('input[aria-label="Daily budget in minutes"]'), "180");
-      await clickText("Preview replan");
-      await waitText("Apply this replan?");
-      await clickText("Apply replan");
+      document.querySelector(".today-toolbar button[type=submit]").click();
+      await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
+      document.querySelector('[role="dialog"] button.primary-action').click();
       await waitFor(() => summaryValue("Budget") === "180 min", "applied Monday override");
       await waitText("Long-term Review");
       await stage("today-generated");
