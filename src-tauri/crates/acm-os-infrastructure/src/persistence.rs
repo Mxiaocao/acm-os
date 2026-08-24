@@ -13065,7 +13065,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r2c3_activation_is_one_time_canonical_idempotent_and_restart_durable() {
+    async fn r2c3_r2d_activation_is_one_time_canonical_idempotent_and_restart_durable() {
         let directory = TempDir::new().expect("R2C3 activation database");
         let activated_at = {
             let runtime = start_database(directory.path()).await;
@@ -13120,7 +13120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r2c3_pending_discovery_is_typed_bounded_ordered_and_read_only() {
+    async fn r2c3_r2d_pending_discovery_is_typed_bounded_ordered_and_read_only() {
         let directory = TempDir::new().expect("R2C3 discovery database");
         let runtime = r2c3_runtime_with_pending_sources(&directory).await;
         assert_eq!(
@@ -13206,7 +13206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r2c3_pending_discovery_fails_closed_on_missing_required_ordinal() {
+    async fn r2c3_r2d_pending_discovery_fails_closed_on_missing_required_ordinal() {
         let directory = TempDir::new().expect("R2C3 corrupt scheduled database");
         let runtime = r2c3_runtime_with_pending_sources(&directory).await;
         let pool = runtime._pool.as_ref().expect("ready pool");
@@ -13399,7 +13399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r2c3_reward_account_fails_closed_on_checked_overflow() {
+    async fn r2c3_r2d_reward_account_fails_closed_on_checked_overflow() {
         let directory = TempDir::new().expect("R2C3 overflow database");
         let runtime = start_database(directory.path()).await;
         let pool = runtime._pool.as_ref().expect("ready pool");
@@ -13427,6 +13427,223 @@ mod tests {
         assert_eq!(
             runtime.load_reward_account().await,
             Err(RewardProcessingError::IntegrityViolation)
+        );
+    }
+
+    #[tokio::test]
+    async fn r2d_corrupt_existing_graph_retry_fails_closed_without_repair() {
+        let directory = TempDir::new().expect("R2D corrupt retry database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+        };
+        let decision = reward_decision(5, 7);
+        let created = runtime
+            .process_reward(&source, &decision)
+            .await
+            .expect("initial valid graph");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::raw_sql(
+            "DROP TRIGGER reward_events_no_update;
+             UPDATE reward_events
+             SET source_occurred_at_utc = '2026-08-24T12:34:56.502Z'
+             WHERE id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                          WHERE problem_completion_occurrence_id = '00000000-0000-0000-0000-000000000311');",
+        )
+        .execute(pool)
+        .await
+        .expect("isolated corrupt event/source timestamp");
+        assert_eq!(
+            runtime.process_reward(&source, &decision).await,
+            Err(RewardProcessingError::IntegrityViolation)
+        );
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries),
+                    (SELECT COUNT(*) FROM reward_grant_ledger_origins)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("corrupt graph counts");
+        assert_eq!(counts, (1, 1, 2, 2));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT source_occurred_at_utc FROM reward_events WHERE id = ?1",
+            )
+            .bind(&created.reward_event_id)
+            .fetch_one(pool)
+            .await
+            .expect("corruption remains unrepaired"),
+            "2026-08-24T12:34:56.502Z"
+        );
+    }
+
+    #[tokio::test]
+    async fn r2d_same_source_competition_never_duplicates_reward_authority() {
+        let directory = TempDir::new().expect("R2D writer competition database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let second_pool = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("second database pool");
+        let competitor = DatabaseRuntime {
+            _pool: Some(second_pool),
+            _startup_lock: None,
+            status: StartupGateStatus::Ready { schema_version: 30 },
+            markdown_projection_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            recovery_root: None,
+            app_private_data: Some(directory.path().to_owned()),
+            daily_backup_lock: tokio::sync::Mutex::new(()),
+        };
+        let source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+        };
+        let decision = reward_decision(8, 9);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let first_barrier = barrier.clone();
+        let second_barrier = barrier.clone();
+        let (first, second) = tokio::join!(
+            async {
+                first_barrier.wait().await;
+                runtime.process_reward(&source, &decision).await
+            },
+            async {
+                second_barrier.wait().await;
+                competitor.process_reward(&source, &decision).await
+            }
+        );
+        let outcomes = [&first, &second];
+        println!("R2D contention outcomes: {outcomes:?}");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Ok(value) if value.disposition == RewardProcessingDisposition::Created))
+                .count(),
+            1,
+            "exactly one competing writer creates authority: {outcomes:?}"
+        );
+        assert!(outcomes.iter().all(|result| matches!(
+            result,
+            Ok(value)
+                if matches!(
+                    value.disposition,
+                    RewardProcessingDisposition::Created
+                        | RewardProcessingDisposition::AlreadyProcessed
+                )
+        ) || matches!(
+            result,
+            Err(RewardProcessingError::DatabaseFailure)
+        )));
+        assert_eq!(
+            competitor
+                .process_reward(&source, &decision)
+                .await
+                .expect("explicit post-contention retry")
+                .disposition,
+            RewardProcessingDisposition::AlreadyProcessed
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries),
+                    (SELECT COUNT(*) FROM reward_grant_ledger_origins),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'xp'),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'coin')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("competition counts");
+        assert_eq!(counts, (1, 1, 2, 2, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn r2d_missing_activation_singleton_fails_closed_without_repair() {
+        let directory = TempDir::new().expect("R2D missing activation database");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::raw_sql(
+            "DROP TRIGGER reward_activation_state_no_delete;
+             DELETE FROM reward_activation_state WHERE singleton = 1;
+             INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'P1', 'https://example.test/p1', 'personal');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000610', 1, 'learning_completion', '2026-08-24T12:34:56.501Z');",
+        )
+        .execute(pool)
+        .await
+        .expect("isolated missing activation singleton");
+        let source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000610".to_owned(),
+        };
+        assert_eq!(
+            runtime.activate_reward().await,
+            Err(RewardProcessingError::IntegrityViolation)
+        );
+        assert_eq!(
+            runtime.list_pending_reward_sources(10).await,
+            Err(RewardProcessingError::IntegrityViolation)
+        );
+        assert_eq!(
+            runtime
+                .process_reward(&source, &reward_decision(1, 1))
+                .await,
+            Err(RewardProcessingError::IntegrityViolation)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reward_activation_state")
+                .fetch_one(pool)
+                .await
+                .expect("singleton remains missing"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reward_events")
+                .fetch_one(pool)
+                .await
+                .expect("no Reward replacement graph"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn r2d_coin_only_account_effect_preserves_xp_and_zero_remains_effectless() {
+        let directory = TempDir::new().expect("R2D Coin account database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let before = runtime.load_reward_account().await.expect("empty account");
+        assert_eq!(
+            before,
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 0
+            }
+        );
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 13),
+            )
+            .await
+            .expect("Coin-only grant");
+        let after_coin = runtime.load_reward_account().await.expect("Coin account");
+        assert_eq!(after_coin.xp_balance, before.xp_balance);
+        assert_eq!(after_coin.coin_balance, before.coin_balance + 13);
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000313".to_owned(),
+                },
+                &reward_decision(0, 0),
+            )
+            .await
+            .expect("pre-activation zero grant");
+        assert_eq!(runtime.load_reward_account().await.unwrap(), after_coin);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reward_ledger_entries")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("Coin-only ledger count"),
+            1
         );
     }
 
