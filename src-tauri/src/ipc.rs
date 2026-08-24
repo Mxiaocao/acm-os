@@ -1781,11 +1781,20 @@ pub async fn transition_problem_lifecycle_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemLifecycleCommandInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
     let action = parse_problem_lifecycle_action(&input.action)?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
-    acm_os_application::transition_problem_lifecycle_by_id(database.inner(), problem_id, action, today)
-        .await.map(problem_lifecycle_state_dto).map_err(acm_os_application::ProblemLifecycleError::code)
+    acm_os_application::transition_problem_lifecycle_by_id(
+        database.inner(),
+        problem_id,
+        action,
+        today,
+    )
+    .await
+    .map(problem_lifecycle_state_dto)
+    .map_err(acm_os_application::ProblemLifecycleError::code)
 }
 
 fn codeforces_problem_identity(
@@ -1798,10 +1807,9 @@ fn codeforces_problem_identity(
         .map_err(|_| "invalid_problem_identity")?;
     let platform = acm_os_domain::PlatformKey::new(legacy_problem.contest().platform())
         .map_err(|_| "invalid_problem_identity")?;
-    let contest_key = acm_os_domain::ExternalContestKey::new(
-        legacy_problem.contest().contest_id().to_string(),
-    )
-    .map_err(|_| "invalid_problem_identity")?;
+    let contest_key =
+        acm_os_domain::ExternalContestKey::new(legacy_problem.contest().contest_id().to_string())
+            .map_err(|_| "invalid_problem_identity")?;
     acm_os_domain::ProblemIdentity::new(
         acm_os_domain::ContestIdentity::new(platform, contest_key),
         legacy_problem.index(),
@@ -1968,10 +1976,14 @@ pub async fn start_or_resume_review_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<CanonicalReviewAttemptDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::start_or_resume_review_by_id(database.inner(), problem_id, today)
-        .await.map(canonical_review_attempt_dto).map_err(acm_os_application::ReviewAttemptError::code)
+        .await
+        .map(canonical_review_attempt_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -2087,9 +2099,13 @@ pub async fn review_history_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<CanonicalReviewHistoryDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
     acm_os_application::review_history_by_id(database.inner(), problem_id)
-        .await.map(canonical_review_history_dto).map_err(acm_os_application::ReviewAttemptError::code)
+        .await
+        .map(canonical_review_history_dto)
+        .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -2121,11 +2137,27 @@ pub async fn update_problem_mastery_evidence_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalMasteryEvidenceInput,
 ) -> Result<ProblemMasteryProjectionDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
-    let evidence = acm_os_domain::ProblemMasteryEvidence { recalls_problem: input.evidence.recalls_problem, multiple_solutions_clear: input.evidence.multiple_solutions_clear, knowledge_understood: input.evidence.knowledge_understood, implementation_fluent: input.evidence.implementation_fluent, can_adapt_or_create: input.evidence.can_adapt_or_create, transfer_solved_independently: input.evidence.transfer_solved_independently };
-    acm_os_application::update_problem_mastery_evidence_by_id(database.inner(), problem_id, evidence, today)
-        .await.map(problem_mastery_projection_dto).map_err(acm_os_application::ReviewAttemptError::code)
+    let evidence = acm_os_domain::ProblemMasteryEvidence {
+        recalls_problem: input.evidence.recalls_problem,
+        multiple_solutions_clear: input.evidence.multiple_solutions_clear,
+        knowledge_understood: input.evidence.knowledge_understood,
+        implementation_fluent: input.evidence.implementation_fluent,
+        can_adapt_or_create: input.evidence.can_adapt_or_create,
+        transfer_solved_independently: input.evidence.transfer_solved_independently,
+    };
+    acm_os_application::update_problem_mastery_evidence_by_id(
+        database.inner(),
+        problem_id,
+        evidence,
+        today,
+    )
+    .await
+    .map(problem_mastery_projection_dto)
+    .map_err(acm_os_application::ReviewAttemptError::code)
 }
 
 #[tauri::command]
@@ -2145,8 +2177,13 @@ pub async fn delete_personal_note_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::delete_personal_note_by_id(database.inner(), problem_id).await.map(problem_lifecycle_state_dto).map_err(acm_os_application::PersonalNoteDeletionError::code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::delete_personal_note_by_id(database.inner(), problem_id)
+        .await
+        .map(problem_lifecycle_state_dto)
+        .map_err(acm_os_application::PersonalNoteDeletionError::code)
 }
 
 #[tauri::command]
@@ -2168,8 +2205,13 @@ pub async fn personal_note_projection_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<PersonalNoteReadStateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::read_personal_note_projection_by_id(database.inner(), problem_id).await.map(personal_note_read_state_dto).map_err(acm_os_application::PersonalNoteReadError::code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::read_personal_note_projection_by_id(database.inner(), problem_id)
+        .await
+        .map(personal_note_read_state_dto)
+        .map_err(acm_os_application::PersonalNoteReadError::code)
 }
 
 #[tauri::command]
@@ -2197,8 +2239,21 @@ pub async fn personal_note_relocation_candidates_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::personal_note_relocation_candidates_by_id(database.inner(), problem_id).await.map(|items| items.into_iter().map(|candidate| PersonalNoteRelocationCandidateDto { vault_relative_path: candidate.vault_relative_path, occupied: candidate.occupied }).collect()).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::personal_note_relocation_candidates_by_id(database.inner(), problem_id)
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|candidate| PersonalNoteRelocationCandidateDto {
+                    vault_relative_path: candidate.vault_relative_path,
+                    occupied: candidate.occupied,
+                })
+                .collect()
+        })
+        .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
 }
 
 #[tauri::command]
@@ -2218,8 +2273,17 @@ pub async fn rebind_personal_note_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalRebindPersonalNoteInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::rebind_personal_note_by_id(database.inner(), problem_id, input.vault_relative_path).await.map(personal_note_binding_dto).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::rebind_personal_note_by_id(
+        database.inner(),
+        problem_id,
+        input.vault_relative_path,
+    )
+    .await
+    .map(personal_note_binding_dto)
+    .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
 }
 
 #[tauri::command]
@@ -2239,8 +2303,13 @@ pub async fn confirm_personal_note_deleted_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::confirm_personal_note_deleted_by_id(database.inner(), problem_id).await.map(problem_lifecycle_state_dto).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::confirm_personal_note_deleted_by_id(database.inner(), problem_id)
+        .await
+        .map(problem_lifecycle_state_dto)
+        .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
 }
 
 #[tauri::command]
@@ -2281,14 +2350,31 @@ pub async fn open_personal_note_in_obsidian_by_id(
     app: tauri::AppHandle,
     input: CanonicalProblemIdInput,
 ) -> Result<(), &'static str> {
-    use acm_os_application::{PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort};
+    use acm_os_application::{
+        PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort,
+    };
     use tauri_plugin_opener::OpenerExt;
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    let state = database.read_personal_note_projection_by_id(problem_id).await.map_err(acm_os_application::PersonalNoteReadError::code)?;
-    let binding = match state { PersonalNoteReadState::Ready { binding, .. } => binding, PersonalNoteReadState::LocationAnomaly { .. } => return Err("note_location_anomaly"), PersonalNoteReadState::VaultUnavailable { .. } => return Err("vault_unavailable") };
-    let workspace = database.load_workspace_configuration().await.map_err(|_| "workspace_unavailable")?.ok_or("workspace_unavailable")?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    let state = database
+        .read_personal_note_projection_by_id(problem_id)
+        .await
+        .map_err(acm_os_application::PersonalNoteReadError::code)?;
+    let binding = match state {
+        PersonalNoteReadState::Ready { binding, .. } => binding,
+        PersonalNoteReadState::LocationAnomaly { .. } => return Err("note_location_anomaly"),
+        PersonalNoteReadState::VaultUnavailable { .. } => return Err("vault_unavailable"),
+    };
+    let workspace = database
+        .load_workspace_configuration()
+        .await
+        .map_err(|_| "workspace_unavailable")?
+        .ok_or("workspace_unavailable")?;
     let uri = obsidian_open_uri(workspace.active_vault_path(), &binding.vault_relative_path)?;
-    app.opener().open_url(uri, None::<&str>).map_err(|_| "obsidian_open_failed")
+    app.opener()
+        .open_url(uri, None::<&str>)
+        .map_err(|_| "obsidian_open_failed")
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2507,10 +2593,19 @@ pub async fn knowledge_candidates_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalProblemIdInput,
 ) -> Result<Vec<CanonicalKnowledgeCandidateDto>, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    let items = acm_os_application::list_knowledge_candidates_by_id(database.inner(), problem_id).await.map_err(knowledge_candidate_error_code)?;
-    let index = acm_os_application::rebuild_knowledge_index(database.inner()).await.map_err(knowledge_index_error_code)?;
-    Ok(items.into_iter().map(|item| canonical_knowledge_candidate_dto(item, &index.nodes)).collect())
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    let items = acm_os_application::list_knowledge_candidates_by_id(database.inner(), problem_id)
+        .await
+        .map_err(knowledge_candidate_error_code)?;
+    let index = acm_os_application::rebuild_knowledge_index(database.inner())
+        .await
+        .map_err(knowledge_index_error_code)?;
+    Ok(items
+        .into_iter()
+        .map(|item| canonical_knowledge_candidate_dto(item, &index.nodes))
+        .collect())
 }
 
 #[tauri::command]
@@ -2579,10 +2674,26 @@ pub async fn set_knowledge_candidate_disposition_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalKnowledgeCandidateDispositionInput,
 ) -> Result<CanonicalKnowledgeCandidateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    let disposition = match input.disposition.as_str() { "pending" => acm_os_application::KnowledgeCandidateDisposition::Pending, "acceptedIntent" => acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent, "ignored" => acm_os_application::KnowledgeCandidateDisposition::Ignored, _ => return Err("invalid_candidate_disposition") };
-    let item = acm_os_application::set_knowledge_candidate_disposition_by_id(database.inner(), problem_id, &input.fingerprint, disposition).await.map_err(knowledge_candidate_error_code)?;
-    let index = acm_os_application::rebuild_knowledge_index(database.inner()).await.map_err(knowledge_index_error_code)?;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    let disposition = match input.disposition.as_str() {
+        "pending" => acm_os_application::KnowledgeCandidateDisposition::Pending,
+        "acceptedIntent" => acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent,
+        "ignored" => acm_os_application::KnowledgeCandidateDisposition::Ignored,
+        _ => return Err("invalid_candidate_disposition"),
+    };
+    let item = acm_os_application::set_knowledge_candidate_disposition_by_id(
+        database.inner(),
+        problem_id,
+        &input.fingerprint,
+        disposition,
+    )
+    .await
+    .map_err(knowledge_candidate_error_code)?;
+    let index = acm_os_application::rebuild_knowledge_index(database.inner())
+        .await
+        .map_err(knowledge_index_error_code)?;
     Ok(canonical_knowledge_candidate_dto(item, &index.nodes))
 }
 
@@ -2596,10 +2707,8 @@ pub async fn accept_existing_knowledge_candidate(
         acm_os_domain::ContestIdentity::new(
             acm_os_domain::PlatformKey::new(problem.contest().platform())
                 .map_err(|_| "invalid_problem_identity")?,
-            acm_os_domain::ExternalContestKey::new(
-                problem.contest().contest_id().to_string(),
-            )
-            .map_err(|_| "invalid_problem_identity")?,
+            acm_os_domain::ExternalContestKey::new(problem.contest().contest_id().to_string())
+                .map_err(|_| "invalid_problem_identity")?,
         ),
         problem.index(),
     )
@@ -2623,9 +2732,21 @@ pub async fn accept_existing_knowledge_candidate_by_id(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: CanonicalKnowledgeCandidateAcceptInput,
 ) -> Result<AcceptedKnowledgeCandidateDto, &'static str> {
-    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
-    acm_os_application::accept_existing_knowledge_candidate_by_id(database.inner(), problem_id, &input.fingerprint, &input.knowledge_node_id)
-        .await.map(|value| AcceptedKnowledgeCandidateDto { knowledge_node_id: value.knowledge_node_id, target_ref: value.target_ref }).map_err(knowledge_candidate_error_code)
+    let problem_id = validate_internal_problem_id(&input.problem_id)?
+        .parse::<i64>()
+        .map_err(|_| "invalid_problem_id")?;
+    acm_os_application::accept_existing_knowledge_candidate_by_id(
+        database.inner(),
+        problem_id,
+        &input.fingerprint,
+        &input.knowledge_node_id,
+    )
+    .await
+    .map(|value| AcceptedKnowledgeCandidateDto {
+        knowledge_node_id: value.knowledge_node_id,
+        target_ref: value.target_ref,
+    })
+    .map_err(knowledge_candidate_error_code)
 }
 
 fn knowledge_candidate_problem(
@@ -2694,15 +2815,27 @@ fn canonical_knowledge_candidate_dto(
     value: acm_os_application::CanonicalKnowledgeCandidateReadProjection,
     nodes: &[acm_os_application::KnowledgeNodeProjection],
 ) -> CanonicalKnowledgeCandidateDto {
-    let matches = nodes.iter().filter(|node| {
-        if value.target_ref.contains('/') { node.vault_relative_path.strip_suffix(".md").is_some_and(|path| path.eq_ignore_ascii_case(&value.target_ref)) }
-        else { node.display_name.eq_ignore_ascii_case(&value.target_ref) }
-    }).collect::<Vec<_>>();
+    let matches = nodes
+        .iter()
+        .filter(|node| {
+            if value.target_ref.contains('/') {
+                node.vault_relative_path
+                    .strip_suffix(".md")
+                    .is_some_and(|path| path.eq_ignore_ascii_case(&value.target_ref))
+            } else {
+                node.display_name.eq_ignore_ascii_case(&value.target_ref)
+            }
+        })
+        .collect::<Vec<_>>();
     CanonicalKnowledgeCandidateDto {
         problem_id: value.problem_id,
         fingerprint: value.fingerprint,
         target_ref: value.target_ref,
-        disposition: match value.disposition { acm_os_application::KnowledgeCandidateDisposition::Pending => "pending", acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent => "acceptedIntent", acm_os_application::KnowledgeCandidateDisposition::Ignored => "ignored" },
+        disposition: match value.disposition {
+            acm_os_application::KnowledgeCandidateDisposition::Pending => "pending",
+            acm_os_application::KnowledgeCandidateDisposition::AcceptedIntent => "acceptedIntent",
+            acm_os_application::KnowledgeCandidateDisposition::Ignored => "ignored",
+        },
         knowledge_node_id: (matches.len() == 1).then(|| matches[0].knowledge_node_id.clone()),
     }
 }
@@ -3410,7 +3543,9 @@ fn review_attempt_dto(attempt: acm_os_application::ReviewAttempt) -> ReviewAttem
     }
 }
 
-fn canonical_review_attempt_dto(attempt: acm_os_application::CanonicalReviewAttempt) -> CanonicalReviewAttemptDto {
+fn canonical_review_attempt_dto(
+    attempt: acm_os_application::CanonicalReviewAttempt,
+) -> CanonicalReviewAttemptDto {
     CanonicalReviewAttemptDto {
         attempt_id: attempt.attempt_id,
         problem_id: attempt.problem_id,
@@ -3586,34 +3721,77 @@ fn review_history_dto(history: acm_os_application::ReviewHistoryView) -> ReviewH
     }
 }
 
-fn canonical_review_history_dto(history: acm_os_application::CanonicalReviewHistoryView) -> CanonicalReviewHistoryDto {
+fn canonical_review_history_dto(
+    history: acm_os_application::CanonicalReviewHistoryView,
+) -> CanonicalReviewHistoryDto {
     let problem_id = history.problem_id.clone();
     CanonicalReviewHistoryDto {
         problem_id,
         historical_best_review: history.historical_best_review.map(review_judgement_dto),
         mastery: problem_mastery_projection_dto(history.mastery),
-        attempts: history.attempts.into_iter().map(canonical_review_history_item_dto).collect(),
+        attempts: history
+            .attempts
+            .into_iter()
+            .map(canonical_review_history_item_dto)
+            .collect(),
     }
 }
 
-fn canonical_review_history_item_dto(item: acm_os_application::CanonicalReviewHistoryItem) -> CanonicalReviewHistoryItemDto {
+fn canonical_review_history_item_dto(
+    item: acm_os_application::CanonicalReviewHistoryItem,
+) -> CanonicalReviewHistoryItemDto {
     CanonicalReviewHistoryItemDto {
-        attempt: CanonicalReviewAttemptDto { attempt_id: item.attempt_id, problem_id: item.problem_id, attempt_type: match item.attempt_type { acm_os_domain::ReviewAttemptType::FirstColdStart => "firstColdStart", acm_os_domain::ReviewAttemptType::LongTermReview => "longTermReview", acm_os_domain::ReviewAttemptType::EarlyCheck => "earlyCheck" }, scheduled_due_local_date: item.scheduled_due_local_date.to_iso_string(), started_early: item.started_early, judgement_rule_version: item.judgement_rule_version, started_at_utc: item.started_at_utc },
-        status: match item.status { acm_os_application::ReviewAttemptStatus::InProgress => "inProgress", acm_os_application::ReviewAttemptStatus::Completed => "completed", acm_os_application::ReviewAttemptStatus::Void => "void" },
+        attempt: CanonicalReviewAttemptDto {
+            attempt_id: item.attempt_id,
+            problem_id: item.problem_id,
+            attempt_type: match item.attempt_type {
+                acm_os_domain::ReviewAttemptType::FirstColdStart => "firstColdStart",
+                acm_os_domain::ReviewAttemptType::LongTermReview => "longTermReview",
+                acm_os_domain::ReviewAttemptType::EarlyCheck => "earlyCheck",
+            },
+            scheduled_due_local_date: item.scheduled_due_local_date.to_iso_string(),
+            started_early: item.started_early,
+            judgement_rule_version: item.judgement_rule_version,
+            started_at_utc: item.started_at_utc,
+        },
+        status: match item.status {
+            acm_os_application::ReviewAttemptStatus::InProgress => "inProgress",
+            acm_os_application::ReviewAttemptStatus::Completed => "completed",
+            acm_os_application::ReviewAttemptStatus::Void => "void",
+        },
         judgement: item.judgement.map(review_judgement_dto),
-        completion_facts: item.completion_input.as_ref().map(|input| ReviewCompletionFactsDto {
-            final_ac: input.final_ac,
-            first_submission_result: submission_fact_dto(&input.first_submission),
-            final_result: submission_fact_dto(&input.final_submission),
-            total_submissions: input.total_submissions,
-            idea_independent: input.idea_independent,
-            implementation_independent: input.implementation_independent,
-            debug_independence: match input.debug_independence { acm_os_domain::DebugIndependence::NotNeeded => "notNeeded", acm_os_domain::DebugIndependence::Independent => "independent", acm_os_domain::DebugIndependence::UsedSolvingHelp => "usedSolvingHelp" },
-            external_help: match input.external_help { acm_os_domain::ExternalHelpLevel::None => "none", acm_os_domain::ExternalHelpLevel::SolvingHint => "solvingHint", acm_os_domain::ExternalHelpLevel::FullSolution => "fullSolution" },
-        }),
+        completion_facts: item
+            .completion_input
+            .as_ref()
+            .map(|input| ReviewCompletionFactsDto {
+                final_ac: input.final_ac,
+                first_submission_result: submission_fact_dto(&input.first_submission),
+                final_result: submission_fact_dto(&input.final_submission),
+                total_submissions: input.total_submissions,
+                idea_independent: input.idea_independent,
+                implementation_independent: input.implementation_independent,
+                debug_independence: match input.debug_independence {
+                    acm_os_domain::DebugIndependence::NotNeeded => "notNeeded",
+                    acm_os_domain::DebugIndependence::Independent => "independent",
+                    acm_os_domain::DebugIndependence::UsedSolvingHelp => "usedSolvingHelp",
+                },
+                external_help: match input.external_help {
+                    acm_os_domain::ExternalHelpLevel::None => "none",
+                    acm_os_domain::ExternalHelpLevel::SolvingHint => "solvingHint",
+                    acm_os_domain::ExternalHelpLevel::FullSolution => "fullSolution",
+                },
+            }),
         evidence_codes: item.evidence_codes,
-        failure_reasons: item.failure_reasons.into_iter().map(review_failure_reason_dto).collect(),
-        help_levels: item.help_levels.into_iter().map(|level| level.number()).collect(),
+        failure_reasons: item
+            .failure_reasons
+            .into_iter()
+            .map(review_failure_reason_dto)
+            .collect(),
+        help_levels: item
+            .help_levels
+            .into_iter()
+            .map(|level| level.number())
+            .collect(),
         completed_at_utc: item.completed_at_utc,
         completed_local_date: item.completed_local_date.map(|date| date.to_iso_string()),
         void_reason: item.void_reason,
@@ -4768,8 +4946,8 @@ mod tests {
     use acm_os_application::{
         ActiveReviewCycle, KnownMarkdownSection, LocalStatementAsset, MarkdownParseWarning,
         PersonalNoteBinding, PersonalNoteReadState, ProblemIdentityType, ProblemLifecycleState,
-        ProblemMarkdownProjection, RevealedReviewHelp, ReviewFocusView,
-        ReviewHelpDrawerView, ReviewHelpItem, SolutionRoute, StartupDestination, StartupGateStatus,
+        ProblemMarkdownProjection, RevealedReviewHelp, ReviewFocusView, ReviewHelpDrawerView,
+        ReviewHelpItem, SolutionRoute, StartupDestination, StartupGateStatus,
         StartupRecoveryReason, WorkspaceConfiguration, WorkspaceConfigurationError,
         WorkspaceConfigurationStatus, WorkspacePathField,
     };
@@ -4790,8 +4968,8 @@ mod tests {
 
     #[test]
     fn codeforces_problem_identity_preserves_legacy_ipc_compatibility() {
-        let problem = super::codeforces_problem_identity(1979, "A".to_owned())
-            .expect("legacy IPC identity");
+        let problem =
+            super::codeforces_problem_identity(1979, "A".to_owned()).expect("legacy IPC identity");
         assert_eq!(problem.contest().platform().as_str(), "codeforces");
         assert_eq!(problem.contest().external_contest_key().as_str(), "1979");
         assert_eq!(problem.external_problem_key(), "A");
@@ -4807,9 +4985,15 @@ mod tests {
 
     #[test]
     fn canonical_problem_id_validation_accepts_only_positive_numeric_ids() {
-        assert_eq!(super::validate_internal_problem_id("42"), Ok("42".to_owned()));
+        assert_eq!(
+            super::validate_internal_problem_id("42"),
+            Ok("42".to_owned())
+        );
         for value in ["0", "-1", "abc"] {
-            assert_eq!(super::validate_internal_problem_id(value), Err("invalid_problem_id"));
+            assert_eq!(
+                super::validate_internal_problem_id(value),
+                Err("invalid_problem_id")
+            );
         }
     }
 
@@ -4843,13 +5027,26 @@ mod tests {
             problem_id: "42".to_owned(),
             historical_best_review: None,
             mastery: super::ProblemMasteryProjectionDto {
-                current: super::ProblemMasteryEvidenceDto { recalls_problem: false, multiple_solutions_clear: false, knowledge_understood: false, implementation_fluent: false, can_adapt_or_create: false, transfer_solved_independently: false },
+                current: super::ProblemMasteryEvidenceDto {
+                    recalls_problem: false,
+                    multiple_solutions_clear: false,
+                    knowledge_understood: false,
+                    implementation_fluent: false,
+                    can_adapt_or_create: false,
+                    transfer_solved_independently: false,
+                },
                 historical_thoroughly_digested: false,
                 first_thoroughly_digested_local_date: None,
             },
             attempts: Vec::new(),
         };
-        let knowledge = super::CanonicalKnowledgeCandidateDto { problem_id: "42".to_owned(), fingerprint: "fp".to_owned(), target_ref: "Basics".to_owned(), disposition: "pending", knowledge_node_id: None };
+        let knowledge = super::CanonicalKnowledgeCandidateDto {
+            problem_id: "42".to_owned(),
+            fingerprint: "fp".to_owned(),
+            target_ref: "Basics".to_owned(),
+            disposition: "pending",
+            knowledge_node_id: None,
+        };
         let review = serde_json::to_value(review).expect("review dto");
         let knowledge = serde_json::to_value(knowledge).expect("knowledge dto");
         assert!(review.get("contestId").is_none() && review.get("index").is_none());

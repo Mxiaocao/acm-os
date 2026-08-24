@@ -1307,25 +1307,33 @@ pub async fn start_or_resume_review_by_id<P: ProblemLifecyclePort + ReviewAttemp
     problem_id: i64,
     today: acm_os_domain::LocalDate,
 ) -> Result<CanonicalReviewAttempt, ReviewAttemptError> {
-    let lifecycle = port
-        .load_problem_lifecycle_by_id(problem_id)
-        .await
-        .map_err(|error| match error {
-            ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
-            ProblemLifecycleError::NotPersonal => ReviewAttemptError::NotPersonal,
-            ProblemLifecycleError::IntegrityViolation => ReviewAttemptError::IntegrityViolation,
-            ProblemLifecycleError::PersistenceUnavailable => ReviewAttemptError::PersistenceUnavailable,
-            ProblemLifecycleError::InvalidTransition | ProblemLifecycleError::InvalidLocalDate => ReviewAttemptError::NotEligible,
-        })?;
+    let lifecycle =
+        port.load_problem_lifecycle_by_id(problem_id)
+            .await
+            .map_err(|error| match error {
+                ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
+                ProblemLifecycleError::NotPersonal => ReviewAttemptError::NotPersonal,
+                ProblemLifecycleError::IntegrityViolation => ReviewAttemptError::IntegrityViolation,
+                ProblemLifecycleError::PersistenceUnavailable => {
+                    ReviewAttemptError::PersistenceUnavailable
+                }
+                ProblemLifecycleError::InvalidTransition
+                | ProblemLifecycleError::InvalidLocalDate => ReviewAttemptError::NotEligible,
+            })?;
     if lifecycle.identity_type != ProblemIdentityType::Personal {
         return Err(ReviewAttemptError::NotPersonal);
     }
-    let cycle = lifecycle.active_review_cycle.ok_or(ReviewAttemptError::ScheduleMissing)?;
+    let cycle = lifecycle
+        .active_review_cycle
+        .ok_or(ReviewAttemptError::ScheduleMissing)?;
     let eligibility = acm_os_domain::ReviewEligibilityEngine::decide(
-        lifecycle.learning_status, cycle.next_due_local_date, today,
+        lifecycle.learning_status,
+        cycle.next_due_local_date,
+        today,
     )
     .map_err(|_| ReviewAttemptError::NotEligible)?;
-    port.create_or_resume_review_attempt_by_id(problem_id, eligibility).await
+    port.create_or_resume_review_attempt_by_id(problem_id, eligibility)
+        .await
 }
 
 pub async fn review_history_by_id<P: ReviewAttemptPort>(
@@ -1341,7 +1349,8 @@ pub async fn update_problem_mastery_evidence_by_id<P: ReviewAttemptPort>(
     evidence: acm_os_domain::ProblemMasteryEvidence,
     confirmed_on: acm_os_domain::LocalDate,
 ) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
-    port.update_problem_mastery_evidence_by_id(problem_id, evidence, confirmed_on).await
+    port.update_problem_mastery_evidence_by_id(problem_id, evidence, confirmed_on)
+        .await
 }
 
 pub async fn start_or_resume_review<P: ProblemLifecyclePort + ReviewAttemptPort>(
@@ -2226,7 +2235,8 @@ pub async fn personal_note_relocation_candidates_by_id<P: PersonalNoteBindingRep
     port: &P,
     problem_id: i64,
 ) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError> {
-    port.personal_note_relocation_candidates_by_id(problem_id).await
+    port.personal_note_relocation_candidates_by_id(problem_id)
+        .await
 }
 
 pub async fn rebind_personal_note_by_id<P: PersonalNoteBindingRepairPort>(
@@ -2638,7 +2648,9 @@ pub async fn delete_personal_note_by_id<P: PersonalNoteDeletionPort>(
     port: &P,
     problem_id: i64,
 ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
-    let prepared = port.prepare_personal_note_deletion_by_id(problem_id).await?;
+    let prepared = port
+        .prepare_personal_note_deletion_by_id(problem_id)
+        .await?;
     match port
         .commit_personal_note_deletion_by_id(problem_id, &prepared)
         .await
@@ -3836,7 +3848,8 @@ pub async fn set_knowledge_candidate_disposition_by_id<P: KnowledgeCandidatePort
     disposition: KnowledgeCandidateDisposition,
 ) -> Result<CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError> {
     let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
-    port.set_knowledge_candidate_disposition_by_id(problem_id, &fingerprint, disposition).await
+    port.set_knowledge_candidate_disposition_by_id(problem_id, &fingerprint, disposition)
+        .await
 }
 
 pub async fn accept_existing_knowledge_candidate_by_id<P: KnowledgeCandidatePort>(
@@ -3850,7 +3863,8 @@ pub async fn accept_existing_knowledge_candidate_by_id<P: KnowledgeCandidatePort
     if knowledge_node_id.is_empty() {
         return Err(KnowledgeCandidateError::IntegrityViolation);
     }
-    port.accept_existing_knowledge_candidate_by_id(problem_id, &fingerprint, knowledge_node_id).await
+    port.accept_existing_knowledge_candidate_by_id(problem_id, &fingerprint, knowledge_node_id)
+        .await
 }
 
 pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(
@@ -3958,14 +3972,17 @@ mod tests {
             }
         }
 
-        fn context(&self, problem_id: i64, candidate_filename: String) -> PersonalNoteCreationContext {
+        fn context(
+            &self,
+            problem_id: i64,
+            candidate_filename: String,
+        ) -> PersonalNoteCreationContext {
             let call = self.context_calls.get() + 1;
             self.context_calls.set(call);
             PersonalNoteCreationContext {
                 problem_id,
                 candidate_filename,
-                existing_binding: (self.binding_visible_on_recheck && call > 1)
-                    .then(Self::winner),
+                existing_binding: (self.binding_visible_on_recheck && call > 1).then(Self::winner),
             }
         }
     }
