@@ -593,9 +593,8 @@ fn command_local_date() -> Result<acm_os_domain::LocalDate, ()> {
 pub struct TodayEntryDto {
     entry_id: String,
     problem_id: String,
-    contest_id: u64,
-    problem_index: String,
     problem_title: String,
+    problem_rating: Option<u32>,
     review_attempt_id: Option<String>,
     lane: String,
     reason: String,
@@ -726,9 +725,8 @@ pub struct TodayReplanPreviewDto {
 #[serde(rename_all = "camelCase")]
 pub struct TodayExtraSuggestionDto {
     problem_id: String,
-    contest_id: u64,
-    problem_index: String,
     problem_title: String,
+    problem_rating: Option<u32>,
     review_attempt_id: Option<String>,
     lane: String,
     reason: String,
@@ -3835,9 +3833,8 @@ fn today_entry_dto(entry: acm_os_application::TodaySnapshotEntry) -> TodayEntryD
     TodayEntryDto {
         entry_id: entry.entry_id,
         problem_id: entry.problem_id,
-        contest_id: entry.contest_id,
-        problem_index: entry.problem_index,
         problem_title: entry.problem_title,
+        problem_rating: entry.problem_rating,
         review_attempt_id: entry.review_attempt_id,
         lane: today_lane_code(entry.lane).to_owned(),
         reason: today_reason_code(entry.reason).to_owned(),
@@ -3885,9 +3882,8 @@ fn today_extra_suggestions_preview_dto(
             .into_iter()
             .map(|suggestion| TodayExtraSuggestionDto {
                 problem_id: suggestion.problem_id,
-                contest_id: suggestion.contest_id,
-                problem_index: suggestion.problem_index,
                 problem_title: suggestion.problem_title,
+                problem_rating: suggestion.problem_rating,
                 review_attempt_id: suggestion.review_attempt_id,
                 lane: today_lane_code(suggestion.lane).to_owned(),
                 reason: today_reason_code(suggestion.reason).to_owned(),
@@ -3937,9 +3933,8 @@ fn parse_today_extra_suggestions_preview(
             .map(|suggestion| {
                 Ok(acm_os_application::TodayExtraSuggestion {
                     problem_id: suggestion.problem_id,
-                    contest_id: suggestion.contest_id,
-                    problem_index: suggestion.problem_index,
                     problem_title: suggestion.problem_title,
+                    problem_rating: suggestion.problem_rating,
                     review_attempt_id: suggestion.review_attempt_id,
                     lane: parse_today_lane_code(&suggestion.lane)?,
                     reason: parse_today_reason_code(&suggestion.reason)?,
@@ -3968,9 +3963,8 @@ fn parse_today_snapshot(
                 Ok(acm_os_application::TodaySnapshotEntry {
                     entry_id: entry.entry_id,
                     problem_id: entry.problem_id,
-                    contest_id: entry.contest_id,
-                    problem_index: entry.problem_index,
                     problem_title: entry.problem_title,
+                    problem_rating: entry.problem_rating,
                     review_attempt_id: entry.review_attempt_id,
                     lane: parse_today_lane_code(&entry.lane)?,
                     reason: parse_today_reason_code(&entry.reason)?,
@@ -4932,8 +4926,8 @@ mod tests {
             "planId": "plan-1", "localDate": "2026-08-12", "budgetMinutes": 120,
             "plannedMinutes": 60, "overBudgetMinutes": 0, "reviewOnlyStreak": 0,
             "entries": [{
-                "entryId": "entry-1", "problemId": "7", "contestId": 1979,
-                "problemIndex": "A", "problemTitle": "Alpha", "reviewAttemptId": null,
+                "entryId": "entry-1", "problemId": "7", "problemTitle": "Alpha",
+                "problemRating": 1200, "reviewAttemptId": null,
                 "lane": "study", "reason": "upsolve", "planningCostMinutes": 60,
                 "position": 0, "origin": "auto", "status": "completed"
             }]
@@ -4958,8 +4952,8 @@ mod tests {
         let suggestions_json = json!({
             "expectedSnapshot": snapshot, "remainingBudgetMinutes": 60,
             "suggestions": [{
-                "problemId": "8", "contestId": 1979, "problemIndex": "B",
-                "problemTitle": "Beta", "reviewAttemptId": null, "lane": "study",
+                "problemId": "8", "problemTitle": "Beta", "problemRating": null,
+                "reviewAttemptId": null, "lane": "study",
                 "reason": "relearn", "planningCostMinutes": 60
             }]
         });

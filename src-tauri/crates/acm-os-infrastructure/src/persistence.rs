@@ -2321,8 +2321,7 @@ impl TodaySnapshotPort for DatabaseRuntime {
             String,
             String,
             String,
-            String,
-            String,
+            Option<i64>,
             Option<String>,
             String,
             String,
@@ -2331,13 +2330,11 @@ impl TodaySnapshotPort for DatabaseRuntime {
             String,
             String,
         )> = sqlx::query_as(
-            "SELECT e.id, CAST(e.problem_id AS TEXT), identities.external_contest_key, \
-                    identities.external_problem_key, p.title, e.review_attempt_id, e.lane, e.reason, \
+            "SELECT e.id, CAST(e.problem_id AS TEXT), p.title, p.rating, \
+                    e.review_attempt_id, e.lane, e.reason, \
                     e.planning_cost_minutes, e.position, e.entry_origin, e.entry_status \
-             FROM today_plan_entries e JOIN problems p ON p.id = e.problem_id \
-             JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
-             WHERE e.today_plan_id = ?1 ORDER BY e.position",
+              FROM today_plan_entries e JOIN problems p ON p.id = e.problem_id \
+              WHERE e.today_plan_id = ?1 ORDER BY e.position",
         )
         .bind(&plan_id)
         .fetch_all(pool)
@@ -2349,9 +2346,8 @@ impl TodaySnapshotPort for DatabaseRuntime {
                 |(
                     entry_id,
                     problem_id,
-                    contest_id,
-                    problem_index,
                     problem_title,
+                    problem_rating,
                     review_attempt_id,
                     lane,
                     reason,
@@ -2363,11 +2359,11 @@ impl TodaySnapshotPort for DatabaseRuntime {
                     Ok(TodaySnapshotEntry {
                         entry_id,
                         problem_id,
-                        contest_id: parse_codeforces_contest_identity(&contest_id)
-                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?
-                            .contest_id(),
-                        problem_index,
                         problem_title,
+                        problem_rating: problem_rating
+                            .map(u32::try_from)
+                            .transpose()
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
                         review_attempt_id,
                         lane: parse_today_lane(&lane)?,
                         reason: parse_today_reason(&reason)?,
@@ -2414,15 +2410,13 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
-        let rows: Vec<(String, String, String, String, String, String, i64, Option<String>, Option<String>, Option<String>, String)> =
+        let rows: Vec<(String, String, Option<i64>, String, String, i64, Option<String>, Option<String>, Option<String>, String)> =
             sqlx::query_as(
-                "SELECT CAST(p.id AS TEXT), identities.external_contest_key, identities.external_problem_key, p.title, pls.learning_status, \
+                "SELECT CAST(p.id AS TEXT), p.title, p.rating, pls.learning_status, \
                         substr(pls.learning_status_since_utc, 1, 10), pls.pinned_priority, \
                         rc.next_due_local_date, ra.id, ra.scheduled_due_local_date, fb.binding_state \
-                 FROM problems p \
-                 JOIN problem_external_identities identities \
-                   ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
-                 JOIN problem_learning_states pls ON pls.problem_id = p.id \
+                  FROM problems p \
+                  JOIN problem_learning_states pls ON pls.problem_id = p.id \
                  JOIN file_bindings fb ON fb.problem_id = p.id \
                  LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
                  LEFT JOIN review_attempts ra ON ra.problem_id = p.id AND ra.attempt_status = 'in_progress' \
@@ -2436,9 +2430,8 @@ impl TodaySnapshotPort for DatabaseRuntime {
             .map(
                 |(
                     problem_id,
-                    contest_id,
-                    problem_index,
                     problem_title,
+                    problem_rating,
                     status,
                     since,
                     pinned,
@@ -2449,11 +2442,11 @@ impl TodaySnapshotPort for DatabaseRuntime {
                 )| {
                     Ok(TodayGenerationCandidate {
                         problem_id,
-                        contest_id: parse_codeforces_contest_identity(&contest_id)
-                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?
-                            .contest_id(),
-                        problem_index,
                         problem_title,
+                        problem_rating: problem_rating
+                            .map(u32::try_from)
+                            .transpose()
+                            .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
                         learning_status: parse_learning_status(&status)
                             .map_err(|_| TodaySnapshotError::IntegrityViolation)?,
                         learning_status_since: acm_os_domain::LocalDate::parse_iso(&since)
@@ -2500,27 +2493,20 @@ impl TodaySnapshotPort for DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(TodaySnapshotError::PersistenceUnavailable)?;
-        let learning_entries: Vec<(String, String)> = sqlx::query_as(
-            "SELECT identities.external_contest_key, identities.external_problem_key \
-             FROM today_plans tp \
-             JOIN today_plan_entries e ON e.today_plan_id = tp.id \
-             JOIN problem_external_identities identities \
-               ON identities.problem_id = e.problem_id AND identities.platform = 'codeforces' \
-             WHERE tp.local_date = ?1 AND e.entry_status != 'completed' \
-               AND e.reason IN ('continue_learning', 'relearn', 'upsolve') \
-             ORDER BY e.position",
+        let learning_entries: Vec<i64> = sqlx::query_scalar(
+            "SELECT e.problem_id \
+              FROM today_plans tp \
+              JOIN today_plan_entries e ON e.today_plan_id = tp.id \
+              WHERE tp.local_date = ?1 AND e.entry_status != 'completed' \
+                AND e.reason IN ('continue_learning', 'relearn', 'upsolve') \
+              ORDER BY e.position",
         )
         .bind(local_date.to_iso_string())
         .fetch_all(pool)
         .await
         .map_err(|_| TodaySnapshotError::PersistenceUnavailable)?;
-        for (contest_id, index) in learning_entries {
-            let contest = parse_codeforces_contest_identity(&contest_id)
-                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
-            let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
-                .map_err(|_| TodaySnapshotError::IntegrityViolation)?;
-            let generic_problem = generic_problem_identity(&problem);
-            match self.read_personal_note_projection(&generic_problem).await {
+        for problem_id in learning_entries {
+            match self.read_personal_note_projection_by_id(problem_id).await {
                 Ok(PersonalNoteReadState::Ready { .. })
                 | Ok(PersonalNoteReadState::LocationAnomaly { .. })
                 | Ok(PersonalNoteReadState::VaultUnavailable { .. })
@@ -14905,6 +14891,118 @@ mod tests {
                 .expect("remove fixture setup backup");
         }
         (directory, runtime, vault, problems, problem)
+    }
+
+    #[tokio::test]
+    async fn today_is_canonical_and_alias_independent_with_opaque_external_keys() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            day,
+        )
+        .await
+        .expect("study candidate");
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical problem id");
+        let before_alias = runtime
+            .load_today_generation_context(day)
+            .await
+            .expect("canonical generation context");
+        assert_eq!(before_alias.candidates.len(), 1);
+
+        for (contest_key, problem_key) in
+            [("alias-opaque-round", "B"), ("another-opaque-key", "C")]
+        {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                    (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (?1, 'codeforces', ?2, ?3)",
+            )
+            .bind(problem_id)
+            .bind(contest_key)
+            .bind(problem_key)
+            .execute(pool)
+            .await
+            .expect("additional alias");
+        }
+
+        let with_aliases = runtime
+            .load_today_generation_context(day)
+            .await
+            .expect("multi-alias generation context");
+        assert_eq!(with_aliases, before_alias);
+        assert_eq!(with_aliases.candidates.len(), 1);
+        assert_eq!(with_aliases.candidates[0].problem_id, problem_id.to_string());
+
+        let generated = load_or_generate_today_snapshot(&runtime, day, 120)
+            .await
+            .expect("multi-alias generation remains available");
+        assert_eq!(generated.entries.len(), 1);
+        assert_eq!(generated.entries[0].problem_id, problem_id.to_string());
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("snapshot query")
+                .expect("snapshot")
+                .entries
+                .len(),
+            1
+        );
+        let reconciled = runtime
+            .reconcile_today_snapshot(day)
+            .await
+            .expect("canonical reconciliation");
+        assert_eq!(reconciled, generated);
+        preview_today_replan(&runtime, day, 60)
+            .await
+            .expect("multi-alias replan remains available");
+        let completed = complete_today_entry(
+            &runtime,
+            &generated.plan_id,
+            &generated.entries[0].entry_id,
+        )
+        .await
+        .expect("complete canonical entry");
+        let suggestions = preview_today_extra_suggestions(&runtime, day)
+            .await
+            .expect("multi-alias suggestions remain available");
+        assert_eq!(suggestions.expected_snapshot, completed);
+
+        sqlx::query(
+            "DELETE FROM problem_external_identities \
+             WHERE problem_id = ?1 AND platform = 'codeforces' \
+               AND external_contest_key = 'alias-opaque-round' AND external_problem_key = 'B'",
+        )
+        .bind(problem_id)
+        .execute(pool)
+        .await
+        .expect("remove one alias");
+        assert_eq!(
+            runtime
+                .load_today_snapshot(day)
+                .await
+                .expect("snapshot after alias removal")
+                .expect("persisted snapshot"),
+            completed
+        );
+        assert_eq!(
+            runtime
+                .load_today_generation_context(day)
+                .await
+                .expect("context after alias removal"),
+            before_alias
+        );
     }
 
     #[tokio::test]

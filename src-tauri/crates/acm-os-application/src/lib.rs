@@ -1523,9 +1523,8 @@ pub async fn update_problem_mastery_evidence<P: ReviewAttemptPort>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodayGenerationCandidate {
     pub problem_id: String,
-    pub contest_id: u64,
-    pub problem_index: String,
     pub problem_title: String,
+    pub problem_rating: Option<u32>,
     pub learning_status: acm_os_domain::LearningStatus,
     pub learning_status_since: acm_os_domain::LocalDate,
     pub pinned: bool,
@@ -1545,9 +1544,8 @@ pub struct TodayGenerationContext {
 pub struct TodaySnapshotEntry {
     pub entry_id: String,
     pub problem_id: String,
-    pub contest_id: u64,
-    pub problem_index: String,
     pub problem_title: String,
+    pub problem_rating: Option<u32>,
     pub review_attempt_id: Option<String>,
     pub lane: acm_os_domain::TodayCandidateLane,
     pub reason: acm_os_domain::TodayCandidateReason,
@@ -1607,9 +1605,8 @@ pub struct TodayReplanPreview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodayExtraSuggestion {
     pub problem_id: String,
-    pub contest_id: u64,
-    pub problem_index: String,
     pub problem_title: String,
+    pub problem_rating: Option<u32>,
     pub review_attempt_id: Option<String>,
     pub lane: acm_os_domain::TodayCandidateLane,
     pub reason: acm_os_domain::TodayCandidateReason,
@@ -1933,9 +1930,8 @@ pub async fn preview_today_extra_suggestions<P: TodaySnapshotPort>(
                 .ok_or(TodaySnapshotError::IntegrityViolation)?;
             Ok(TodayExtraSuggestion {
                 problem_id: candidate.problem_id,
-                contest_id: details.contest_id,
-                problem_index: details.problem_index.clone(),
                 problem_title: details.problem_title.clone(),
+                problem_rating: details.problem_rating,
                 review_attempt_id: candidate.review_attempt_id,
                 lane: candidate.lane,
                 reason: candidate.reason,

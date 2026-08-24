@@ -2135,8 +2135,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
   const calls = [];
   const entry = (id, problemId, reason, status = "notStarted", origin = "auto") => ({
     entryId: id, problemId, reviewAttemptId: null, lane: "study", reason,
-    contestId: 1979, problemIndex: problemId === "1" ? "A" : problemId === "2" ? "B" : "C",
-    problemTitle: `Problem ${problemId}`,
+    problemTitle: `Problem ${problemId}`, problemRating: 1200,
     planningCostMinutes: 60, position: 0, origin, status,
   });
   let snapshot = {
@@ -2159,7 +2158,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     }
     if (command === "today_extra_suggestions") return {
       expectedSnapshot: snapshot, remainingBudgetMinutes: 60,
-      suggestions: [{ problemId: "3", contestId: 1979, problemIndex: "C", problemTitle: "Problem 3", reviewAttemptId: null, lane: "study", reason: "upsolve", planningCostMinutes: 60 }],
+      suggestions: [{ problemId: "3", problemTitle: "Problem 3", problemRating: null, reviewAttemptId: null, lane: "study", reason: "upsolve", planningCostMinutes: 60 }],
     };
     if (command === "accept_today_extra_suggestion") {
       snapshot = { ...snapshot, plannedMinutes: 180, overBudgetMinutes: 60, entries: [...snapshot.entries, { ...entry("entry-c", "3", "upsolve", "notStarted", "manual"), position: 2 }] };
@@ -2262,6 +2261,52 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     assert.ok([...view.document.querySelectorAll(".sr-only")].some((node) => /Today replan applied/.test(node.textContent ?? "")));
   } finally {
     await view.cleanup();
+  }
+});
+
+test("Today navigation uses canonical problem ids and review attempt ids without aliases", {
+  concurrency: false,
+}, async () => {
+  const attemptId = "018f0d8e-4a5b-7c6d-8e9f-0123456789ab";
+  const snapshot = {
+    planId: "plan-navigation", localDate: "2026-08-12", budgetMinutes: 90,
+    plannedMinutes: 90, overBudgetMinutes: 0, reviewOnlyStreak: 0,
+    entries: [
+      {
+        entryId: "ordinary", problemId: "canonical-42", problemTitle: "Opaque identity",
+        problemRating: null, reviewAttemptId: null, lane: "study", reason: "upsolve",
+        planningCostMinutes: 60, position: 0, origin: "auto", status: "notStarted",
+      },
+      {
+        entryId: "review", problemId: "canonical-43", problemTitle: "Continue review",
+        problemRating: 1700, reviewAttemptId: attemptId, lane: "carryIn", reason: "continueReview",
+        planningCostMinutes: 30, position: 1, origin: "auto", status: "inProgress",
+      },
+    ],
+  };
+  const invoke = (command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "today_snapshot") return snapshot;
+    throw new Error(`unexpected command ${command}`);
+  };
+
+  const ordinary = await renderApp(invoke, "/today");
+  try {
+    const links = ordinary.document.querySelectorAll(".today-problem-link");
+    await act(async () => links[0].click());
+    assert.equal(ordinary.window.location.pathname, "/problems/id/canonical-42");
+  } finally {
+    await ordinary.cleanup();
+  }
+
+  const review = await renderApp(invoke, "/today");
+  try {
+    const links = review.document.querySelectorAll(".today-problem-link");
+    await act(async () => links[1].click());
+    assert.equal(review.window.location.pathname, `/review/${attemptId}`);
+  } finally {
+    await review.cleanup();
   }
 });
 

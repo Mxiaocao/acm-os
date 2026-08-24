@@ -6,7 +6,7 @@ export type TodayStatus = "notStarted" | "inProgress" | "completed" | "unavailab
 
 export interface TodayEntryDto {
   entryId: string; problemId: string; reviewAttemptId: string | null;
-  contestId: number; problemIndex: string; problemTitle: string;
+  problemTitle: string; problemRating: number | null;
   lane: TodayLane; reason: TodayReason; planningCostMinutes: number;
   position: number; origin: "auto" | "manual"; status: TodayStatus;
 }
@@ -14,8 +14,10 @@ export interface TodaySnapshotDto {
   planId: string; localDate: string; budgetMinutes: number; plannedMinutes: number;
   overBudgetMinutes: number; reviewOnlyStreak: number; entries: TodayEntryDto[];
 }
-export interface TodayReplanEntryDto extends Omit<TodayEntryDto, "entryId" | "position"> {
-  existingEntryId: string | null;
+export interface TodayReplanEntryDto {
+  existingEntryId: string | null; problemId: string; reviewAttemptId: string | null;
+  lane: TodayLane; reason: TodayReason; planningCostMinutes: number;
+  origin: "auto" | "manual"; status: TodayStatus;
 }
 export interface TodayReplanPreviewDto {
   expectedSnapshot: TodaySnapshotDto; proposedBudgetMinutes: number;
@@ -23,7 +25,7 @@ export interface TodayReplanPreviewDto {
   proposedReviewOnlyStreak: number; entries: TodayReplanEntryDto[];
 }
 export interface TodayExtraSuggestionDto {
-  problemId: string; contestId: number; problemIndex: string; problemTitle: string;
+  problemId: string; problemTitle: string; problemRating: number | null;
   reviewAttemptId: string | null; lane: TodayLane;
   reason: TodayReason; planningCostMinutes: number;
 }
