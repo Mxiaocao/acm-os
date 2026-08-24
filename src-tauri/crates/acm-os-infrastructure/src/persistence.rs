@@ -5361,13 +5361,12 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         let row: Option<(i64, String, String, String, String)> = sqlx::query_as(
             "SELECT p.id, p.identity_type, pls.learning_status, \
                     fb.vault_relative_path, fb.content_digest \
-             FROM problems p JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id \
+             FROM problems p \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE identities.platform = ?1 \
-               AND identities.external_contest_key = ?2 \
-               AND identities.external_problem_key = ?3",
+             WHERE p.id = (SELECT problem_id FROM problem_external_identities \
+                           WHERE platform = ?1 AND external_contest_key = ?2 \
+                             AND external_problem_key = ?3)",
         )
         .bind(problem.contest().platform().as_str())
         .bind(problem.contest().external_contest_key().as_str())
@@ -5461,6 +5460,78 @@ impl PersonalNoteDeletionPort for DatabaseRuntime {
         })
     }
 
+    async fn prepare_personal_note_deletion_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
+        let binding = match self.read_personal_note_projection_by_id(problem_id).await {
+            Ok(PersonalNoteReadState::Ready { binding, .. }) => binding,
+            Ok(PersonalNoteReadState::LocationAnomaly { .. }) => return Err(PersonalNoteDeletionError::LocationAnomaly),
+            Ok(PersonalNoteReadState::VaultUnavailable { .. }) => return Err(PersonalNoteDeletionError::VaultUnavailable),
+            Err(PersonalNoteReadError::ProblemNotFound) => return Err(PersonalNoteDeletionError::ProblemNotFound),
+            Err(PersonalNoteReadError::NotPersonal) => return Err(PersonalNoteDeletionError::NotPersonal),
+            Err(PersonalNoteReadError::BindingUnavailable) => return Err(PersonalNoteDeletionError::BindingUnavailable),
+            Err(PersonalNoteReadError::FileReadFailed) => return Err(PersonalNoteDeletionError::VaultUnavailable),
+            Err(PersonalNoteReadError::InvalidUtf8) => return Err(PersonalNoteDeletionError::IntegrityViolation),
+            Err(PersonalNoteReadError::PersistenceUnavailable) => return Err(PersonalNoteDeletionError::PersistenceUnavailable),
+        };
+        let pool = self._pool.as_ref().ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let in_progress: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts WHERE problem_id = ?1 AND attempt_status = 'in_progress'")
+            .bind(problem_id).fetch_one(pool).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if in_progress != 0 { return Err(PersonalNoteDeletionError::ReviewInProgress); }
+        let workspace = self.load_workspace_configuration().await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?.ok_or(PersonalNoteDeletionError::VaultUnavailable)?;
+        let vault = std::fs::canonicalize(workspace.active_vault_path()).map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        let target = std::fs::canonicalize(vault.join(&binding.vault_relative_path)).map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        if !target.starts_with(&vault) || !target.is_file() { return Err(PersonalNoteDeletionError::BindingUnavailable); }
+        let bytes = std::fs::read(&target).map_err(|_| PersonalNoteDeletionError::VaultUnavailable)?;
+        if sha256_hex(&bytes) != binding.content_digest { return Err(PersonalNoteDeletionError::ConcurrentModification); }
+        let recovery_root = self.recovery_root.as_ref().ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let bucket = recovery_root.join("deleted-personal-notes").join(sha256_hex(format!("problem-id:{problem_id}").as_bytes()));
+        std::fs::create_dir_all(&bucket).map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?.as_nanos();
+        let recovery_copy = bucket.join(format!("{timestamp}-{}.md", binding.content_digest));
+        let mut copy = OpenOptions::new().create_new(true).write(true).open(&recovery_copy).map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+        copy.write_all(&bytes).and_then(|_| copy.sync_all()).map_err(|_| PersonalNoteDeletionError::RecoveryCopyFailed)?;
+        let final_bytes = std::fs::read(&target).map_err(|_| PersonalNoteDeletionError::ConcurrentModification)?;
+        if sha256_hex(&final_bytes) != binding.content_digest { return Err(PersonalNoteDeletionError::ConcurrentModification); }
+        let local_date = crate::current_local_date().map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        std::fs::remove_file(&target).map_err(|_| PersonalNoteDeletionError::FileDeleteFailed)?;
+        match target.try_exists() {
+            Ok(false) => {}
+            Ok(true) => return Err(PersonalNoteDeletionError::ConcurrentModification),
+            Err(_) => { restore_exact_file(&target, &bytes).map_err(|_| PersonalNoteDeletionError::CompensationFailed)?; return Err(PersonalNoteDeletionError::FileDeleteFailed); }
+        }
+        Ok(PreparedPersonalNoteDeletion { vault_relative_path: binding.vault_relative_path, content_digest: binding.content_digest, recovery_copy_path: recovery_copy.to_string_lossy().into_owned() })
+    }
+
+    async fn commit_personal_note_deletion_by_id(
+        &self,
+        problem_id: i64,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+        let pool = self._pool.as_ref().ok_or(PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let mut tx = pool.begin().await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let row: Option<(String, String, String, String)> = sqlx::query_as("SELECT p.identity_type, pls.learning_status, fb.vault_relative_path, fb.content_digest FROM problems p JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN file_bindings fb ON fb.problem_id = p.id WHERE p.id = ?1")
+            .bind(problem_id).fetch_optional(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let (identity_type, status, path, digest) = row.ok_or(PersonalNoteDeletionError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(PersonalNoteDeletionError::NotPersonal); }
+        if path != prepared.vault_relative_path || digest != prepared.content_digest { return Err(PersonalNoteDeletionError::ConcurrentModification); }
+        let in_progress: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts WHERE problem_id = ?1 AND attempt_status = 'in_progress'").bind(problem_id).fetch_one(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if in_progress != 0 { return Err(PersonalNoteDeletionError::ReviewInProgress); }
+        let status = parse_learning_status(&status).map_err(map_lifecycle_to_deletion_error)?;
+        let decision = acm_os_domain::ProblemLifecycleEngine::decide(status, acm_os_domain::ProblemLifecycleAction::DeletePersonalNote).map_err(|_| PersonalNoteDeletionError::IntegrityViolation)?;
+        sqlx::query("UPDATE review_cycles SET cycle_status = 'cancelled', next_due_local_date = NULL, ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?1 AND cycle_status = 'active'").bind(problem_id).execute(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let since: Option<String> = sqlx::query_scalar("UPDATE problem_learning_states SET learning_status = 'unstarted', learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?1 AND learning_status = ?2 RETURNING learning_status_since_utc").bind(problem_id).bind(learning_status_value(decision.previous_status)).fetch_optional(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        let since = since.ok_or(PersonalNoteDeletionError::ConcurrentModification)?;
+        let deleted = sqlx::query("DELETE FROM file_bindings WHERE problem_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3").bind(problem_id).bind(&prepared.vault_relative_path).bind(&prepared.content_digest).execute(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if deleted.rows_affected() != 1 { return Err(PersonalNoteDeletionError::ConcurrentModification); }
+        let downgraded = sqlx::query("UPDATE problems SET identity_type = 'lightweight' WHERE id = ?1 AND identity_type = 'personal'").bind(problem_id).execute(&mut *tx).await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        if downgraded.rows_affected() != 1 { return Err(PersonalNoteDeletionError::ConcurrentModification); }
+        tx.commit().await.map_err(|_| PersonalNoteDeletionError::PersistenceUnavailable)?;
+        Ok(ProblemLifecycleState { identity_type: ProblemIdentityType::Lightweight, learning_status: acm_os_domain::LearningStatus::Unstarted, learning_status_since_utc: since, active_review_cycle: None })
+    }
+
     async fn restore_deleted_personal_note(
         &self,
         prepared: &PreparedPersonalNoteDeletion,
@@ -5514,32 +5585,27 @@ fn map_lifecycle_to_deletion_error(error: ProblemLifecycleError) -> PersonalNote
     }
 }
 
-impl PersonalNoteReadPort for DatabaseRuntime {
-    async fn read_personal_note_projection(
+impl DatabaseRuntime {
+    async fn read_personal_note_projection_by_id_with_cache(
         &self,
-        problem: &acm_os_domain::ProblemIdentity,
+        problem_id: i64,
+        cache_namespace: &str,
     ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
         let row: Option<(
-            i64,
             String,
             Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
         )> = sqlx::query_as(
-            "SELECT p.id, p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
+            "SELECT p.identity_type, ws.active_vault_path, fb.vault_relative_path, \
                     fb.content_digest, fb.windows_file_key \
-             FROM problems p JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id \
+             FROM problems p \
              LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
              LEFT JOIN workspace_settings ws ON ws.singleton = 1 \
-             WHERE identities.platform = ?1 \
-               AND identities.external_contest_key = ?2 \
-               AND identities.external_problem_key = ?3",
+             WHERE p.id = ?1",
         )
-        .bind(problem.contest().platform().as_str())
-        .bind(problem.contest().external_contest_key().as_str())
-        .bind(problem.external_problem_key())
+        .bind(problem_id)
         .fetch_optional(
             self._pool
                 .as_ref()
@@ -5547,7 +5613,7 @@ impl PersonalNoteReadPort for DatabaseRuntime {
         )
         .await
         .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?;
-        let (problem_id, identity_type, active_vault, relative_path, digest, file_key) =
+        let (identity_type, active_vault, relative_path, digest, file_key) =
             row.ok_or(PersonalNoteReadError::ProblemNotFound)?;
         if identity_type != "personal" {
             return Err(PersonalNoteReadError::NotPersonal);
@@ -5613,13 +5679,7 @@ impl PersonalNoteReadPort for DatabaseRuntime {
 
         // Disk bytes are always read and digested before this cache is consulted.
         let content_digest = resolved.content_digest.clone();
-        let cache_key = format!(
-            "{}:{}:{}:{}",
-            problem.contest().platform().as_str(),
-            problem.contest().external_contest_key().as_str(),
-            problem.external_problem_key(),
-            resolved.relative_path
-        );
+        let cache_key = format!("{cache_namespace}:{}", resolved.relative_path);
         {
             let cache = self
                 .markdown_projection_cache
@@ -5651,7 +5711,105 @@ impl PersonalNoteReadPort for DatabaseRuntime {
     }
 }
 
+impl PersonalNoteReadPort for DatabaseRuntime {
+    async fn read_personal_note_projection(
+        &self,
+        problem: &acm_os_domain::ProblemIdentity,
+    ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = ?1 AND external_contest_key = ?2 \
+               AND external_problem_key = ?3",
+        )
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(PersonalNoteReadError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| PersonalNoteReadError::PersistenceUnavailable)?
+        .ok_or(PersonalNoteReadError::ProblemNotFound)?;
+        let cache_namespace = format!(
+            "{}:{}:{}",
+            problem.contest().platform().as_str(),
+            problem.contest().external_contest_key().as_str(),
+            problem.external_problem_key()
+        );
+        self.read_personal_note_projection_by_id_with_cache(problem_id, &cache_namespace)
+            .await
+    }
+
+    async fn read_personal_note_projection_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
+        self.read_personal_note_projection_by_id_with_cache(
+            problem_id,
+            &format!("problem-id:{problem_id}"),
+        )
+        .await
+    }
+}
+
 impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
+    async fn personal_note_relocation_candidates_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<Vec<acm_os_application::PersonalNoteRelocationCandidate>, acm_os_application::PersonalNoteBindingRepairError> {
+        use acm_os_application::PersonalNoteBindingRepairError;
+        let pool = self._pool.as_ref().ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(String, Option<String>, String)> = sqlx::query_as("SELECT p.identity_type, ws.active_vault_path, fb.binding_state FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id LEFT JOIN workspace_settings ws ON ws.singleton = 1 WHERE p.id = ?1")
+            .bind(problem_id).fetch_optional(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (identity_type, active_vault, binding_state) = row.ok_or(PersonalNoteBindingRepairError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(PersonalNoteBindingRepairError::NotPersonal); }
+        if binding_state != "location_anomaly" { return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired); }
+        let active_vault = active_vault.ok_or(PersonalNoteBindingRepairError::VaultUnavailable)?;
+        let occupied: Vec<String> = sqlx::query_scalar("SELECT vault_relative_path FROM file_bindings UNION SELECT vault_relative_path FROM knowledge_file_bindings").fetch_all(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        tokio::task::spawn_blocking(move || {
+            let vault = std::fs::canonicalize(&active_vault).map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?;
+            let occupied = occupied.into_iter().collect::<std::collections::HashSet<_>>();
+            markdown_files(&vault).map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?.into_iter().map(|path| {
+                let relative_path = path.strip_prefix(&vault).map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?.to_string_lossy().replace('\\', "/");
+                Ok(acm_os_application::PersonalNoteRelocationCandidate { occupied: occupied.contains(&relative_path), vault_relative_path: relative_path })
+            }).collect()
+        }).await.map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?
+    }
+
+    async fn rebind_personal_note_by_id(
+        &self,
+        problem_id: i64,
+        vault_relative_path: &str,
+    ) -> Result<PersonalNoteBinding, acm_os_application::PersonalNoteBindingRepairError> {
+        use acm_os_application::PersonalNoteBindingRepairError;
+        let pool = self._pool.as_ref().ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as("SELECT p.identity_type, ws.active_vault_path, fb.vault_relative_path, fb.content_digest, fb.binding_state FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id LEFT JOIN workspace_settings ws ON ws.singleton = 1 WHERE p.id = ?1").bind(problem_id).fetch_optional(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (identity_type, active_vault, old_path, old_digest, binding_state) = row.ok_or(PersonalNoteBindingRepairError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(PersonalNoteBindingRepairError::NotPersonal); }
+        if binding_state != "location_anomaly" { return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired); }
+        let old_path = old_path.ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let old_digest = old_digest.ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let active_vault = active_vault.ok_or(PersonalNoteBindingRepairError::VaultUnavailable)?;
+        let selected = vault_relative_path.to_owned();
+        let resolved = tokio::task::spawn_blocking(move || resolve_relative_markdown(&active_vault, &selected)).await.map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?.map_err(|_| PersonalNoteBindingRepairError::CandidateUnavailable)?;
+        let occupied: Option<i64> = sqlx::query_scalar("SELECT problem_id FROM file_bindings WHERE vault_relative_path = ?1 AND problem_id <> ?2").bind(&resolved.relative_path).bind(problem_id).fetch_optional(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied.is_some() { return Err(PersonalNoteBindingRepairError::CandidateOccupied); }
+        let occupied_knowledge: Option<String> = sqlx::query_scalar("SELECT knowledge_node_id FROM knowledge_file_bindings WHERE vault_relative_path = ?1").bind(&resolved.relative_path).fetch_optional(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if occupied_knowledge.is_some() { return Err(PersonalNoteBindingRepairError::CandidateOccupied); }
+        let local_date = crate::current_local_date().map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let mut tx = pool.begin().await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let result = sqlx::query("UPDATE file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, content_digest = ?3, binding_state = 'linked', updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?4 AND vault_relative_path = ?5 AND content_digest = ?6 AND binding_state = 'location_anomaly'").bind(&resolved.relative_path).bind(&resolved.windows_file_key).bind(&resolved.content_digest).bind(problem_id).bind(old_path).bind(old_digest).execute(&mut *tx).await;
+        match result {
+            Ok(result) if result.rows_affected() == 1 => { tx.commit().await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?; Ok(resolved_binding(&resolved)) }
+            Ok(_) => Err(PersonalNoteBindingRepairError::LocationAnomalyRequired),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(PersonalNoteBindingRepairError::CandidateOccupied),
+            Err(_) => Err(PersonalNoteBindingRepairError::PersistenceUnavailable),
+        }
+    }
+
     async fn personal_note_relocation_candidates(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
@@ -6063,6 +6221,37 @@ impl acm_os_application::PersonalNoteBindingRepairPort for DatabaseRuntime {
             active_review_cycle: None,
         })
     }
+
+    async fn confirm_personal_note_deleted_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<ProblemLifecycleState, acm_os_application::PersonalNoteBindingRepairError> {
+        use acm_os_application::PersonalNoteBindingRepairError;
+        let pool = self._pool.as_ref().ok_or(PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let row: Option<(String, String, String, Option<String>, String, Option<String>)> = sqlx::query_as("SELECT p.identity_type, pls.learning_status, fb.vault_relative_path, fb.windows_file_key, fb.content_digest, ws.active_vault_path FROM problems p JOIN problem_learning_states pls ON pls.problem_id = p.id JOIN file_bindings fb ON fb.problem_id = p.id LEFT JOIN workspace_settings ws ON ws.singleton = 1 WHERE p.id = ?1 AND fb.binding_state = 'location_anomaly'").bind(problem_id).fetch_optional(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let (identity_type, status, relative_path, file_key, digest, active_vault) = row.ok_or(PersonalNoteBindingRepairError::LocationAnomalyRequired)?;
+        if identity_type != "personal" { return Err(PersonalNoteBindingRepairError::NotPersonal); }
+        let active_vault = active_vault.ok_or(PersonalNoteBindingRepairError::VaultUnavailable)?;
+        let check_path = relative_path.clone(); let check_digest = digest.clone();
+        let resolution = tokio::task::spawn_blocking(move || resolve_personal_note(&active_vault, &check_path, file_key.as_deref(), &check_digest)).await.map_err(|_| PersonalNoteBindingRepairError::VaultUnavailable)?;
+        match resolution { BindingResolution::LocationAnomaly => {}, BindingResolution::Ready(_) => return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired), BindingResolution::VaultUnavailable => return Err(PersonalNoteBindingRepairError::VaultUnavailable), BindingResolution::InvalidBinding => return Err(PersonalNoteBindingRepairError::IntegrityViolation) }
+        let in_progress: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_attempts WHERE problem_id = ?1 AND attempt_status = 'in_progress'").bind(problem_id).fetch_one(pool).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if in_progress != 0 { return Err(PersonalNoteBindingRepairError::ReviewInProgress); }
+        let parsed = parse_learning_status(&status).map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+        let decision = acm_os_domain::ProblemLifecycleEngine::decide(parsed, acm_os_domain::ProblemLifecycleAction::DeletePersonalNote).map_err(|_| PersonalNoteBindingRepairError::IntegrityViolation)?;
+        let local_date = crate::current_local_date().map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let mut tx = pool.begin().await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        sqlx::query("UPDATE review_cycles SET cycle_status = 'cancelled', next_due_local_date = NULL, ended_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?1 AND cycle_status = 'active'").bind(problem_id).execute(&mut *tx).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let since: Option<String> = sqlx::query_scalar("UPDATE problem_learning_states SET learning_status = 'unstarted', learning_status_since_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?1 AND learning_status = ?2 RETURNING learning_status_since_utc").bind(problem_id).bind(learning_status_value(decision.previous_status)).fetch_optional(&mut *tx).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        let since = since.ok_or(PersonalNoteBindingRepairError::LocationAnomalyRequired)?;
+        let deleted = sqlx::query("DELETE FROM file_bindings WHERE problem_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3 AND binding_state = 'location_anomaly'").bind(problem_id).bind(&relative_path).bind(&digest).execute(&mut *tx).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if deleted.rows_affected() != 1 { return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired); }
+        let downgraded = sqlx::query("UPDATE problems SET identity_type = 'lightweight' WHERE id = ?1 AND identity_type = 'personal'").bind(problem_id).execute(&mut *tx).await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        if downgraded.rows_affected() != 1 { return Err(PersonalNoteBindingRepairError::LocationAnomalyRequired); }
+        tx.commit().await.map_err(|_| PersonalNoteBindingRepairError::PersistenceUnavailable)?;
+        Ok(ProblemLifecycleState { identity_type: ProblemIdentityType::Lightweight, learning_status: acm_os_domain::LearningStatus::Unstarted, learning_status_since_utc: since, active_review_cycle: None })
+    }
 }
 
 impl PersonalNotePatchPort for DatabaseRuntime {
@@ -6201,6 +6390,26 @@ impl PersonalNotePatchPort for DatabaseRuntime {
 
         self.commit_patch_outcome(problem, &expected, outcome, None)
             .await
+    }
+
+    async fn add_extra_problem_link_by_id(
+        &self,
+        problem_id: i64,
+        target: &ExtraProblemLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let state = self.read_personal_note_projection_by_id(problem_id).await.map_err(map_personal_note_read_to_patch_error)?;
+        let expected = match state {
+            PersonalNoteReadState::Ready { binding, .. } => binding,
+            PersonalNoteReadState::LocationAnomaly { .. } => return Err(PersonalNotePatchError::LocationAnomaly),
+            PersonalNoteReadState::VaultUnavailable { .. } => return Err(PersonalNotePatchError::VaultUnavailable),
+        };
+        let configuration = self.load_workspace_configuration().await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?.ok_or(PersonalNotePatchError::VaultUnavailable)?;
+        let recovery_root = self.recovery_root.clone().ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let active_vault = configuration.active_vault_path().to_owned();
+        let relative_path = expected.vault_relative_path.clone();
+        let target = target.clone();
+        let outcome = tokio::task::spawn_blocking(move || crate::safe_patch::add_extra_problem_link(&active_vault, &relative_path, &recovery_root, &format!("problem-id:{problem_id}"), &target, |_| {})).await.map_err(|_| PersonalNotePatchError::WriteFailed)?.map_err(map_safe_patch_error)?;
+        self.commit_patch_outcome_by_id(problem_id, &expected, outcome, None).await
     }
 }
 

@@ -2106,6 +2106,21 @@ pub trait PersonalNoteReadPort {
         &self,
         problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<PersonalNoteReadState, PersonalNoteReadError>;
+
+    async fn read_personal_note_projection_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
+        let _ = problem_id;
+        Err(PersonalNoteReadError::PersistenceUnavailable)
+    }
+}
+
+pub async fn read_personal_note_projection_by_id<P: PersonalNoteReadPort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<PersonalNoteReadState, PersonalNoteReadError> {
+    port.read_personal_note_projection_by_id(problem_id).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2160,6 +2175,31 @@ pub trait PersonalNoteBindingRepairPort {
         &self,
         problem: &acm_os_domain::ProblemIdentity,
     ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError>;
+
+    async fn personal_note_relocation_candidates_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError> {
+        let _ = problem_id;
+        Err(PersonalNoteBindingRepairError::PersistenceUnavailable)
+    }
+
+    async fn rebind_personal_note_by_id(
+        &self,
+        problem_id: i64,
+        vault_relative_path: &str,
+    ) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError> {
+        let _ = (problem_id, vault_relative_path);
+        Err(PersonalNoteBindingRepairError::PersistenceUnavailable)
+    }
+
+    async fn confirm_personal_note_deleted_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError> {
+        let _ = problem_id;
+        Err(PersonalNoteBindingRepairError::PersistenceUnavailable)
+    }
 }
 
 pub async fn personal_note_relocation_candidates<P: PersonalNoteBindingRepairPort>(
@@ -2183,6 +2223,29 @@ pub async fn confirm_personal_note_deleted<P: PersonalNoteBindingRepairPort>(
     problem: &acm_os_domain::ProblemIdentity,
 ) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError> {
     port.confirm_personal_note_deleted(problem).await
+}
+
+pub async fn personal_note_relocation_candidates_by_id<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<Vec<PersonalNoteRelocationCandidate>, PersonalNoteBindingRepairError> {
+    port.personal_note_relocation_candidates_by_id(problem_id).await
+}
+
+pub async fn rebind_personal_note_by_id<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem_id: i64,
+    vault_relative_path: impl AsRef<str>,
+) -> Result<PersonalNoteBinding, PersonalNoteBindingRepairError> {
+    port.rebind_personal_note_by_id(problem_id, vault_relative_path.as_ref())
+        .await
+}
+
+pub async fn confirm_personal_note_deleted_by_id<P: PersonalNoteBindingRepairPort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<ProblemLifecycleState, PersonalNoteBindingRepairError> {
+    port.confirm_personal_note_deleted_by_id(problem_id).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2285,6 +2348,15 @@ pub trait PersonalNotePatchPort {
         problem: &acm_os_domain::ProblemIdentity,
         target: &ExtraProblemLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
+
+    async fn add_extra_problem_link_by_id(
+        &self,
+        problem_id: i64,
+        target: &ExtraProblemLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let _ = (problem_id, target);
+        Err(PersonalNotePatchError::PersistenceUnavailable)
+    }
 }
 
 pub async fn add_prerequisite_link<P: PersonalNotePatchPort>(
@@ -2312,6 +2384,15 @@ pub async fn add_extra_problem_link<P: PersonalNotePatchPort>(
 ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
     let target = ExtraProblemLinkTarget::parse(target)?;
     port.add_extra_problem_link(problem, &target).await
+}
+
+pub async fn add_extra_problem_link_by_id<P: PersonalNotePatchPort>(
+    port: &P,
+    problem_id: i64,
+    target: impl Into<String>,
+) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+    let target = ExtraProblemLinkTarget::parse(target)?;
+    port.add_extra_problem_link_by_id(problem_id, &target).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2470,6 +2551,23 @@ pub trait PersonalNoteDeletionPort {
         &self,
         prepared: &PreparedPersonalNoteDeletion,
     ) -> Result<(), PersonalNoteDeletionError>;
+
+    async fn prepare_personal_note_deletion_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<PreparedPersonalNoteDeletion, PersonalNoteDeletionError> {
+        let _ = problem_id;
+        Err(PersonalNoteDeletionError::PersistenceUnavailable)
+    }
+
+    async fn commit_personal_note_deletion_by_id(
+        &self,
+        problem_id: i64,
+        prepared: &PreparedPersonalNoteDeletion,
+    ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+        let _ = (problem_id, prepared);
+        Err(PersonalNoteDeletionError::PersistenceUnavailable)
+    }
 }
 
 pub async fn delete_personal_note<P: PersonalNoteDeletionPort>(
@@ -2478,6 +2576,23 @@ pub async fn delete_personal_note<P: PersonalNoteDeletionPort>(
 ) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
     let prepared = port.prepare_personal_note_deletion(problem).await?;
     match port.commit_personal_note_deletion(problem, &prepared).await {
+        Ok(state) => Ok(state),
+        Err(error) => match port.restore_deleted_personal_note(&prepared).await {
+            Ok(()) => Err(error),
+            Err(_) => Err(PersonalNoteDeletionError::CompensationFailed),
+        },
+    }
+}
+
+pub async fn delete_personal_note_by_id<P: PersonalNoteDeletionPort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<ProblemLifecycleState, PersonalNoteDeletionError> {
+    let prepared = port.prepare_personal_note_deletion_by_id(problem_id).await?;
+    match port
+        .commit_personal_note_deletion_by_id(problem_id, &prepared)
+        .await
+    {
         Ok(state) => Ok(state),
         Err(error) => match port.restore_deleted_personal_note(&prepared).await {
             Ok(()) => Err(error),

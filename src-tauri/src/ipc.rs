@@ -766,6 +766,13 @@ pub struct CanonicalProblemIdInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CanonicalRebindPersonalNoteInput {
+    problem_id: String,
+    vault_relative_path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CanonicalMasteryEvidenceInput {
     problem_id: String,
     evidence: ProblemMasteryEvidenceDto,
@@ -2116,6 +2123,15 @@ pub async fn delete_personal_note(
 }
 
 #[tauri::command]
+pub async fn delete_personal_note_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalProblemIdInput,
+) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    acm_os_application::delete_personal_note_by_id(database.inner(), problem_id).await.map(problem_lifecycle_state_dto).map_err(acm_os_application::PersonalNoteDeletionError::code)
+}
+
+#[tauri::command]
 pub async fn personal_note_projection(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
@@ -2127,6 +2143,15 @@ pub async fn personal_note_projection(
         .await
         .map(personal_note_read_state_dto)
         .map_err(acm_os_application::PersonalNoteReadError::code)
+}
+
+#[tauri::command]
+pub async fn personal_note_projection_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalProblemIdInput,
+) -> Result<PersonalNoteReadStateDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    acm_os_application::read_personal_note_projection_by_id(database.inner(), problem_id).await.map(personal_note_read_state_dto).map_err(acm_os_application::PersonalNoteReadError::code)
 }
 
 #[tauri::command]
@@ -2150,6 +2175,15 @@ pub async fn personal_note_relocation_candidates(
 }
 
 #[tauri::command]
+pub async fn personal_note_relocation_candidates_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalProblemIdInput,
+) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    acm_os_application::personal_note_relocation_candidates_by_id(database.inner(), problem_id).await.map(|items| items.into_iter().map(|candidate| PersonalNoteRelocationCandidateDto { vault_relative_path: candidate.vault_relative_path, occupied: candidate.occupied }).collect()).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
 pub async fn rebind_personal_note(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: RebindPersonalNoteInput,
@@ -2162,6 +2196,15 @@ pub async fn rebind_personal_note(
 }
 
 #[tauri::command]
+pub async fn rebind_personal_note_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalRebindPersonalNoteInput,
+) -> Result<PersonalNoteBindingDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    acm_os_application::rebind_personal_note_by_id(database.inner(), problem_id, input.vault_relative_path).await.map(personal_note_binding_dto).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
 pub async fn confirm_personal_note_deleted(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: LightweightProblemDetailInput,
@@ -2171,6 +2214,15 @@ pub async fn confirm_personal_note_deleted(
         .await
         .map(problem_lifecycle_state_dto)
         .map_err(acm_os_application::PersonalNoteBindingRepairError::code)
+}
+
+#[tauri::command]
+pub async fn confirm_personal_note_deleted_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CanonicalProblemIdInput,
+) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    acm_os_application::confirm_personal_note_deleted_by_id(database.inner(), problem_id).await.map(problem_lifecycle_state_dto).map_err(acm_os_application::PersonalNoteBindingRepairError::code)
 }
 
 #[tauri::command]
@@ -2203,6 +2255,22 @@ pub async fn open_personal_note_in_obsidian(
     app.opener()
         .open_url(uri, None::<&str>)
         .map_err(|_| "obsidian_open_failed")
+}
+
+#[tauri::command]
+pub async fn open_personal_note_in_obsidian_by_id(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    app: tauri::AppHandle,
+    input: CanonicalProblemIdInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::{PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort};
+    use tauri_plugin_opener::OpenerExt;
+    let problem_id = validate_internal_problem_id(&input.problem_id)?.parse::<i64>().map_err(|_| "invalid_problem_id")?;
+    let state = database.read_personal_note_projection_by_id(problem_id).await.map_err(acm_os_application::PersonalNoteReadError::code)?;
+    let binding = match state { PersonalNoteReadState::Ready { binding, .. } => binding, PersonalNoteReadState::LocationAnomaly { .. } => return Err("note_location_anomaly"), PersonalNoteReadState::VaultUnavailable { .. } => return Err("vault_unavailable") };
+    let workspace = database.load_workspace_configuration().await.map_err(|_| "workspace_unavailable")?.ok_or("workspace_unavailable")?;
+    let uri = obsidian_open_uri(workspace.active_vault_path(), &binding.vault_relative_path)?;
+    app.opener().open_url(uri, None::<&str>).map_err(|_| "obsidian_open_failed")
 }
 
 #[derive(Debug, serde::Deserialize)]

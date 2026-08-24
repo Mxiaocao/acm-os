@@ -11,6 +11,23 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const vite = await createServer({
   configFile: false,
   root: process.cwd(),
+  cacheDir: ".dom-shells-vite-cache",
+  plugins: [{
+    name: "dom-shells-css-stub",
+    enforce: "pre",
+    resolveId(source) {
+      return source === "katex/dist/katex.min.css" ? `\0dom-shells-css:${source}` : undefined;
+    },
+    load(id) {
+      return id.startsWith("\0dom-shells-css:") ? "export default {};" : undefined;
+    },
+    transform(code, id) {
+      if (id.endsWith("/src/app/shells.tsx")) {
+        return code.replace('import "katex/dist/katex.min.css";', "");
+      }
+      return undefined;
+    },
+  }],
   server: { middlewareMode: true },
 });
 const shells = await vite.ssrLoadModule("/src/app/shells.tsx");
@@ -1319,6 +1336,133 @@ test("Canonical Problem route loads by problem_id without projecting an external
     assert.match(view.document.body.textContent, /Canonical Problem/);
     assert.match(view.document.body.textContent, /Problems\/Canonical\.md/);
     assert.doesNotMatch(view.document.body.textContent, /Codeforces/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Canonical bound Personal Note exposes read, open, and delete through problem_id IPC", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const lifecycle = { ...personalUnstartedLifecycle };
+  const detail = {
+    problemId: "42", title: "Bound Canonical Problem", rating: 1200,
+    sourceUrl: "https://example.test/problem/42", statement: { state: "pending" },
+    identityType: "personal", personalNote: { vaultRelativePath: "Problems/Canonical.md" },
+    lifecycle, reviewAction: null,
+  };
+  const projection = {
+    state: "ready", vaultRelativePath: "Problems/Canonical.md", relocated: false,
+    projection: { contentDigest: "a".repeat(64), knownSections: [], solutionRoutes: [], warnings: [] },
+  };
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return detail;
+    if (command === "personal_note_projection_by_id") return projection;
+    if (command === "knowledge_candidates_by_id") return [];
+    if (command === "open_personal_note_in_obsidian_by_id") return null;
+    if (command === "delete_personal_note_by_id") return { ...lifecycle, identityType: "lightweight", learningStatus: "unstarted", availableActions: [] };
+    if (command === "review_history_by_id") return { items: [], mastery: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/42");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Problems\/Canonical\.md/);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Create my note"), false);
+    const open = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Open in Obsidian");
+    assert.ok(open);
+    await act(async () => open.click()); await settle();
+    const deleteButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Delete note");
+    assert.ok(deleteButton);
+    await act(async () => deleteButton.click()); await settle();
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm delete");
+    assert.ok(confirm);
+    await act(async () => confirm.click()); await settle();
+    const personalCommands = calls.filter(([command]) => command.includes("personal_note"));
+    assert.ok(personalCommands.some(([command]) => command === "personal_note_projection_by_id"));
+    assert.ok(personalCommands.some(([command]) => command === "open_personal_note_in_obsidian_by_id"));
+    assert.ok(personalCommands.some(([command]) => command === "delete_personal_note_by_id"));
+    assert.equal(personalCommands.some(([command]) => ["personal_note_projection", "open_personal_note_in_obsidian", "delete_personal_note"].includes(command)), false);
+    for (const [, args] of personalCommands) assert.deepEqual(args?.input?.problemId, "42");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Canonical Personal Note anomaly exposes relocation, rebind, and missing confirmation by problem_id", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const detail = {
+    problemId: "43", title: "Anomalous Canonical Problem", rating: null,
+    sourceUrl: "https://example.test/problem/43", statement: { state: "pending" },
+    identityType: "personal", personalNote: { vaultRelativePath: "Problems/Missing.md" },
+    lifecycle: personalUnstartedLifecycle, reviewAction: null,
+  };
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return detail;
+    if (command === "personal_note_projection_by_id") return { state: "locationAnomaly", lastKnownPath: "Problems/Missing.md" };
+    if (command === "knowledge_candidates_by_id") return [];
+    if (command === "personal_note_relocation_candidates_by_id") return [{ vaultRelativePath: "Archive/Recovered.md", occupied: false }];
+    if (command === "rebind_personal_note_by_id") return { vaultRelativePath: "Archive/Recovered.md" };
+    if (command === "confirm_personal_note_deleted_by_id") return { identityType: "lightweight", learningStatus: "unstarted", learningStatusSinceUtc: "2026-08-24T00:00:00Z", nextReviewDueLocalDate: null, availableActions: [] };
+    if (command === "review_history_by_id") return { items: [], mastery: null };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/43");
+  try {
+    await settle();
+    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Find note locations");
+    assert.ok(find);
+    await act(async () => find.click()); await settle();
+    const rebind = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Rebind");
+    assert.ok(rebind);
+    await act(async () => rebind.click()); await settle();
+    const missing = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm missing note deleted");
+    assert.ok(missing);
+    await act(async () => missing.click()); await settle();
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm");
+    assert.ok(confirm);
+    await act(async () => confirm.click()); await settle();
+    const commands = calls.map(([command]) => command);
+    assert.ok(commands.includes("personal_note_relocation_candidates_by_id"));
+    assert.ok(commands.includes("rebind_personal_note_by_id"));
+    assert.ok(commands.includes("confirm_personal_note_deleted_by_id"));
+    assert.equal(commands.some((command) => ["personal_note_relocation_candidates", "rebind_personal_note", "confirm_personal_note_deleted"].includes(command)), false);
+    for (const [command, args] of calls.filter(([name]) => name.includes("personal_note"))) {
+      if (command.endsWith("_by_id")) assert.equal(args.input.problemId, "43");
+    }
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Unbound canonical Problem exposes no Personal Note creation or fabricated alias", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "44", title: "Unbound Canonical Problem", rating: null,
+      sourceUrl: "https://example.test/problem/44", statement: { state: "pending" },
+      identityType: "lightweight", personalNote: null, lifecycle: lightweightLifecycle, reviewAction: null,
+    };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/44");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Unbound Canonical Problem/);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => /Create my note|Personal Markdown/.test(button.textContent)), false);
+    assert.equal(calls.some(([command]) => command.startsWith("personal_note")), false);
+    assert.equal(calls.some(([, args]) => args?.input?.contestId !== undefined || args?.input?.index !== undefined), false);
   } finally {
     await view.cleanup();
   }

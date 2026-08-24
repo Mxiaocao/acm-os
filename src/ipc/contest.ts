@@ -612,6 +612,30 @@ export function openOriginalOj(url: string): Promise<void> {
   return invoke<void>("open_original_oj", { input: { url } });
 }
 
+export function deletePersonalNoteById(problemId: string): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("delete_personal_note_by_id", { input: { problemId } });
+}
+
+export function getPersonalNoteProjectionById(problemId: string): Promise<PersonalNoteReadStateDto> {
+  return invoke<PersonalNoteReadStateDto>("personal_note_projection_by_id", { input: { problemId } });
+}
+
+export function getPersonalNoteRelocationCandidatesById(problemId: string): Promise<PersonalNoteRelocationCandidateDto[]> {
+  return invoke<PersonalNoteRelocationCandidateDto[]>("personal_note_relocation_candidates_by_id", { input: { problemId } });
+}
+
+export function rebindPersonalNoteById(problemId: string, vaultRelativePath: string): Promise<PersonalNoteBindingDto> {
+  return invoke<PersonalNoteBindingDto>("rebind_personal_note_by_id", { input: { problemId, vaultRelativePath } });
+}
+
+export function confirmPersonalNoteDeletedById(problemId: string): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("confirm_personal_note_deleted_by_id", { input: { problemId } });
+}
+
+export function openPersonalNoteInObsidianById(problemId: string): Promise<void> {
+  return invoke<void>("open_personal_note_in_obsidian_by_id", { input: { problemId } });
+}
+
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {
   return invoke<LocalStatementAssetDto[]>("statement_assets", { input: { contestId, index } });
 }

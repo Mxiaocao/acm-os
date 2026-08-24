@@ -47,7 +47,9 @@ import {
   createPersonalNote,
   completeReview,
   confirmPersonalNoteDeleted,
+  confirmPersonalNoteDeletedById,
   deletePersonalNote,
+  deletePersonalNoteById,
   getContestDetail,
   getContestShelf,
   listContestLibraryFamilies,
@@ -67,7 +69,9 @@ import {
   getLightweightProblemDetail,
   getLightweightProblems,
   getPersonalNoteProjection,
+  getPersonalNoteProjectionById,
   getPersonalNoteRelocationCandidates,
+  getPersonalNoteRelocationCandidatesById,
   getReviewFocus,
   getReviewHelpDrawer,
   getReviewAttemptHistory,
@@ -84,8 +88,10 @@ import {
   previewDeleteContest,
   deleteContest,
   openPersonalNoteInObsidian,
+  openPersonalNoteInObsidianById,
   openOriginalOj,
   rebindPersonalNote,
+  rebindPersonalNoteById,
   revealReviewHelp,
   startOrResumeReview,
   startOrResumeReviewById,
@@ -1912,11 +1918,13 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     ? noteReadState.vaultRelativePath
     : noteReadState?.state === "locationAnomaly" || noteReadState?.state === "vaultUnavailable"
       ? noteReadState.lastKnownPath
-      : detail?.personalNote?.vaultRelativePath;
+      : (canonical ? canonicalDetail?.personalNote?.vaultRelativePath : detail?.personalNote?.vaultRelativePath);
   const refreshPersonalNote = useCallback(async () => {
     const sequence = ++noteReadSequence.current;
     try {
-      const readState = await getPersonalNoteProjection(contestId, index);
+      const readState = canonical
+        ? await getPersonalNoteProjectionById(problemId!)
+        : await getPersonalNoteProjection(contestId, index);
       if (!mounted.current || sequence !== noteReadSequence.current) return;
       setNoteReadState(readState);
       setNoteReadFailed(false);
@@ -1924,7 +1932,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       if (!mounted.current || sequence !== noteReadSequence.current) return;
       setNoteReadFailed(true);
     }
-  }, [contestId, index]);
+  }, [canonical, contestId, index, problemId]);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -1950,9 +1958,9 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
           catch { setCandidateMessage("Knowledge suggestions are temporarily unavailable."); }
         }
       }
-      if (!canonical && nextDetail.identityType === "personal") {
+      if (nextDetail.identityType === "personal") {
         await refreshPersonalNote();
-        try { setKnowledgeCandidates(await loadKnowledgeCandidates(contestId, index)); }
+        try { setKnowledgeCandidates(canonical ? await loadKnowledgeCandidatesById(problemId!) : await loadKnowledgeCandidates(contestId, index)); }
         catch { setCandidateMessage("Knowledge suggestions are temporarily unavailable."); }
       }
       if (nextDetail.statement.state !== "ready") return;
@@ -1975,7 +1983,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     };
   }, [canonical, contestId, index, problemId, refreshPersonalNote]);
   useEffect(() => {
-    if (canonical || detail?.identityType !== "personal") return;
+    if ((canonical ? canonicalDetail?.identityType : detail?.identityType) !== "personal") return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const revalidate = () => { void refreshPersonalNote(); };
@@ -1991,7 +1999,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       window.removeEventListener("focus", revalidate);
       unlisten?.();
     };
-  }, [canonical, detail?.identityType, refreshPersonalNote]);
+  }, [canonical, canonicalDetail?.identityType, detail?.identityType, refreshPersonalNote]);
   const createNote = async () => {
     if (creatingNote) return;
     setCreatingNote(true);
@@ -2020,7 +2028,8 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     setOpenNoteFailed(false);
     setCopyMessage(null);
     try {
-      await openPersonalNoteInObsidian(contestId, index);
+      if (canonical) await openPersonalNoteInObsidianById(problemId!);
+      else await openPersonalNoteInObsidian(contestId, index);
     } catch {
       setOpenNoteFailed(true);
     } finally {
@@ -2039,7 +2048,9 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
   const findRelocationCandidates = async () => {
     setRelocationMessage(null);
     try {
-      setRelocationCandidates(await getPersonalNoteRelocationCandidates(contestId, index));
+      setRelocationCandidates(canonical
+        ? await getPersonalNoteRelocationCandidatesById(problemId!)
+        : await getPersonalNoteRelocationCandidates(contestId, index));
     } catch {
       setRelocationMessage("Possible locations could not be listed. The existing binding and System Facts were not changed.");
     }
@@ -2049,7 +2060,8 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     setRepairingPath(vaultRelativePath);
     setRelocationMessage(null);
     try {
-      await rebindPersonalNote(contestId, index, vaultRelativePath);
+      if (canonical) await rebindPersonalNoteById(problemId!, vaultRelativePath);
+      else await rebindPersonalNote(contestId, index, vaultRelativePath);
       setRelocationCandidates(null);
       setRelocationMessage("The selected Markdown was revalidated and the binding was restored.");
       await refreshPersonalNote();
@@ -2067,13 +2079,16 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     setConfirmingMissingNoteDelete(true);
     setRelocationMessage(null);
     try {
-      const lifecycle = await confirmPersonalNoteDeleted(contestId, index);
+      const lifecycle = canonical
+        ? await confirmPersonalNoteDeletedById(problemId!)
+        : await confirmPersonalNoteDeleted(contestId, index);
       setDetail((current) => current ? {
         ...current,
         identityType: "lightweight",
         personalNote: null,
         lifecycle,
       } : current);
+      if (canonical) setCanonicalDetail((current) => current ? { ...current, identityType: "lightweight", personalNote: null, lifecycle } : current);
       setNoteReadState(null);
       setShowMissingNoteDeleteConfirm(false);
       setNoteMessage("The missing Personal Markdown was confirmed deleted. Historical facts were preserved.");
@@ -2110,13 +2125,16 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     setDeletingNote(true);
     setNoteMessage(null);
     try {
-      const lifecycle = await deletePersonalNote(contestId, index);
+      const lifecycle = canonical
+        ? await deletePersonalNoteById(problemId!)
+        : await deletePersonalNote(contestId, index);
       setDetail((current) => current ? {
         ...current,
         identityType: "lightweight",
         personalNote: null,
         lifecycle,
       } : current);
+      if (canonical) setCanonicalDetail((current) => current ? { ...current, identityType: "lightweight", personalNote: null, lifecycle } : current);
       setNoteReadState(null);
       setShowDeletePreview(false);
       setNoteMessage("Personal Markdown deleted. Contest and historical facts were preserved.");
@@ -2205,6 +2223,17 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         {canonicalDetail.identityType === "personal" ? <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
       </section>
       {canonicalDetail.identityType === "personal" ? <>
+        {canonicalDetail.personalNote ? <section className="content-panel" aria-labelledby="canonical-personal-note-heading">
+          <h2 id="canonical-personal-note-heading">Personal Markdown</h2>
+          <p className="safe-note"><code>{displayedNotePath}</code></p>
+          {noteReadState?.state === "ready" ? <div className="action-row"><button className="secondary-action" disabled={openingNote} onClick={() => void openInObsidian()} type="button">{openingNote ? "Opening..." : "Open in Obsidian"}</button><button className="secondary-action" onClick={() => void copyNotePath()} type="button">Copy path</button><button className="secondary-action" onClick={() => setShowDeletePreview(true)} type="button">Delete note</button></div> : null}
+          {noteReadState?.state === "locationAnomaly" ? <div className="action-row"><button className="secondary-action" onClick={() => void findRelocationCandidates()} type="button">Find note locations</button><button className="secondary-action" onClick={() => setShowMissingNoteDeleteConfirm(true)} type="button">Confirm missing note deleted</button></div> : null}
+          {relocationCandidates ? <ul>{relocationCandidates.map((candidate) => <li key={candidate.vaultRelativePath}><code>{candidate.vaultRelativePath}</code>{candidate.occupied ? " (occupied)" : ""}{!candidate.occupied ? <button className="secondary-action" disabled={repairingPath !== null} onClick={() => void confirmRelocationCandidate(candidate.vaultRelativePath)} type="button">Rebind</button> : null}</li>)}</ul> : null}
+          {showMissingNoteDeleteConfirm ? <div className="action-row"><button className="primary-action" disabled={confirmingMissingNoteDelete} onClick={() => void confirmMissingNoteDeleted()} type="button">{confirmingMissingNoteDelete ? "Confirming..." : "Confirm"}</button><button className="secondary-action" onClick={() => setShowMissingNoteDeleteConfirm(false)} type="button">Cancel</button></div> : null}
+          {openNoteFailed ? <p role="alert" className="system-caption">Obsidian could not open this note.</p> : null}
+          {noteReadFailed ? <p role="alert" className="system-caption">The bound Markdown could not be read.</p> : null}
+          {showDeletePreview ? <div className="action-row"><button className="primary-action" disabled={deletingNote} onClick={() => void confirmDeletePersonalNote()} type="button">{deletingNote ? "Deleting..." : "Confirm delete"}</button><button className="secondary-action" onClick={() => setShowDeletePreview(false)} type="button">Cancel</button></div> : null}
+        </section> : null}
         <section className="content-panel" aria-labelledby="canonical-learning-lifecycle-heading">
           <h2 id="canonical-learning-lifecycle-heading">Learning lifecycle</h2>
           <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p>
