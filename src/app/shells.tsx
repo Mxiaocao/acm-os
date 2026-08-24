@@ -23,16 +23,20 @@ import {
   confirmKnowledgeUnderstanding,
   confirmKnowledgeMarkdownDeleted,
   acceptExistingKnowledgeCandidate,
+  acceptExistingKnowledgeCandidateById,
   loadKnowledgeDetail,
   loadKnowledgeIndex,
   loadKnowledgeRelocationCandidates,
   loadKnowledgeCandidates,
+  loadKnowledgeCandidatesById,
   loadKnowledgeReevaluationSuggestion,
   openKnowledgeInObsidian,
   rebindKnowledgeNode,
   resolveKnowledgeIdentityConflict,
   setKnowledgeCandidateDisposition,
+  setKnowledgeCandidateDispositionById,
   type KnowledgeCandidateDto,
+  type CanonicalKnowledgeCandidateDto,
   type KnowledgeDetailDto,
   type KnowledgeNodeDto,
   type KnowledgeRelocationCandidateDto,
@@ -58,6 +62,8 @@ import {
   updateContestLibraryPlacement,
   removeContestLibraryPlacement,
   listContestLibraryContests,
+  getCanonicalProblemDetail,
+  getCanonicalStatementAssets,
   getLightweightProblemDetail,
   getLightweightProblems,
   getPersonalNoteProjection,
@@ -66,6 +72,7 @@ import {
   getReviewHelpDrawer,
   getReviewAttemptHistory,
   getReviewHistory,
+  getReviewHistoryById,
   getStatementAssets,
   importCodeforcesContest,
   importManualCodeforcesContest,
@@ -81,8 +88,11 @@ import {
   rebindPersonalNote,
   revealReviewHelp,
   startOrResumeReview,
+  startOrResumeReviewById,
   transitionProblemLifecycle,
+  transitionProblemLifecycleById,
   updateProblemMasteryEvidence,
+  updateProblemMasteryEvidenceById,
   voidReview,
   type CompleteReviewInputDto,
   type CompletedReviewAttemptDto,
@@ -99,6 +109,7 @@ import {
   type ContestLibraryYearFilterDto,
   type ContestLibraryScopeDto,
   type ContestLibraryArchiveFilterDto,
+  type CanonicalProblemDetailDto,
   type LightweightProblemDetailDto,
   type LightweightProblemItemDto,
   type PersonalNoteReadStateDto,
@@ -112,6 +123,7 @@ import {
   type ReviewHelpLevel,
   type ReviewHistoryDto,
   type ReviewHistoryItemDto,
+  type CanonicalReviewHistoryDto,
   type ReviewFailureReasonCodeDto,
   type SubmissionResultDto,
 } from "../ipc/contest";
@@ -382,6 +394,8 @@ export function NormalAppShell({
           <ContestDetail contestId={route.contestId} navigate={navigate} />
         ) : route.kind === "problemDetail" ? (
           <ProblemDetail contestId={route.contestId} index={route.index} navigate={navigate} />
+        ) : route.kind === "canonicalProblemDetail" ? (
+          <ProblemDetail problemId={route.problemId} navigate={navigate} />
         ) : (
           <NotFoundContent pathname={route.pathname} navigate={navigate} />
         )}
@@ -1862,9 +1876,13 @@ const contestUpsolveOptions: Array<[ContestUpsolveDecisionDto, string]> = [["und
 function contestFactsErrorMessage(error: unknown): string { const code = String(error); if (code.includes("contest_import_incomplete")) return "全部题面导入完整后才能完成赛后整理。"; if (code.includes("contest_date_missing")) return "比赛日期缺失，暂时不能形成正式快照。"; if (code.includes("contest_problem_set_mismatch")) return "题目列表发生变化，请重新加载后再试。"; if (code.includes("contest_facts_already_completed")) return "赛后事实快照已经完成；后续修改必须通过纠错事件。"; return "赛后事实未保存，本地已有历史保持不变。"; }
 function contestCorrectionErrorMessage(error: unknown): string { const code = String(error); if (code.includes("contest_correction_no_change")) return "没有需要保存的事实变化。"; if (code.includes("contest_facts_not_completed")) return "完成赛后整理后才能记录纠错。"; return "纠错未保存，现有比赛事实保持不变。"; }
 
-function ProblemDetail({ contestId, index, navigate }: { contestId: number; index: string; navigate: Navigate }) {
+type ProblemKnowledgeCandidate = KnowledgeCandidateDto | CanonicalKnowledgeCandidateDto;
+
+function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { contestId?: number; index?: string; problemId?: string; navigate: Navigate }) {
+  const canonical = problemId !== undefined;
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [detail, setDetail] = useState<LightweightProblemDetailDto | null>(null);
+  const [canonicalDetail, setCanonicalDetail] = useState<CanonicalProblemDetailDto | null>(null);
   const [renderedHtml, setRenderedHtml] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [creatingNote, setCreatingNote] = useState(false);
@@ -1885,7 +1903,7 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
   const [deletingNote, setDeletingNote] = useState(false);
   const [startingReview, setStartingReview] = useState(false);
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
-  const [knowledgeCandidates, setKnowledgeCandidates] = useState<KnowledgeCandidateDto[]>([]);
+  const [knowledgeCandidates, setKnowledgeCandidates] = useState<ProblemKnowledgeCandidate[]>([]);
   const [candidateMessage, setCandidateMessage] = useState<string | null>(null);
   const [busyCandidate, setBusyCandidate] = useState<string | null>(null);
   const noteReadSequence = useRef(0);
@@ -1916,16 +1934,31 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     const objectUrls: string[] = [];
     setNoteReadState(null);
     setNoteReadFailed(false);
-    getLightweightProblemDetail(contestId, index).then(async (nextDetail) => {
+    const detailRequest = canonical
+      ? getCanonicalProblemDetail(problemId!)
+      : getLightweightProblemDetail(contestId, index);
+    detailRequest.then(async (nextDetail) => {
       if (!active) return;
-      setDetail(nextDetail);
+      if (canonical) {
+        setCanonicalDetail(nextDetail as CanonicalProblemDetailDto);
+      } else {
+        setDetail(nextDetail as LightweightProblemDetailDto);
+      }
       if (nextDetail.identityType === "personal") {
+        if (canonical) {
+          try { setKnowledgeCandidates(await loadKnowledgeCandidatesById(problemId!)); }
+          catch { setCandidateMessage("Knowledge suggestions are temporarily unavailable."); }
+        }
+      }
+      if (!canonical && nextDetail.identityType === "personal") {
         await refreshPersonalNote();
         try { setKnowledgeCandidates(await loadKnowledgeCandidates(contestId, index)); }
         catch { setCandidateMessage("Knowledge suggestions are temporarily unavailable."); }
       }
       if (nextDetail.statement.state !== "ready") return;
-      const assets = await getStatementAssets(contestId, index);
+      const assets = canonical
+        ? await getCanonicalStatementAssets(problemId!)
+        : await getStatementAssets(contestId, index);
       if (!active) return;
       const assetUrls = new Map<string, string>();
       for (const asset of assets) {
@@ -1940,9 +1973,9 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       noteReadSequence.current += 1;
       for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
     };
-  }, [contestId, index, refreshPersonalNote]);
+  }, [canonical, contestId, index, problemId, refreshPersonalNote]);
   useEffect(() => {
-    if (detail?.identityType !== "personal") return;
+    if (canonical || detail?.identityType !== "personal") return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const revalidate = () => { void refreshPersonalNote(); };
@@ -1958,7 +1991,7 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       window.removeEventListener("focus", revalidate);
       unlisten?.();
     };
-  }, [detail?.identityType, refreshPersonalNote]);
+  }, [canonical, detail?.identityType, refreshPersonalNote]);
   const createNote = async () => {
     if (creatingNote) return;
     setCreatingNote(true);
@@ -2060,8 +2093,11 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     setLifecycleAction(action);
     setLifecycleMessage(null);
     try {
-      const lifecycle = await transitionProblemLifecycle(contestId, index, action);
-      setDetail((current) => current ? { ...current, lifecycle } : current);
+      const lifecycle = canonical
+        ? await transitionProblemLifecycleById(problemId!, action)
+        : await transitionProblemLifecycle(contestId, index, action);
+      if (canonical) setCanonicalDetail((current) => current ? { ...current, lifecycle } : current);
+      else setDetail((current) => current ? { ...current, lifecycle } : current);
       setLifecycleMessage("Learning status updated and persisted.");
     } catch {
       setLifecycleMessage("Learning status could not be changed. The previous state was preserved.");
@@ -2099,7 +2135,9 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     setStartingReview(true);
     setReviewMessage(null);
     try {
-      const attempt = await startOrResumeReview(contestId, index);
+      const attempt = canonical
+        ? await startOrResumeReviewById(problemId!)
+        : await startOrResumeReview(contestId, index);
       navigate(`/review/${attempt.attemptId}`);
     } catch {
       setReviewMessage("Review could not be started. The learning state and schedule were preserved.");
@@ -2107,12 +2145,14 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setStartingReview(false);
     }
   };
-  const updateCandidate = async (candidate: KnowledgeCandidateDto, disposition: KnowledgeCandidateDto["disposition"]) => {
+  const updateCandidate = async (candidate: ProblemKnowledgeCandidate, disposition: ProblemKnowledgeCandidate["disposition"]) => {
     if (busyCandidate) return;
     setBusyCandidate(candidate.fingerprint);
     setCandidateMessage(null);
     try {
-      const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, disposition);
+      const updated = canonical
+        ? await setKnowledgeCandidateDispositionById(problemId!, candidate.fingerprint, disposition)
+        : await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, disposition);
       setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? updated : item));
       setCandidateMessage(disposition === "ignored"
           ? "已忽略建议，没有修改 Markdown 或关系。"
@@ -2121,16 +2161,17 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setCandidateMessage("The suggestion state could not be changed.");
     } finally { setBusyCandidate(null); }
   };
-  const acceptCandidate = async (candidate: KnowledgeCandidateDto) => {
+  const acceptCandidate = async (candidate: ProblemKnowledgeCandidate) => {
     if (busyCandidate || !candidate.knowledgeNodeId) return;
     setBusyCandidate(candidate.fingerprint);
     setCandidateMessage(null);
     try {
-      await acceptExistingKnowledgeCandidate(contestId, index, candidate.fingerprint, candidate.knowledgeNodeId);
+      if (canonical) await acceptExistingKnowledgeCandidateById(problemId!, candidate.fingerprint, candidate.knowledgeNodeId);
+      else await acceptExistingKnowledgeCandidate(contestId, index, candidate.fingerprint, candidate.knowledgeNodeId);
       setCandidateMessage("Knowledge link was written to current Markdown, re-read, and verified as a formal relation.");
       try {
-        setKnowledgeCandidates(await loadKnowledgeCandidates(contestId, index));
-        await refreshPersonalNote();
+        setKnowledgeCandidates(canonical ? await loadKnowledgeCandidatesById(problemId!) : await loadKnowledgeCandidates(contestId, index));
+        if (!canonical) await refreshPersonalNote();
       } catch {
         setKnowledgeCandidates((current) => current.filter((item) => item.fingerprint !== candidate.fingerprint));
       }
@@ -2138,12 +2179,14 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
       setCandidateMessage("The current Markdown could not be safely patched. No formal relation was accepted.");
     } finally { setBusyCandidate(null); }
   };
-  const acceptCandidateIntent = async (candidate: KnowledgeCandidateDto) => {
+  const acceptCandidateIntent = async (candidate: ProblemKnowledgeCandidate) => {
     if (busyCandidate || candidate.knowledgeNodeId || candidate.disposition !== "pending") return;
     setBusyCandidate(candidate.fingerprint);
     setCandidateMessage(null);
     try {
-      const updated = await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, "acceptedIntent");
+      const updated = canonical
+        ? await setKnowledgeCandidateDispositionById(problemId!, candidate.fingerprint, "acceptedIntent")
+        : await setKnowledgeCandidateDisposition(contestId, index, candidate.fingerprint, "acceptedIntent");
       setKnowledgeCandidates((current) => current.map((item) => item.fingerprint === updated.fingerprint ? { ...item, ...updated } : item));
       setCandidateMessage("仅保存意图，没有创建 Markdown、知识节点或正式关系。");
     } catch {
@@ -2151,6 +2194,34 @@ function ProblemDetail({ contestId, index, navigate }: { contestId: number; inde
     } finally { setBusyCandidate(null); }
   };
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>Problem is unavailable</h1><p>The local problem detail could not be read. No import data was changed.</p></section>;
+  if (canonical) {
+    if (!canonicalDetail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
+    return <>
+      <PageHeader eyebrow="M1 canonical Problem" headingRef={headingRef} title={displayProblemTitle("", canonicalDetail.title)} />
+      <section className="content-panel">
+        <p>{canonicalDetail.rating ? `Rating ${canonicalDetail.rating}` : ""} · {canonicalDetail.identityType === "personal" ? "Personal Problem" : "Lightweight Problem"}</p>
+        <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">Open original problem</a>
+        {canonicalDetail.personalNote ? <p className="safe-note">Personal Markdown: <code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
+        {canonicalDetail.identityType === "personal" ? <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
+      </section>
+      {canonicalDetail.identityType === "personal" ? <>
+        <section className="content-panel" aria-labelledby="canonical-learning-lifecycle-heading">
+          <h2 id="canonical-learning-lifecycle-heading">Learning lifecycle</h2>
+          <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p>
+          <div className="action-row">{canonicalDetail.lifecycle.availableActions.map((action) => <button className="secondary-action" disabled={lifecycleAction !== null} key={action} onClick={() => void runLifecycleAction(action)} type="button">{lifecycleAction === action ? "Updating…" : lifecycleActionLabel(action)}</button>)}{canonicalDetail.reviewAction ? <button className="primary-action" disabled={startingReview} onClick={() => void beginReview()} type="button">{startingReview ? "Opening Review…" : canonicalDetail.reviewAction === "earlyCheck" ? "Start early check" : canonicalDetail.reviewAction === "continueReview" ? "Continue Review" : "Start Review"}</button> : null}</div>
+          {lifecycleMessage ? <p aria-live="polite" className="system-caption">{lifecycleMessage}</p> : null}
+          {reviewMessage ? <p aria-live="polite" className="system-caption">{reviewMessage}</p> : null}
+        </section>
+        <section className="content-panel knowledge-candidates" aria-labelledby="canonical-knowledge-candidates-heading">
+          <h2 id="canonical-knowledge-candidates-heading">Prerequisite knowledge suggestions</h2>
+          {knowledgeCandidates.length === 0 ? <p className="safe-note">No current suggestions.</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">Accept existing knowledge</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">Save intent</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">Ignore</button> : null}</div></li>)}</ul>}
+          {candidateMessage ? <p aria-live="polite" className="safe-note">{candidateMessage}</p> : null}
+        </section>
+        <ProblemReviewHistory problemId={problemId} learningStatus={canonicalDetail.lifecycle.learningStatus} />
+      </> : null}
+      {canonicalDetail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement...</p></section> : <section className="content-panel statement-view"><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
+    </>;
+  }
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>Loading problem</h1><p>Reading the local statement snapshot...</p></section>;
   return <>
       <PageHeader eyebrow="M1 · 本地题面快照" headingRef={headingRef} title={detail.index + ". " + displayProblemTitle(detail.index, detail.title)} />
@@ -2391,12 +2462,13 @@ const masteryEvidenceLabels: ReadonlyArray<readonly [keyof ProblemMasteryEvidenc
   ["transferSolvedIndependently", "我能独立解决相关迁移题"],
 ];
 
-function ProblemReviewHistory({ contestId, index, learningStatus }: {
-  contestId: number;
-  index: string;
+function ProblemReviewHistory({ contestId = 0, index = "", problemId, learningStatus }: {
+  contestId?: number;
+  index?: string;
+  problemId?: string;
   learningStatus: LightweightProblemDetailDto["lifecycle"]["learningStatus"];
 }) {
-  const [history, setHistory] = useState<ReviewHistoryDto | null>(null);
+  const [history, setHistory] = useState<ReviewHistoryDto | CanonicalReviewHistoryDto | null>(null);
   const [masteryDraft, setMasteryDraft] = useState<ProblemMasteryEvidenceDto>(emptyMasteryEvidence);
   const [loading, setLoading] = useState(false);
   const [savingMastery, setSavingMastery] = useState(false);
@@ -2404,7 +2476,7 @@ function ProblemReviewHistory({ contestId, index, learningStatus }: {
   const load = () => {
     setLoading(true);
     setError(false);
-    getReviewHistory(contestId, index)
+    (problemId ? getReviewHistoryById(problemId) : getReviewHistory(contestId, index))
       .then((next) => {
         setHistory(next);
         setMasteryDraft(next.mastery?.current ?? emptyMasteryEvidence);
@@ -2416,7 +2488,7 @@ function ProblemReviewHistory({ contestId, index, learningStatus }: {
     if (!history) return;
     setSavingMastery(true);
     setError(false);
-    updateProblemMasteryEvidence(contestId, index, masteryDraft)
+    (problemId ? updateProblemMasteryEvidenceById(problemId, masteryDraft) : updateProblemMasteryEvidence(contestId, index, masteryDraft))
       .then((mastery) => setHistory({ ...history, mastery }))
       .catch(() => setError(true))
       .finally(() => setSavingMastery(false));

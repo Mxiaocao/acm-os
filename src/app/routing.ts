@@ -4,6 +4,7 @@ export type AppRoute =
   | { kind: "normal"; page: NormalPage }
   | { kind: "contestDetail"; contestId: number }
   | { kind: "problemDetail"; contestId: number; index: string }
+  | { kind: "canonicalProblemDetail"; problemId: string }
   | { kind: "review"; attemptId: string }
   | { kind: "notFound"; pathname: string };
 
@@ -33,6 +34,10 @@ export function parseAppRoute(pathname: string): AppRoute {
   const problemMatch = /^\/problems\/([1-9][0-9]*)\/([A-Z][0-9]?)$/.exec(normalized);
   if (problemMatch) {
     return { kind: "problemDetail", contestId: Number(problemMatch[1]), index: problemMatch[2] };
+  }
+  const canonicalProblemMatch = /^\/problems\/id\/([1-9][0-9]*)$/.exec(normalized);
+  if (canonicalProblemMatch) {
+    return { kind: "canonicalProblemDetail", problemId: canonicalProblemMatch[1] };
   }
 
   const reviewMatch = /^\/review\/([^/]+)$/.exec(normalized);

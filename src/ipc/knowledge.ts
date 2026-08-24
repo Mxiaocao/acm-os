@@ -62,6 +62,13 @@ export interface KnowledgeCandidateDto {
   disposition: KnowledgeCandidateDisposition;
   knowledgeNodeId: string | null;
 }
+export interface CanonicalKnowledgeCandidateDto {
+  problemId: string;
+  fingerprint: string;
+  targetRef: string;
+  disposition: KnowledgeCandidateDisposition;
+  knowledgeNodeId: string | null;
+}
 
 export const loadKnowledgeIndex = (query = "") =>
   invoke<KnowledgeIndexDto>("knowledge_index", { input: { query } });
@@ -97,6 +104,9 @@ export const openKnowledgeInObsidian = (knowledgeNodeId: string) =>
 export const loadKnowledgeCandidates = (contestId: number, index: string) =>
   invoke<KnowledgeCandidateDto[]>("knowledge_candidates", { input: { contestId, index } });
 
+export const loadKnowledgeCandidatesById = (problemId: string) =>
+  invoke<CanonicalKnowledgeCandidateDto[]>("knowledge_candidates_by_id", { input: { problemId } });
+
 export const registerKnowledgeCandidate = (
   contestId: number,
   index: string,
@@ -115,6 +125,14 @@ export const setKnowledgeCandidateDisposition = (
   input: { contestId, index, fingerprint, disposition },
 });
 
+export const setKnowledgeCandidateDispositionById = (
+  problemId: string,
+  fingerprint: string,
+  disposition: KnowledgeCandidateDisposition,
+) => invoke<CanonicalKnowledgeCandidateDto>("set_knowledge_candidate_disposition_by_id", {
+  input: { problemId, fingerprint, disposition },
+});
+
 export const acceptExistingKnowledgeCandidate = (
   contestId: number,
   index: string,
@@ -122,4 +140,12 @@ export const acceptExistingKnowledgeCandidate = (
   knowledgeNodeId: string,
 ) => invoke<{ knowledgeNodeId: string; targetRef: string }>("accept_existing_knowledge_candidate", {
   input: { contestId, index, fingerprint, knowledgeNodeId },
+});
+
+export const acceptExistingKnowledgeCandidateById = (
+  problemId: string,
+  fingerprint: string,
+  knowledgeNodeId: string,
+) => invoke<{ knowledgeNodeId: string; targetRef: string }>("accept_existing_knowledge_candidate_by_id", {
+  input: { problemId, fingerprint, knowledgeNodeId },
 });

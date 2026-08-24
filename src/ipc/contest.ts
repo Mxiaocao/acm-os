@@ -110,6 +110,18 @@ export interface LightweightProblemDetailDto {
   reviewAction: "startReview" | "earlyCheck" | "continueReview" | null;
 }
 
+export interface CanonicalProblemDetailDto {
+  problemId: string;
+  title: string;
+  rating: number | null;
+  sourceUrl: string;
+  statement: StatementReadStateDto;
+  identityType: "lightweight" | "personal";
+  personalNote: PersonalNoteBindingDto | null;
+  lifecycle: ProblemLifecycleStateDto;
+  reviewAction: "startReview" | "earlyCheck" | "continueReview" | null;
+}
+
 export type LearningStatusDto =
   | "unstarted"
   | "upsolvePending"
@@ -335,6 +347,22 @@ export function getContestShelf(): Promise<ContestShelfItemDto[]> {
   return invoke<ContestShelfItemDto[]>("contest_shelf");
 }
 
+export interface CanonicalReviewHistoryDto {
+  problemId: string;
+  historicalBestReview: ReviewJudgementDto | null;
+  mastery: ProblemMasteryProjectionDto;
+  attempts: Array<Omit<ReviewHistoryItemDto, "attempt"> & { attempt: CanonicalReviewAttemptDto }>;
+}
+export interface CanonicalReviewAttemptDto {
+  attemptId: string;
+  problemId: string;
+  attemptType: "firstColdStart" | "longTermReview" | "earlyCheck";
+  scheduledDueLocalDate: string;
+  startedEarly: boolean;
+  judgementRuleVersion: number;
+  startedAtUtc: string;
+}
+
 export function listContestLibraryFamilies(): Promise<ContestLibraryFamilyDto[]> {
   return invoke<ContestLibraryFamilyDto[]>("contest_library_list_families");
 }
@@ -456,6 +484,10 @@ export function getLightweightProblemDetail(contestId: number, index: string): P
   return invoke<LightweightProblemDetailDto>("lightweight_problem_detail", { input: { contestId, index } });
 }
 
+export function getCanonicalProblemDetail(problemId: string): Promise<CanonicalProblemDetailDto> {
+  return invoke<CanonicalProblemDetailDto>("lightweight_problem_detail_by_id", { input: { problemId } });
+}
+
 export function createPersonalNote(contestId: number, index: string): Promise<PersonalNoteBindingDto> {
   return invoke<PersonalNoteBindingDto>("create_personal_note", { input: { contestId, index } });
 }
@@ -470,8 +502,16 @@ export function transitionProblemLifecycle(
   });
 }
 
+export function transitionProblemLifecycleById(problemId: string, action: ProblemLifecycleActionDto): Promise<ProblemLifecycleStateDto> {
+  return invoke<ProblemLifecycleStateDto>("transition_problem_lifecycle_by_id", { input: { problemId, action } });
+}
+
 export function startOrResumeReview(contestId: number, index: string): Promise<ReviewAttemptDto> {
   return invoke<ReviewAttemptDto>("start_or_resume_review", { input: { contestId, index } });
+}
+
+export function startOrResumeReviewById(problemId: string): Promise<CanonicalReviewAttemptDto> {
+  return invoke<CanonicalReviewAttemptDto>("start_or_resume_review_by_id", { input: { problemId } });
 }
 
 export function getReviewFocus(attemptId: string): Promise<ReviewFocusDto> {
@@ -508,6 +548,10 @@ export function getReviewHistory(contestId: number, index: string): Promise<Revi
   return invoke<ReviewHistoryDto>("review_history", { input: { contestId, index } });
 }
 
+export function getReviewHistoryById(problemId: string): Promise<CanonicalReviewHistoryDto> {
+  return invoke<CanonicalReviewHistoryDto>("review_history_by_id", { input: { problemId } });
+}
+
 export function updateProblemMasteryEvidence(
   contestId: number,
   index: string,
@@ -516,6 +560,10 @@ export function updateProblemMasteryEvidence(
   return invoke<ProblemMasteryProjectionDto>("update_problem_mastery_evidence", {
     input: { contestId, index, evidence },
   });
+}
+
+export function updateProblemMasteryEvidenceById(problemId: string, evidence: ProblemMasteryEvidenceDto): Promise<ProblemMasteryProjectionDto> {
+  return invoke<ProblemMasteryProjectionDto>("update_problem_mastery_evidence_by_id", { input: { problemId, evidence } });
 }
 
 export function deletePersonalNote(contestId: number, index: string): Promise<ProblemLifecycleStateDto> {
@@ -566,4 +614,8 @@ export function openOriginalOj(url: string): Promise<void> {
 
 export function getStatementAssets(contestId: number, index: string): Promise<LocalStatementAssetDto[]> {
   return invoke<LocalStatementAssetDto[]>("statement_assets", { input: { contestId, index } });
+}
+
+export function getCanonicalStatementAssets(problemId: string): Promise<LocalStatementAssetDto[]> {
+  return invoke<LocalStatementAssetDto[]>("statement_assets_by_id", { input: { problemId } });
 }

@@ -113,10 +113,10 @@ export function App() {
   }
   return (
     <>
-      <RouteAnnouncement message={route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" ? "Problem statement" : "Page not found"} />
+      <RouteAnnouncement message={route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found"} />
       <NormalAppShell
         foundation={foundation}
-        key={route.kind === "normal" ? route.page : route.kind === "contestDetail" ? `contest-${route.contestId}` : route.kind === "problemDetail" ? `${route.contestId}-${route.index}` : route.pathname}
+        key={route.kind === "normal" ? route.page : route.kind === "contestDetail" ? `contest-${route.contestId}` : route.kind === "problemDetail" ? `${route.contestId}-${route.index}` : route.kind === "canonicalProblemDetail" ? `problem-id-${route.problemId}` : route.pathname}
         navigate={navigate}
         route={route}
         workspace={shell.workspace}
@@ -139,7 +139,7 @@ function routeAnnouncement(
   if (shell.state === "setup") return "Connect your workspace";
   const route = parseAppRoute(pathname);
   if (route.kind === "review") return "Review focus";
-  return route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" ? "Problem statement" : "Page not found";
+  return route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found";
 }
 
 function normalPageLabel(page: "today" | "contests" | "problems" | "knowledge" | "settings"): string {

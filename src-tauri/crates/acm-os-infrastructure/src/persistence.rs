@@ -7,8 +7,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acm_os_application::{
-    AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CompletedReviewAttempt,
-    ContestAiAnalysis, ContestAiAnalysisError, ContestAiAnalysisPort, ContestAiAnalysisPreview,
+    AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CanonicalProblemDetail,
+    CompletedReviewAttempt, ContestAiAnalysis, ContestAiAnalysisError, ContestAiAnalysisPort,
+    ContestAiAnalysisPreview,
     ContestAiParseStatus, ContestCorrectionError, ContestCorrectionEvent, ContestCorrectionField,
     ContestCorrectionPort, ContestDeletePreview, ContestDetail, ContestFactsError,
     ContestFactsPort, ContestFactsStatus, ContestFamily, ContestFinalResult, ContestImportDraft,
@@ -1564,6 +1565,78 @@ impl KnowledgeCandidatePort for DatabaseRuntime {
             target_ref,
         })
     }
+
+    async fn list_knowledge_candidates_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<Vec<acm_os_application::CanonicalKnowledgeCandidateReadProjection>, KnowledgeCandidateError> {
+        let pool = self._pool.as_ref().ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let identity_type: String = sqlx::query_scalar("SELECT identity_type FROM problems WHERE id = ?1")
+            .bind(problem_id).fetch_optional(pool).await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+            .ok_or(KnowledgeCandidateError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(KnowledgeCandidateError::NotPersonal); }
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT c.fingerprint, c.target_ref, c.disposition FROM knowledge_candidate_records c \
+             WHERE c.problem_id = ?1 AND NOT EXISTS (SELECT 1 FROM knowledge_link_index l \
+               WHERE l.source_kind = 'problem' AND l.source_id = CAST(c.problem_id AS TEXT) \
+               AND l.target_ref = c.target_ref AND l.resolution = 'resolved') ORDER BY c.fingerprint",
+        ).bind(problem_id).fetch_all(pool).await.map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        rows.into_iter().map(|(fingerprint,target_ref,disposition)| Ok(acm_os_application::CanonicalKnowledgeCandidateReadProjection {
+            problem_id: problem_id.to_string(), fingerprint, target_ref, disposition: parse_candidate_disposition(&disposition)?
+        })).collect()
+    }
+
+    async fn set_knowledge_candidate_disposition_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        disposition: KnowledgeCandidateDisposition,
+    ) -> Result<acm_os_application::CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError> {
+        let pool = self._pool.as_ref().ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let identity_type: String = sqlx::query_scalar("SELECT identity_type FROM problems WHERE id = ?1")
+            .bind(problem_id).fetch_optional(pool).await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+            .ok_or(KnowledgeCandidateError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(KnowledgeCandidateError::NotPersonal); }
+        let local_date = crate::current_local_date().map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        let changed = sqlx::query("UPDATE knowledge_candidate_records SET disposition = ?1, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?2 AND fingerprint = ?3")
+            .bind(candidate_disposition_value(disposition)).bind(problem_id).bind(fingerprint).execute(pool).await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        if changed.rows_affected() == 0 { return Err(KnowledgeCandidateError::CandidateNotFound); }
+        let row: (String,String,String) = sqlx::query_as("SELECT fingerprint,target_ref,disposition FROM knowledge_candidate_records WHERE problem_id = ?1 AND fingerprint = ?2")
+            .bind(problem_id).bind(fingerprint).fetch_one(pool).await.map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        Ok(acm_os_application::CanonicalKnowledgeCandidateReadProjection { problem_id: problem_id.to_string(), fingerprint: row.0, target_ref: row.1, disposition: parse_candidate_disposition(&row.2)? })
+    }
+
+    async fn accept_existing_knowledge_candidate_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        knowledge_node_id: &str,
+    ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
+        let pool = self._pool.as_ref().ok_or(KnowledgeCandidateError::PersistenceUnavailable)?;
+        let identity_type: String = sqlx::query_scalar("SELECT identity_type FROM problems WHERE id = ?1")
+            .bind(problem_id).fetch_optional(pool).await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?
+            .ok_or(KnowledgeCandidateError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(KnowledgeCandidateError::NotPersonal); }
+        let (_candidate_fingerprint, target_ref, disposition) = load_candidate_content(pool, problem_id, fingerprint).await?;
+        if disposition == KnowledgeCandidateDisposition::Ignored { return Err(KnowledgeCandidateError::IntegrityViolation); }
+        let index = self.rebuild_knowledge_index().await.map_err(map_knowledge_to_candidate_error)?;
+        let matches = index.nodes.iter().filter(|node| candidate_target_matches(&target_ref, node)).collect::<Vec<_>>();
+        let [target] = matches.as_slice() else { return Err(KnowledgeCandidateError::IntegrityViolation); };
+        if target.knowledge_node_id != knowledge_node_id { return Err(KnowledgeCandidateError::IntegrityViolation); }
+        acm_os_application::add_prerequisite_link_by_id(self, problem_id, target_ref.clone())
+            .await.map_err(map_patch_to_candidate_error)?;
+        self.rebuild_knowledge_relations().await.map_err(map_knowledge_to_candidate_error)?;
+        let verified: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_link_index WHERE source_kind = 'problem' AND source_id = ?1 AND target_knowledge_node_id = ?2 AND resolution = 'resolved'")
+            .bind(problem_id.to_string()).bind(knowledge_node_id).fetch_one(pool).await
+            .map_err(|_| KnowledgeCandidateError::PersistenceUnavailable)?;
+        if verified != 1 { return Err(KnowledgeCandidateError::IntegrityViolation); }
+        Ok(AcceptedKnowledgeCandidateProjection { knowledge_node_id: knowledge_node_id.to_owned(), target_ref })
+    }
 }
 
 fn candidate_target_matches(target_ref: &str, node: &KnowledgeNodeProjection) -> bool {
@@ -1791,10 +1864,10 @@ fn resolved_binding(resolved: &ResolvedNoteFile) -> PersonalNoteBinding {
     }
 }
 
-impl ProblemLifecyclePort for DatabaseRuntime {
-    async fn load_problem_lifecycle(
+impl DatabaseRuntime {
+    async fn load_problem_lifecycle_by_id(
         &self,
-        problem: &acm_os_domain::ProblemIdentity,
+        problem_id: i64,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
         let row: Option<(
             String,
@@ -1807,17 +1880,12 @@ impl ProblemLifecyclePort for DatabaseRuntime {
         )> = sqlx::query_as(
             "SELECT p.identity_type, pls.learning_status, pls.learning_status_since_utc, \
                     rc.cycle_number, rc.stage, rc.schedule_rule_version, rc.next_due_local_date \
-             FROM problems p JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id \
+             FROM problems p \
              LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
              LEFT JOIN review_cycles rc ON rc.problem_id = p.id AND rc.cycle_status = 'active' \
-             WHERE identities.platform = ?1 \
-               AND identities.external_contest_key = ?2 \
-               AND identities.external_problem_key = ?3",
+             WHERE p.id = ?1",
         )
-        .bind(problem.contest().platform().as_str())
-        .bind(problem.contest().external_contest_key().as_str())
-        .bind(problem.external_problem_key())
+        .bind(problem_id)
         .fetch_optional(
             self._pool
                 .as_ref()
@@ -1864,10 +1932,78 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             active_review_cycle,
         })
     }
+}
+
+impl ProblemLifecyclePort for DatabaseRuntime {
+    async fn load_problem_lifecycle(
+        &self,
+        problem: &acm_os_domain::ProblemIdentity,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        let problem_id: Option<i64> = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = ?1 AND external_contest_key = ?2 AND external_problem_key = ?3",
+        )
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
+        .fetch_optional(
+            self._pool
+                .as_ref()
+                .ok_or(ProblemLifecycleError::PersistenceUnavailable)?,
+        )
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        self.load_problem_lifecycle_by_id(problem_id.ok_or(ProblemLifecycleError::ProblemNotFound)?)
+            .await
+    }
 
     async fn commit_problem_lifecycle_decision(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
+        decision: acm_os_domain::ProblemLifecycleDecision,
+        first_due: Option<acm_os_domain::LocalDate>,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        use acm_os_domain::ReviewCycleDirective::StartFirstColdStart;
+
+        if (decision.review_cycle == StartFirstColdStart) != first_due.is_some() {
+            return Err(ProblemLifecycleError::IntegrityViolation);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemLifecycleError::PersistenceUnavailable)?;
+        {
+            let mut connection = pool
+                .acquire()
+                .await
+                .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+            validate_problem_lifecycle_decision_state(&mut connection, problem, decision).await?;
+        }
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = ?1 AND external_contest_key = ?2 AND external_problem_key = ?3",
+        )
+        .bind(problem.contest().platform().as_str())
+        .bind(problem.contest().external_contest_key().as_str())
+        .bind(problem.external_problem_key())
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?
+        .ok_or(ProblemLifecycleError::ProblemNotFound)?;
+        self.commit_problem_lifecycle_decision_by_id(problem_id, decision, first_due)
+            .await
+    }
+
+    async fn load_problem_lifecycle_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+        DatabaseRuntime::load_problem_lifecycle_by_id(self, problem_id).await
+    }
+
+    async fn commit_problem_lifecycle_decision_by_id(
+        &self,
+        problem_id: i64,
         decision: acm_os_domain::ProblemLifecycleDecision,
         first_due: Option<acm_os_domain::LocalDate>,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
@@ -1885,7 +2021,8 @@ impl ProblemLifecyclePort for DatabaseRuntime {
                 .acquire()
                 .await
                 .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-            validate_problem_lifecycle_decision_state(&mut connection, problem, decision).await?;
+            validate_problem_lifecycle_decision_state_by_id(&mut connection, problem_id, decision)
+                .await?;
         }
         let local_date = crate::current_local_date()
             .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
@@ -1897,8 +2034,7 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             .begin()
             .await
             .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-        let problem_id =
-            validate_problem_lifecycle_decision_state(&mut transaction, problem, decision).await?;
+        validate_problem_lifecycle_decision_state_by_id(&mut transaction, problem_id, decision).await?;
 
         match decision.review_cycle {
             StartFirstColdStart => {
@@ -1968,7 +2104,7 @@ impl ProblemLifecyclePort for DatabaseRuntime {
             .commit()
             .await
             .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
-        self.load_problem_lifecycle(problem).await
+        self.load_problem_lifecycle_by_id(problem_id).await
     }
 }
 
@@ -1992,18 +2128,32 @@ async fn validate_problem_lifecycle_decision_state(
     problem: &acm_os_domain::ProblemIdentity,
     decision: acm_os_domain::ProblemLifecycleDecision,
 ) -> Result<i64, ProblemLifecycleError> {
-    let row: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT p.id, p.identity_type, pls.learning_status \
-         FROM problems p JOIN problem_external_identities identities \
-           ON identities.problem_id = p.id \
-         LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
-         WHERE identities.platform = ?1 \
-           AND identities.external_contest_key = ?2 \
-           AND identities.external_problem_key = ?3",
+    let problem_id: i64 = sqlx::query_scalar(
+        "SELECT problem_id FROM problem_external_identities \
+         WHERE platform = ?1 AND external_contest_key = ?2 AND external_problem_key = ?3",
     )
     .bind(problem.contest().platform().as_str())
     .bind(problem.contest().external_contest_key().as_str())
     .bind(problem.external_problem_key())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?
+    .ok_or(ProblemLifecycleError::ProblemNotFound)?;
+    validate_problem_lifecycle_decision_state_by_id(connection, problem_id, decision).await
+}
+
+async fn validate_problem_lifecycle_decision_state_by_id(
+    connection: &mut sqlx::SqliteConnection,
+    problem_id: i64,
+    decision: acm_os_domain::ProblemLifecycleDecision,
+) -> Result<i64, ProblemLifecycleError> {
+    let row: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT p.id, p.identity_type, pls.learning_status \
+         FROM problems p \
+         LEFT JOIN problem_learning_states pls ON pls.problem_id = p.id \
+         WHERE p.id = ?1",
+    )
+    .bind(problem_id)
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
@@ -4736,6 +4886,111 @@ impl ReviewAttemptPort for DatabaseRuntime {
         }
         load_problem_mastery_projection(pool, problem).await
     }
+
+    async fn create_or_resume_review_attempt_by_id(
+        &self,
+        problem_id: i64,
+        eligibility: acm_os_domain::ReviewEligibilityDecision,
+    ) -> Result<acm_os_application::CanonicalReviewAttempt, ReviewAttemptError> {
+        let pool = self._pool.as_ref().ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let existing: Option<(String,String,String,String,i64,i64,String)> = sqlx::query_as(
+            "SELECT id, attempt_type, scheduled_due_local_date, started_at_utc, started_early, judgement_rule_version, attempt_status FROM review_attempts WHERE problem_id = ?1 AND attempt_status = 'in_progress'",
+        ).bind(problem_id).fetch_optional(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if let Some((attempt_id, attempt_type, due, started_at, started_early, rule_version, _)) = existing {
+            return Ok(canonical_review_attempt_from_row(problem_id, attempt_id, attempt_type, due, started_early != 0, rule_version, started_at)?);
+        }
+        let mut connection = pool.acquire().await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        validate_review_attempt_creation_state_by_id(&mut connection, problem_id, eligibility).await?;
+        drop(connection);
+        let local_date = crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let attempt_type = review_attempt_type_value(eligibility.attempt_type);
+        let started_at: String = sqlx::query_scalar(
+            "INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, scheduled_due_local_date, started_early, judgement_rule_version) \
+             SELECT ?1, ?2, id, ?3, ?4, ?5, ?6 FROM review_cycles WHERE problem_id = ?2 AND cycle_status = 'active' RETURNING started_at_utc",
+        ).bind(&attempt_id).bind(problem_id).bind(attempt_type).bind(eligibility.scheduled_due_local_date.to_iso_string()).bind(eligibility.started_early).bind(i64::from(acm_os_domain::ReviewSchedulingEngine::SCHEDULE_RULE_VERSION)).fetch_one(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        Ok(canonical_review_attempt_from_row(problem_id, attempt_id, attempt_type.to_owned(), eligibility.scheduled_due_local_date.to_iso_string(), eligibility.started_early, acm_os_domain::ReviewSchedulingEngine::SCHEDULE_RULE_VERSION as i64, started_at)?)
+    }
+
+    async fn load_review_history_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<acm_os_application::CanonicalReviewHistoryView, ReviewAttemptError> {
+        let pool = self._pool.as_ref().ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM problems WHERE id = ?1)").bind(problem_id).fetch_one(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if exists == 0 { return Err(ReviewAttemptError::ProblemNotFound); }
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM review_attempts WHERE problem_id = ?1 ORDER BY started_at_utc DESC, id DESC")
+            .bind(problem_id).fetch_all(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let mut attempts = Vec::with_capacity(ids.len());
+        let mut historical_best_review: Option<acm_os_domain::ReviewJudgement> = None;
+        for id in ids {
+            let item = load_review_history_item_from_pool(pool, &id).await?;
+            if let Some(value) = item.judgement { historical_best_review = Some(historical_best_review.map_or(value, |current| current.max(value))); }
+            attempts.push(acm_os_application::CanonicalReviewHistoryItem {
+                attempt_id: item.attempt.attempt_id,
+                attempt_type: item.attempt.attempt_type,
+                scheduled_due_local_date: item.attempt.scheduled_due_local_date,
+                started_early: item.attempt.started_early,
+                judgement_rule_version: item.attempt.judgement_rule_version,
+                started_at_utc: item.attempt.started_at_utc,
+                status: item.status,
+                judgement: item.judgement,
+                completion_input: item.completion_input,
+                evidence_codes: item.evidence_codes,
+                failure_reasons: item.failure_reasons,
+                help_levels: item.help_levels,
+                completed_at_utc: item.completed_at_utc,
+                completed_local_date: item.completed_local_date,
+                void_reason: item.void_reason,
+                voided_at_utc: item.voided_at_utc,
+            });
+        }
+        let mastery = load_problem_mastery_projection_by_id(pool, problem_id).await?;
+        Ok(acm_os_application::CanonicalReviewHistoryView { problem_id: problem_id.to_string(), historical_best_review, mastery, attempts })
+    }
+
+    async fn update_problem_mastery_evidence_by_id(
+        &self,
+        problem_id: i64,
+        evidence: acm_os_domain::ProblemMasteryEvidence,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+        let pool = self._pool.as_ref().ok_or(ReviewAttemptError::PersistenceUnavailable)?;
+        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM problems WHERE id = ?1)").bind(problem_id).fetch_one(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if exists == 0 { return Err(ReviewAttemptError::ProblemNotFound); }
+        let local_date = crate::current_local_date().map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let thorough = evidence.is_thoroughly_digested();
+        sqlx::query("INSERT INTO problem_mastery_evidence (problem_id, recalls_problem, multiple_solutions_clear, knowledge_understood, implementation_fluent, can_adapt_or_create, transfer_solved_independently, historical_thoroughly_digested, first_thoroughly_digested_local_date, updated_at_utc) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,CASE WHEN ?8 = 1 THEN ?9 ELSE NULL END,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(problem_id) DO UPDATE SET recalls_problem=excluded.recalls_problem,multiple_solutions_clear=excluded.multiple_solutions_clear,knowledge_understood=excluded.knowledge_understood,implementation_fluent=excluded.implementation_fluent,can_adapt_or_create=excluded.can_adapt_or_create,transfer_solved_independently=excluded.transfer_solved_independently,historical_thoroughly_digested=MAX(problem_mastery_evidence.historical_thoroughly_digested,excluded.historical_thoroughly_digested),first_thoroughly_digested_local_date=COALESCE(problem_mastery_evidence.first_thoroughly_digested_local_date,excluded.first_thoroughly_digested_local_date),updated_at_utc=excluded.updated_at_utc)")
+            .bind(problem_id).bind(evidence.recalls_problem).bind(evidence.multiple_solutions_clear).bind(evidence.knowledge_understood).bind(evidence.implementation_fluent).bind(evidence.can_adapt_or_create).bind(evidence.transfer_solved_independently).bind(thorough).bind(confirmed_on.to_iso_string()).execute(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        load_problem_mastery_projection_by_id(pool, problem_id).await
+    }
+}
+
+fn canonical_review_attempt_from_row(problem_id: i64, attempt_id: String, attempt_type: String, due: String, started_early: bool, rule_version: i64, started_at_utc: String) -> Result<acm_os_application::CanonicalReviewAttempt, ReviewAttemptError> {
+    let attempt_type = match attempt_type.as_str() { "first_cold_start" => acm_os_domain::ReviewAttemptType::FirstColdStart, "long_term_review" => acm_os_domain::ReviewAttemptType::LongTermReview, "early_check" => acm_os_domain::ReviewAttemptType::EarlyCheck, _ => return Err(ReviewAttemptError::IntegrityViolation) };
+    Ok(acm_os_application::CanonicalReviewAttempt { attempt_id, problem_id: problem_id.to_string(), attempt_type, scheduled_due_local_date: acm_os_domain::LocalDate::parse_iso(&due).map_err(|_| ReviewAttemptError::IntegrityViolation)?, started_early, judgement_rule_version: u32::try_from(rule_version).map_err(|_| ReviewAttemptError::IntegrityViolation)?, started_at_utc })
+}
+
+async fn validate_review_attempt_creation_state_by_id(connection: &mut sqlx::SqliteConnection, problem_id: i64, eligibility: acm_os_domain::ReviewEligibilityDecision) -> Result<String, ReviewAttemptError> {
+    let current: Option<(String,String,String,String,Option<i64>)> = sqlx::query_as("SELECT p.identity_type, pls.learning_status, rc.id, rc.next_due_local_date, ss.problem_id FROM problems p JOIN problem_learning_states pls ON pls.problem_id=p.id JOIN review_cycles rc ON rc.problem_id=p.id AND rc.cycle_status='active' LEFT JOIN problem_statement_snapshots ss ON ss.problem_id=p.id WHERE p.id=?1").bind(problem_id).fetch_optional(&mut *connection).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let (identity_type,status,review_cycle_id,due,statement_problem_id) = current.ok_or(ReviewAttemptError::ProblemNotFound)?;
+    if identity_type != "personal" { return Err(ReviewAttemptError::NotPersonal); }
+    if statement_problem_id != Some(problem_id) { return Err(ReviewAttemptError::StatementMissing); }
+    let status = parse_learning_status(&status).map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    if due != eligibility.scheduled_due_local_date.to_iso_string() { return Err(ReviewAttemptError::IntegrityViolation); }
+    let expected = match status { acm_os_domain::LearningStatus::WaitingColdStart => acm_os_domain::ReviewAttemptType::FirstColdStart, acm_os_domain::LearningStatus::LongTermReview => acm_os_domain::ReviewAttemptType::LongTermReview, _ => return Err(ReviewAttemptError::NotEligible) };
+    if (eligibility.started_early && eligibility.attempt_type != acm_os_domain::ReviewAttemptType::EarlyCheck) || (!eligibility.started_early && eligibility.attempt_type != expected) { return Err(ReviewAttemptError::IntegrityViolation); }
+    Ok(review_cycle_id)
+}
+
+async fn load_problem_mastery_projection_by_id(pool: &SqlitePool, problem_id: i64) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+    let row: Option<(bool,bool,bool,bool,bool,bool,bool,Option<String>)> = sqlx::query_as("SELECT recalls_problem,multiple_solutions_clear,knowledge_understood,implementation_fluent,can_adapt_or_create,transfer_solved_independently,historical_thoroughly_digested,first_thoroughly_digested_local_date FROM problem_mastery_evidence WHERE problem_id=?1").bind(problem_id).fetch_optional(pool).await.map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+    let Some(row) = row else { return Ok(ProblemMasteryProjection { current: Default::default(), historical_thoroughly_digested:false, first_thoroughly_digested_local_date:None }); };
+    let first = row.7.as_deref().map(acm_os_domain::LocalDate::parse_iso).transpose().map_err(|_| ReviewAttemptError::IntegrityViolation)?;
+    if row.6 != first.is_some() { return Err(ReviewAttemptError::IntegrityViolation); }
+    Ok(ProblemMasteryProjection { current: acm_os_domain::ProblemMasteryEvidence { recalls_problem:row.0,multiple_solutions_clear:row.1,knowledge_understood:row.2,implementation_fluent:row.3,can_adapt_or_create:row.4,transfer_solved_independently:row.5 }, historical_thoroughly_digested:row.6, first_thoroughly_digested_local_date:first })
 }
 
 async fn validate_review_completion_state(
@@ -5869,6 +6124,36 @@ impl PersonalNotePatchPort for DatabaseRuntime {
             .await
     }
 
+    async fn add_prerequisite_link_by_id(
+        &self,
+        problem_id: i64,
+        target: &PrerequisiteLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let pool = self._pool.as_ref().ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT p.identity_type, ws.active_vault_path, fb.vault_relative_path, fb.content_digest, fb.windows_file_key \
+             FROM problems p LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             LEFT JOIN workspace_settings ws ON ws.singleton = 1 WHERE p.id = ?1",
+        ).bind(problem_id).fetch_optional(pool).await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        let (identity_type, active_vault, relative_path, digest, file_key) = row.ok_or(PersonalNotePatchError::ProblemNotFound)?;
+        if identity_type != "personal" { return Err(PersonalNotePatchError::NotPersonal); }
+        let active_vault = active_vault.ok_or(PersonalNotePatchError::VaultUnavailable)?;
+        let relative_path = relative_path.ok_or(PersonalNotePatchError::BindingUnavailable)?;
+        let digest = digest.ok_or(PersonalNotePatchError::BindingUnavailable)?;
+        let expected = PersonalNoteBinding { vault_relative_path: relative_path.clone(), content_digest: digest.clone(), windows_file_key: file_key.clone() };
+        let recovery_root = self.recovery_root.clone().ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let operation_id = self.begin_prerequisite_patch_operation_by_id(problem_id, &expected, target.as_str()).await?;
+        let recovery_key = format!("problem-id:{}", problem_id);
+        let target = target.clone();
+        let patch_result = tokio::task::spawn_blocking(move || crate::safe_patch::add_prerequisite_link(&active_vault, &relative_path, &recovery_root, &recovery_key, &target, |_| {}))
+            .await.map_err(|_| PersonalNotePatchError::WriteFailed)?;
+        let outcome = match patch_result {
+            Ok(outcome) => outcome,
+            Err(error) => { self.settle_failed_prerequisite_patch_operation(&operation_id, error).await?; return Err(map_safe_patch_error(error)); }
+        };
+        self.commit_patch_outcome_by_id(problem_id, &expected, outcome, Some(&operation_id)).await
+    }
+
     async fn add_extra_problem_link(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
@@ -5998,6 +6283,24 @@ impl DatabaseRuntime {
         Ok(operation_id)
     }
 
+    async fn begin_prerequisite_patch_operation_by_id(
+        &self,
+        problem_id: i64,
+        expected: &PersonalNoteBinding,
+        target: &str,
+    ) -> Result<String, PersonalNotePatchError> {
+        let pool = self._pool.as_ref().ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let binding_id: i64 = sqlx::query_scalar("SELECT id FROM file_bindings WHERE problem_id = ?1 AND vault_relative_path = ?2 AND content_digest = ?3 AND binding_state = 'linked'")
+            .bind(problem_id).bind(&expected.vault_relative_path).bind(&expected.content_digest).fetch_optional(pool).await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?.ok_or(PersonalNotePatchError::BindingUnavailable)?;
+        let operation_id = uuid::Uuid::now_v7().to_string();
+        let postcondition_json = serde_json::json!({"kind":"prerequisite_link","target":target}).to_string();
+        sqlx::query("INSERT INTO critical_operations (id, operation_kind, object_type, object_id, binding_id, pre_content_digest, postcondition_json) VALUES (?1, 'markdown_system_fact', 'problem', ?2, ?3, ?4, ?5)")
+            .bind(&operation_id).bind(problem_id.to_string()).bind(binding_id).bind(&expected.content_digest).bind(postcondition_json).execute(pool).await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        Ok(operation_id)
+    }
+
     async fn commit_patch_outcome(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
@@ -6109,6 +6412,33 @@ impl DatabaseRuntime {
             .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
         cache.remove(&old_cache_key);
         cache.remove(&new_cache_key);
+        Ok(resolved_binding(&resolved))
+    }
+
+    async fn commit_patch_outcome_by_id(
+        &self,
+        problem_id: i64,
+        expected: &PersonalNoteBinding,
+        outcome: crate::safe_patch::SafePatchOutcome,
+        critical_operation_id: Option<&str>,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let pool = self._pool.as_ref().ok_or(PersonalNotePatchError::PersistenceUnavailable)?;
+        let resolved = ResolvedNoteFile { relative_path: outcome.relative_path, bytes: Vec::new(), content_digest: outcome.content_digest, windows_file_key: outcome.windows_file_key, relocated: false };
+        let mut transaction = pool.begin().await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        let updated = sqlx::query("UPDATE file_bindings SET vault_relative_path = ?1, windows_file_key = ?2, content_digest = ?3, binding_state = 'linked', updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE problem_id = ?4 AND vault_relative_path = ?5 AND content_digest = ?6")
+            .bind(&resolved.relative_path).bind(&resolved.windows_file_key).bind(&resolved.content_digest).bind(problem_id).bind(&expected.vault_relative_path).bind(&expected.content_digest).execute(&mut *transaction).await
+            .map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        if updated.rows_affected() != 1 {
+            let current = sqlx::query_as::<_, (String, Option<String>, String)>("SELECT vault_relative_path, windows_file_key, content_digest FROM file_bindings WHERE problem_id = ?1").bind(problem_id).fetch_optional(&mut *transaction).await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+            if current != Some((resolved.relative_path.clone(), resolved.windows_file_key.clone(), resolved.content_digest.clone())) { return Err(PersonalNotePatchError::BindingUnavailable); }
+        }
+        if let Some(operation_id) = critical_operation_id {
+            let completed = sqlx::query("UPDATE critical_operations SET operation_status = 'completed', resolved_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND operation_status = 'pending'").bind(operation_id).execute(&mut *transaction).await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+            if completed.rows_affected() != 1 { return Err(PersonalNotePatchError::PersistenceUnavailable); }
+        }
+        transaction.commit().await.map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        let mut cache = self.markdown_projection_cache.lock().map_err(|_| PersonalNotePatchError::PersistenceUnavailable)?;
+        cache.retain(|_, projection| projection.content_digest != expected.content_digest);
         Ok(resolved_binding(&resolved))
     }
 }
@@ -6699,6 +7029,120 @@ impl ContestImportPort for DatabaseRuntime {
     }
 }
 
+impl DatabaseRuntime {
+    async fn resolve_codeforces_problem_id(
+        &self,
+        problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<i64, ContestReadError> {
+        sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1 \
+               AND external_problem_key = ?2",
+        )
+        .bind(problem.contest().contest_id().to_string())
+        .bind(problem.index())
+        .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?
+        .ok_or(ContestReadError::NotFound)
+    }
+
+    async fn load_canonical_problem_detail_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<CanonicalProblemDetail, ContestReadError> {
+        let row: Option<(String, Option<i64>, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT p.title, p.rating, p.source_url, ss.sanitized_html, p.identity_type, \
+                    fb.vault_relative_path, fb.content_digest, fb.windows_file_key \
+             FROM problems p \
+             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
+             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
+             WHERE p.id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        let (
+            title,
+            rating,
+            source_url,
+            sanitized_html,
+            identity_type,
+            relative_path,
+            digest,
+            file_key,
+        ) = row.ok_or(ContestReadError::NotFound)?;
+        let personal_note = match (relative_path, digest) {
+            (Some(vault_relative_path), Some(content_digest)) => Some(PersonalNoteBinding {
+                vault_relative_path,
+                content_digest,
+                windows_file_key: file_key,
+            }),
+            (None, None) => None,
+            _ => return Err(ContestReadError::Unavailable),
+        };
+        let identity_type = parse_problem_identity_type(&identity_type)?;
+        if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
+            return Err(ContestReadError::Unavailable);
+        }
+        let lifecycle = self
+            .load_problem_lifecycle_by_id(problem_id)
+            .await
+            .map_err(|error| match error {
+                ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
+                _ => ContestReadError::Unavailable,
+            })?;
+        if lifecycle.identity_type != identity_type {
+            return Err(ContestReadError::Unavailable);
+        }
+        let review_in_progress: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM review_attempts \
+             WHERE problem_id = ?1 AND attempt_status = 'in_progress')",
+        )
+        .bind(problem_id)
+        .fetch_one(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        Ok(CanonicalProblemDetail {
+            problem_id: problem_id.to_string(),
+            title,
+            rating: rating.map(|value| value as u32),
+            source_url,
+            statement: match sanitized_html {
+                Some(sanitized_html) => StatementReadState::Ready { sanitized_html },
+                None => StatementReadState::Pending,
+            },
+            identity_type,
+            personal_note,
+            lifecycle,
+            review_in_progress: review_in_progress == 1,
+        })
+    }
+
+    async fn load_statement_assets_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<Vec<LocalStatementAsset>, ContestReadError> {
+        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT local_ref, media_type, bytes FROM problem_statement_assets \
+             WHERE problem_id = ?1 ORDER BY local_ref",
+        )
+        .bind(problem_id)
+        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        Ok(rows
+            .into_iter()
+            .map(|(local_ref, media_type, bytes)| LocalStatementAsset {
+                local_ref,
+                media_type,
+                bytes,
+            })
+            .collect())
+    }
+}
+
 impl ContestReadPort for DatabaseRuntime {
     async fn list_contests(&self) -> Result<Vec<ContestShelfItem>, ContestReadError> {
         let rows: Vec<(String, String, String, i64, i64, Option<String>)> = sqlx::query_as(
@@ -6890,89 +7334,55 @@ impl ContestReadPort for DatabaseRuntime {
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<LightweightProblemDetail, ContestReadError> {
-        let row: Option<(String, Option<i64>, String, Option<String>, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT p.title, p.rating, p.source_url, ss.sanitized_html, p.identity_type, \
-                    fb.vault_relative_path, fb.content_digest, fb.windows_file_key \
-             FROM problems p JOIN problem_external_identities identities \
-               ON identities.problem_id = p.id \
-             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
-             LEFT JOIN file_bindings fb ON fb.problem_id = p.id \
-             WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 AND identities.external_problem_key = ?2",
-        )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
-        .fetch_optional(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
-        .await
-        .map_err(|_| ContestReadError::Unavailable)?;
-        let (
+        let problem_id = self.resolve_codeforces_problem_id(problem).await?;
+        let CanonicalProblemDetail {
             title,
             rating,
             source_url,
-            sanitized_html,
+            statement,
             identity_type,
-            relative_path,
-            digest,
-            file_key,
-        ) = row.ok_or(ContestReadError::NotFound)?;
-        let personal_note = match (relative_path, digest) {
-            (Some(vault_relative_path), Some(content_digest)) => Some(PersonalNoteBinding {
-                vault_relative_path,
-                content_digest,
-                windows_file_key: file_key,
-            }),
-            (None, None) => None,
-            _ => return Err(ContestReadError::Unavailable),
-        };
-        let identity_type = parse_problem_identity_type(&identity_type)?;
-        if (identity_type == ProblemIdentityType::Personal) != personal_note.is_some() {
-            return Err(ContestReadError::Unavailable);
-        }
-        let generic_problem = generic_problem_identity(problem);
-        let lifecycle = self
-            .load_problem_lifecycle(&generic_problem)
-            .await
-            .map_err(|error| match error {
-                ProblemLifecycleError::ProblemNotFound => ContestReadError::NotFound,
-                _ => ContestReadError::Unavailable,
-            })?;
-        if lifecycle.identity_type != identity_type {
-            return Err(ContestReadError::Unavailable);
-        }
+            personal_note,
+            lifecycle,
+            ..
+        } = self.load_canonical_problem_detail_by_id(problem_id).await?;
         Ok(LightweightProblemDetail {
             problem: problem.clone(),
             title,
-            rating: rating.map(|value| value as u32),
+            rating,
             source_url,
-            statement: match sanitized_html {
-                Some(sanitized_html) => StatementReadState::Ready { sanitized_html },
-                None => StatementReadState::Pending,
-            },
+            statement,
             identity_type,
             personal_note,
             lifecycle,
         })
     }
 
+    async fn canonical_problem_detail(
+        &self,
+        problem_id: &str,
+    ) -> Result<CanonicalProblemDetail, ContestReadError> {
+        let problem_id = problem_id
+            .parse::<i64>()
+            .map_err(|_| ContestReadError::NotFound)?;
+        self.load_canonical_problem_detail_by_id(problem_id).await
+    }
+
     async fn statement_assets(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<Vec<LocalStatementAsset>, ContestReadError> {
-        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
-            "SELECT a.local_ref, a.media_type, a.bytes FROM problem_statement_assets a JOIN problem_external_identities identities ON identities.problem_id = a.problem_id WHERE identities.platform = 'codeforces' AND identities.external_contest_key = ?1 AND identities.external_problem_key = ?2 ORDER BY a.local_ref",
-        )
-        .bind(problem.contest().contest_id().to_string())
-        .bind(problem.index())
-        .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
-        .await
-        .map_err(|_| ContestReadError::Unavailable)?;
-        Ok(rows
-            .into_iter()
-            .map(|(local_ref, media_type, bytes)| LocalStatementAsset {
-                local_ref,
-                media_type,
-                bytes,
-            })
-            .collect())
+        let problem_id = self.resolve_codeforces_problem_id(problem).await?;
+        self.load_statement_assets_by_id(problem_id).await
+    }
+
+    async fn canonical_statement_assets(
+        &self,
+        problem_id: &str,
+    ) -> Result<Vec<LocalStatementAsset>, ContestReadError> {
+        let problem_id = problem_id
+            .parse::<i64>()
+            .map_err(|_| ContestReadError::NotFound)?;
+        self.load_statement_assets_by_id(problem_id).await
     }
 }
 
@@ -14231,6 +14641,62 @@ mod tests {
                 .expect("remove fixture setup backup");
         }
         (directory, runtime, vault, problems, problem)
+    }
+
+    #[tokio::test]
+    async fn canonical_problem_detail_ignores_same_platform_aliases_and_opaque_keys() {
+        let (_directory, runtime, _vault, _problems, external_problem) =
+            personal_note_fixture().await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical problem id");
+        for (contest_key, problem_key) in [("200", "B"), ("opaque-final", "C")] {
+            sqlx::query(
+                "INSERT INTO problem_external_identities \
+                    (problem_id, platform, external_contest_key, external_problem_key) \
+                 VALUES (?1, 'codeforces', ?2, ?3)",
+            )
+            .bind(problem_id)
+            .bind(contest_key)
+            .bind(problem_key)
+            .execute(pool)
+            .await
+            .expect("same canonical problem alias");
+        }
+
+        let canonical = runtime
+            .canonical_problem_detail(&problem_id.to_string())
+            .await
+            .expect("canonical detail");
+        assert_eq!(canonical.problem_id, problem_id.to_string());
+        assert_eq!(canonical.title, "Problem A");
+        assert!(canonical.personal_note.is_some());
+
+        let first_alias = runtime
+            .lightweight_problem_detail(&external_problem)
+            .await
+            .expect("first external alias");
+        let second_alias = acm_os_domain::CodeforcesProblemIdentity::new(
+            acm_os_domain::CodeforcesContestIdentity::new(200).expect("second contest"),
+            "B",
+        )
+        .expect("second alias");
+        let second_detail = runtime
+            .lightweight_problem_detail(&second_alias)
+            .await
+            .expect("second external alias");
+        assert_eq!(first_alias.problem, external_problem);
+        assert_eq!(second_detail.problem, second_alias);
+        assert_eq!(first_alias.title, canonical.title);
+        assert_eq!(second_detail.title, canonical.title);
+        assert_eq!(first_alias.lifecycle, canonical.lifecycle);
+        assert_eq!(second_detail.lifecycle, canonical.lifecycle);
     }
 
     #[tokio::test]

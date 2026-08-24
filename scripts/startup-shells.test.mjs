@@ -26,6 +26,18 @@ test("accepts only canonical M1 problem-detail identities", () => {
   }
 });
 
+test("accepts additive internal Problem-detail routes without changing external routes", () => {
+  assert.deepEqual(parseAppRoute("/problems/id/42"), {
+    kind: "canonicalProblemDetail", problemId: "42",
+  });
+  for (const pathname of ["/problems/id/0", "/problems/id/01", "/problems/id/abc", "/problems/id/42/extra"]) {
+    assert.equal(parseAppRoute(pathname).kind, "notFound");
+  }
+  assert.deepEqual(parseAppRoute("/problems/1979/A"), {
+    kind: "problemDetail", contestId: 1979, index: "A",
+  });
+});
+
 test("accepts only canonical M1 contest-detail identities", () => {
   assert.deepEqual(parseAppRoute("/contests/1979"), {
     kind: "contestDetail", contestId: 1979,

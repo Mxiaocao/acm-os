@@ -853,6 +853,19 @@ pub struct LightweightProblemDetail {
     pub lifecycle: ProblemLifecycleState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalProblemDetail {
+    pub problem_id: String,
+    pub title: String,
+    pub rating: Option<u32>,
+    pub source_url: String,
+    pub statement: StatementReadState,
+    pub identity_type: ProblemIdentityType,
+    pub personal_note: Option<PersonalNoteBinding>,
+    pub lifecycle: ProblemLifecycleState,
+    pub review_in_progress: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProblemIdentityType {
     Lightweight,
@@ -911,6 +924,16 @@ pub trait ProblemLifecyclePort {
         decision: acm_os_domain::ProblemLifecycleDecision,
         first_due: Option<acm_os_domain::LocalDate>,
     ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
+    async fn load_problem_lifecycle_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
+    async fn commit_problem_lifecycle_decision_by_id(
+        &self,
+        problem_id: i64,
+        decision: acm_os_domain::ProblemLifecycleDecision,
+        first_due: Option<acm_os_domain::LocalDate>,
+    ) -> Result<ProblemLifecycleState, ProblemLifecycleError>;
 }
 
 pub async fn transition_problem_lifecycle<P: ProblemLifecyclePort>(
@@ -940,10 +963,48 @@ pub async fn transition_problem_lifecycle<P: ProblemLifecyclePort>(
         .await
 }
 
+pub async fn transition_problem_lifecycle_by_id<P: ProblemLifecyclePort>(
+    port: &P,
+    problem_id: i64,
+    action: acm_os_domain::ProblemLifecycleAction,
+    today: acm_os_domain::LocalDate,
+) -> Result<ProblemLifecycleState, ProblemLifecycleError> {
+    if action == acm_os_domain::ProblemLifecycleAction::DeletePersonalNote {
+        return Err(ProblemLifecycleError::InvalidTransition);
+    }
+    let current = port.load_problem_lifecycle_by_id(problem_id).await?;
+    if current.identity_type != ProblemIdentityType::Personal {
+        return Err(ProblemLifecycleError::NotPersonal);
+    }
+    let decision = acm_os_domain::ProblemLifecycleEngine::decide(current.learning_status, action)
+        .map_err(|_| ProblemLifecycleError::InvalidTransition)?;
+    let first_due = match decision.review_cycle {
+        acm_os_domain::ReviewCycleDirective::StartFirstColdStart => Some(
+            acm_os_domain::ReviewSchedulingEngine::first_cold_start_due(today)
+                .map_err(|_| ProblemLifecycleError::InvalidLocalDate)?,
+        ),
+        acm_os_domain::ReviewCycleDirective::None
+        | acm_os_domain::ReviewCycleDirective::CancelActive => None,
+    };
+    port.commit_problem_lifecycle_decision_by_id(problem_id, decision, first_due)
+        .await
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewAttempt {
     pub attempt_id: String,
     pub problem: acm_os_domain::CodeforcesProblemIdentity,
+    pub attempt_type: acm_os_domain::ReviewAttemptType,
+    pub scheduled_due_local_date: acm_os_domain::LocalDate,
+    pub started_early: bool,
+    pub judgement_rule_version: u32,
+    pub started_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalReviewAttempt {
+    pub attempt_id: String,
+    pub problem_id: String,
     pub attempt_type: acm_os_domain::ReviewAttemptType,
     pub scheduled_due_local_date: acm_os_domain::LocalDate,
     pub started_early: bool,
@@ -1080,6 +1141,34 @@ pub struct ReviewHistoryView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalReviewHistoryView {
+    pub problem_id: String,
+    pub historical_best_review: Option<acm_os_domain::ReviewJudgement>,
+    pub mastery: ProblemMasteryProjection,
+    pub attempts: Vec<CanonicalReviewHistoryItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalReviewHistoryItem {
+    pub attempt_id: String,
+    pub attempt_type: acm_os_domain::ReviewAttemptType,
+    pub scheduled_due_local_date: acm_os_domain::LocalDate,
+    pub started_early: bool,
+    pub judgement_rule_version: u32,
+    pub started_at_utc: String,
+    pub status: ReviewAttemptStatus,
+    pub judgement: Option<acm_os_domain::ReviewJudgement>,
+    pub completion_input: Option<ReviewCompletionInput>,
+    pub evidence_codes: Vec<String>,
+    pub failure_reasons: Vec<ReviewFailureReason>,
+    pub help_levels: Vec<acm_os_domain::ReviewHelpLevel>,
+    pub completed_at_utc: Option<String>,
+    pub completed_local_date: Option<acm_os_domain::LocalDate>,
+    pub void_reason: Option<String>,
+    pub voided_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProblemMasteryProjection {
     pub current: acm_os_domain::ProblemMasteryEvidence,
     pub historical_thoroughly_digested: bool,
@@ -1195,6 +1284,63 @@ pub trait ReviewAttemptPort {
         evidence: acm_os_domain::ProblemMasteryEvidence,
         confirmed_on: acm_os_domain::LocalDate,
     ) -> Result<ProblemMasteryProjection, ReviewAttemptError>;
+    async fn create_or_resume_review_attempt_by_id(
+        &self,
+        problem_id: i64,
+        eligibility: acm_os_domain::ReviewEligibilityDecision,
+    ) -> Result<CanonicalReviewAttempt, ReviewAttemptError>;
+    async fn load_review_history_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<CanonicalReviewHistoryView, ReviewAttemptError>;
+    async fn update_problem_mastery_evidence_by_id(
+        &self,
+        problem_id: i64,
+        evidence: acm_os_domain::ProblemMasteryEvidence,
+        confirmed_on: acm_os_domain::LocalDate,
+    ) -> Result<ProblemMasteryProjection, ReviewAttemptError>;
+}
+
+pub async fn start_or_resume_review_by_id<P: ProblemLifecyclePort + ReviewAttemptPort>(
+    port: &P,
+    problem_id: i64,
+    today: acm_os_domain::LocalDate,
+) -> Result<CanonicalReviewAttempt, ReviewAttemptError> {
+    let lifecycle = port
+        .load_problem_lifecycle_by_id(problem_id)
+        .await
+        .map_err(|error| match error {
+            ProblemLifecycleError::ProblemNotFound => ReviewAttemptError::ProblemNotFound,
+            ProblemLifecycleError::NotPersonal => ReviewAttemptError::NotPersonal,
+            ProblemLifecycleError::IntegrityViolation => ReviewAttemptError::IntegrityViolation,
+            ProblemLifecycleError::PersistenceUnavailable => ReviewAttemptError::PersistenceUnavailable,
+            ProblemLifecycleError::InvalidTransition | ProblemLifecycleError::InvalidLocalDate => ReviewAttemptError::NotEligible,
+        })?;
+    if lifecycle.identity_type != ProblemIdentityType::Personal {
+        return Err(ReviewAttemptError::NotPersonal);
+    }
+    let cycle = lifecycle.active_review_cycle.ok_or(ReviewAttemptError::ScheduleMissing)?;
+    let eligibility = acm_os_domain::ReviewEligibilityEngine::decide(
+        lifecycle.learning_status, cycle.next_due_local_date, today,
+    )
+    .map_err(|_| ReviewAttemptError::NotEligible)?;
+    port.create_or_resume_review_attempt_by_id(problem_id, eligibility).await
+}
+
+pub async fn review_history_by_id<P: ReviewAttemptPort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<CanonicalReviewHistoryView, ReviewAttemptError> {
+    port.load_review_history_by_id(problem_id).await
+}
+
+pub async fn update_problem_mastery_evidence_by_id<P: ReviewAttemptPort>(
+    port: &P,
+    problem_id: i64,
+    evidence: acm_os_domain::ProblemMasteryEvidence,
+    confirmed_on: acm_os_domain::LocalDate,
+) -> Result<ProblemMasteryProjection, ReviewAttemptError> {
+    port.update_problem_mastery_evidence_by_id(problem_id, evidence, confirmed_on).await
 }
 
 pub async fn start_or_resume_review<P: ProblemLifecyclePort + ReviewAttemptPort>(
@@ -2125,6 +2271,15 @@ pub trait PersonalNotePatchPort {
         target: &PrerequisiteLinkTarget,
     ) -> Result<PersonalNoteBinding, PersonalNotePatchError>;
 
+    async fn add_prerequisite_link_by_id(
+        &self,
+        problem_id: i64,
+        target: &PrerequisiteLinkTarget,
+    ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+        let _ = (problem_id, target);
+        Err(PersonalNotePatchError::PersistenceUnavailable)
+    }
+
     async fn add_extra_problem_link(
         &self,
         problem: &acm_os_domain::ProblemIdentity,
@@ -2139,6 +2294,15 @@ pub async fn add_prerequisite_link<P: PersonalNotePatchPort>(
 ) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
     let target = PrerequisiteLinkTarget::parse(target)?;
     port.add_prerequisite_link(problem, &target).await
+}
+
+pub async fn add_prerequisite_link_by_id<P: PersonalNotePatchPort>(
+    port: &P,
+    problem_id: i64,
+    target: impl Into<String>,
+) -> Result<PersonalNoteBinding, PersonalNotePatchError> {
+    let target = PrerequisiteLinkTarget::parse(target)?;
+    port.add_prerequisite_link_by_id(problem_id, &target).await
 }
 
 pub async fn add_extra_problem_link<P: PersonalNotePatchPort>(
@@ -2355,9 +2519,17 @@ pub trait ContestReadPort {
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
     ) -> Result<LightweightProblemDetail, ContestReadError>;
+    async fn canonical_problem_detail(
+        &self,
+        problem_id: &str,
+    ) -> Result<CanonicalProblemDetail, ContestReadError>;
     async fn statement_assets(
         &self,
         problem: &acm_os_domain::CodeforcesProblemIdentity,
+    ) -> Result<Vec<LocalStatementAsset>, ContestReadError>;
+    async fn canonical_statement_assets(
+        &self,
+        problem_id: &str,
     ) -> Result<Vec<LocalStatementAsset>, ContestReadError>;
 }
 
@@ -3398,6 +3570,14 @@ pub struct KnowledgeCandidateReadProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalKnowledgeCandidateReadProjection {
+    pub problem_id: String,
+    pub fingerprint: String,
+    pub target_ref: String,
+    pub disposition: KnowledgeCandidateDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedKnowledgeCandidateProjection {
     pub knowledge_node_id: String,
     pub target_ref: String,
@@ -3441,6 +3621,53 @@ pub trait KnowledgeCandidatePort {
         fingerprint: &str,
         knowledge_node_id: &str,
     ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError>;
+    async fn list_knowledge_candidates_by_id(
+        &self,
+        problem_id: i64,
+    ) -> Result<Vec<CanonicalKnowledgeCandidateReadProjection>, KnowledgeCandidateError>;
+    async fn set_knowledge_candidate_disposition_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        disposition: KnowledgeCandidateDisposition,
+    ) -> Result<CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError>;
+    async fn accept_existing_knowledge_candidate_by_id(
+        &self,
+        problem_id: i64,
+        fingerprint: &str,
+        knowledge_node_id: &str,
+    ) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError>;
+}
+
+pub async fn list_knowledge_candidates_by_id<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem_id: i64,
+) -> Result<Vec<CanonicalKnowledgeCandidateReadProjection>, KnowledgeCandidateError> {
+    port.list_knowledge_candidates_by_id(problem_id).await
+}
+
+pub async fn set_knowledge_candidate_disposition_by_id<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem_id: i64,
+    fingerprint: &str,
+    disposition: KnowledgeCandidateDisposition,
+) -> Result<CanonicalKnowledgeCandidateReadProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    port.set_knowledge_candidate_disposition_by_id(problem_id, &fingerprint, disposition).await
+}
+
+pub async fn accept_existing_knowledge_candidate_by_id<P: KnowledgeCandidatePort>(
+    port: &P,
+    problem_id: i64,
+    fingerprint: &str,
+    knowledge_node_id: &str,
+) -> Result<AcceptedKnowledgeCandidateProjection, KnowledgeCandidateError> {
+    let fingerprint = normalize_candidate_fingerprint(fingerprint)?;
+    let knowledge_node_id = knowledge_node_id.trim();
+    if knowledge_node_id.is_empty() {
+        return Err(KnowledgeCandidateError::IntegrityViolation);
+    }
+    port.accept_existing_knowledge_candidate_by_id(problem_id, &fingerprint, knowledge_node_id).await
 }
 
 pub async fn accept_existing_knowledge_candidate<P: KnowledgeCandidatePort>(

@@ -1297,6 +1297,33 @@ test("Problem statement renders Codeforces LaTeX locally while preserving code b
   }
 });
 
+test("Canonical Problem route loads by problem_id without projecting an external alias", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "42", title: "Canonical Problem", rating: 1200,
+      sourceUrl: "https://example.test/problem/42", statement: { state: "pending" },
+      identityType: "personal", personalNote: { vaultRelativePath: "Problems/Canonical.md" },
+      lifecycle: personalUnstartedLifecycle, reviewAction: null,
+    };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/42");
+  try {
+    await settle();
+    assert.equal(calls.some(([command]) => command === "lightweight_problem_detail_by_id"), true, JSON.stringify(calls));
+    assert.match(view.document.body.textContent, /Canonical Problem/);
+    assert.match(view.document.body.textContent, /Problems\/Canonical\.md/);
+    assert.doesNotMatch(view.document.body.textContent, /Codeforces/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("Problem lifecycle actions and personal-note consequence preview use authoritative IPC results", {
   concurrency: false,
 }, async () => {
