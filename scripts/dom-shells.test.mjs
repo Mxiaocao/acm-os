@@ -1492,6 +1492,149 @@ test("Unbound canonical Problem creates Personal Markdown only through problem_i
   }
 });
 
+test("Canonical Problem renders the next Review due date from canonical lifecycle state", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "45", title: "Due Canonical Problem", rating: 1500,
+      sourceUrl: "https://example.test/problem/45", statement: { state: "pending" },
+      identityType: "personal", personalNote: { vaultRelativePath: "Problems/Problem-45.md" },
+      lifecycle: { ...personalUnstartedLifecycle, nextReviewDueLocalDate: "2026-09-03" }, reviewAction: "earlyCheck",
+    };
+    if (command === "personal_note_projection_by_id") return {
+      state: "ready", vaultRelativePath: "Problems/Problem-45.md", relocated: false,
+      projection: { contentDigest: "a".repeat(64), knownSections: [], solutionRoutes: [], warnings: [] },
+    };
+    if (command === "knowledge_candidates_by_id") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/45");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Next Review due:\s*2026-09-03/);
+    assert.equal(calls.some(([command]) => command === "lightweight_problem_detail"), false);
+    assert.deepEqual(calls.find(([command]) => command === "lightweight_problem_detail_by_id")?.[1]?.input, { problemId: "45" });
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Canonical Knowledge candidate can return to pending only through problem_id mutation", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const ignored = {
+    problemId: "46", fingerprint: "candidate-46", targetRef: "Graph Basics",
+    disposition: "ignored", knowledgeNodeId: null,
+  };
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "46", title: "Knowledge Canonical Problem", rating: null,
+      sourceUrl: "https://example.test/problem/46", statement: { state: "pending" },
+      identityType: "personal", personalNote: { vaultRelativePath: "Problems/Problem-46.md" },
+      lifecycle: personalUnstartedLifecycle, reviewAction: null,
+    };
+    if (command === "personal_note_projection_by_id") return {
+      state: "ready", vaultRelativePath: "Problems/Problem-46.md", relocated: false,
+      projection: { contentDigest: "b".repeat(64), knownSections: [], solutionRoutes: [], warnings: [] },
+    };
+    if (command === "knowledge_candidates_by_id") return [ignored];
+    if (command === "set_knowledge_candidate_disposition_by_id") return { ...ignored, disposition: "pending" };
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/46");
+  try {
+    await settle();
+    const returnToPending = [...view.document.querySelectorAll("button")]
+      .find((button) => button.textContent === "Return to pending");
+    assert.ok(returnToPending);
+    await act(async () => returnToPending.click());
+    await settle();
+    const mutation = calls.find(([command]) => command === "set_knowledge_candidate_disposition_by_id");
+    assert.deepEqual(mutation?.[1]?.input, {
+      problemId: "46", fingerprint: "candidate-46", disposition: "pending",
+    });
+    assert.equal(calls.some(([command]) => command === "set_knowledge_candidate_disposition"), false);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Canonical Personal Note renders parsed sections routes and warnings", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "47", title: "Projection Canonical Problem", rating: 1800,
+      sourceUrl: "https://example.test/problem/47", statement: { state: "pending" },
+      identityType: "personal", personalNote: { vaultRelativePath: "Problems/Problem-47.md" },
+      lifecycle: personalUnstartedLifecycle, reviewAction: null,
+    };
+    if (command === "personal_note_projection_by_id") return {
+      state: "ready", vaultRelativePath: "Problems/Problem-47.md", relocated: true,
+      projection: {
+        contentDigest: "c".repeat(64),
+        knownSections: [{ name: "Prerequisite Knowledge", startOffset: 10, endOffset: 30 }],
+        solutionRoutes: [{ name: "Binary search route", startOffset: 31, endOffset: 60 }],
+        warnings: [{ code: "duplicate_known_section", name: "Solution", count: 2 }],
+      },
+    };
+    if (command === "knowledge_candidates_by_id") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/47");
+  try {
+    await settle();
+    const projection = view.document.querySelector('[aria-label="Personal Markdown projection"]');
+    assert.ok(projection);
+    assert.match(projection.textContent, /Prerequisite Knowledge/);
+    assert.match(projection.textContent, /Binary search route/);
+    assert.match(projection.textContent, /Duplicate section:\s*Solution \(2\)/);
+    assert.match(projection.textContent, /binding was restored/);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Canonical Vault-unavailable state preserves identity and disables Markdown operations", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "lightweight_problem_detail_by_id") return {
+      problemId: "48", title: "Unavailable Vault Canonical Problem", rating: null,
+      sourceUrl: "https://example.test/problem/48", statement: { state: "pending" },
+      identityType: "personal", personalNote: { vaultRelativePath: "Problems/Problem-48.md" },
+      lifecycle: personalUnstartedLifecycle, reviewAction: null,
+    };
+    if (command === "personal_note_projection_by_id") return {
+      state: "vaultUnavailable", lastKnownPath: "Problems/Problem-48.md",
+    };
+    if (command === "knowledge_candidates_by_id") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/problems/id/48");
+  try {
+    await settle();
+    assert.match(view.document.body.textContent, /Vault is unavailable/);
+    assert.match(view.document.body.textContent, /Personal Problem and its System Facts (?:remain|were) preserved/);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Open in Obsidian"), false);
+    assert.equal(calls.some(([command]) => command === "personal_note_projection"), false);
+    assert.ok(calls.some(([command, args]) => command === "personal_note_projection_by_id" && args.input.problemId === "48"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("Problem lifecycle actions and personal-note consequence preview use authoritative IPC results", {
   concurrency: false,
 }, async () => {

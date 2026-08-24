@@ -2245,16 +2245,19 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
           {noteReadFailed ? <p role="alert" className="system-caption">The bound Markdown could not be read.</p> : null}
           {showDeletePreview ? <div className="action-row"><button className="primary-action" disabled={deletingNote} onClick={() => void confirmDeletePersonalNote()} type="button">{deletingNote ? "Deleting..." : "Confirm delete"}</button><button className="secondary-action" onClick={() => setShowDeletePreview(false)} type="button">Cancel</button></div> : null}
         </section> : null}
+        {noteReadState?.state === "vaultUnavailable" ? <VaultUnavailableNotice /> : null}
+        {noteReadState?.state === "ready" ? <PersonalNoteProjectionPanel readState={noteReadState} /> : null}
         <section className="content-panel" aria-labelledby="canonical-learning-lifecycle-heading">
           <h2 id="canonical-learning-lifecycle-heading">Learning lifecycle</h2>
           <p><strong>Current status:</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p>
+          <NextReviewDue localDate={canonicalDetail.lifecycle.nextReviewDueLocalDate} />
           <div className="action-row">{canonicalDetail.lifecycle.availableActions.map((action) => <button className="secondary-action" disabled={lifecycleAction !== null} key={action} onClick={() => void runLifecycleAction(action)} type="button">{lifecycleAction === action ? "Updating…" : lifecycleActionLabel(action)}</button>)}{canonicalDetail.reviewAction ? <button className="primary-action" disabled={startingReview} onClick={() => void beginReview()} type="button">{startingReview ? "Opening Review…" : canonicalDetail.reviewAction === "earlyCheck" ? "Start early check" : canonicalDetail.reviewAction === "continueReview" ? "Continue Review" : "Start Review"}</button> : null}</div>
           {lifecycleMessage ? <p aria-live="polite" className="system-caption">{lifecycleMessage}</p> : null}
           {reviewMessage ? <p aria-live="polite" className="system-caption">{reviewMessage}</p> : null}
         </section>
         <section className="content-panel knowledge-candidates" aria-labelledby="canonical-knowledge-candidates-heading">
           <h2 id="canonical-knowledge-candidates-heading">Prerequisite knowledge suggestions</h2>
-          {knowledgeCandidates.length === 0 ? <p className="safe-note">No current suggestions.</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">Accept existing knowledge</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">Save intent</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">Ignore</button> : null}</div></li>)}</ul>}
+          {knowledgeCandidates.length === 0 ? <p className="safe-note">No current suggestions.</p> : <ul>{knowledgeCandidates.map((candidate) => <li key={candidate.fingerprint}><div><strong>{candidate.targetRef}</strong><span>{candidate.disposition}</span></div><div className="action-row">{candidate.disposition !== "ignored" && candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidate(candidate)} type="button">Accept existing knowledge</button> : null}{candidate.disposition === "pending" && !candidate.knowledgeNodeId ? <button disabled={busyCandidate !== null} onClick={() => void acceptCandidateIntent(candidate)} type="button">Save intent</button> : null}{candidate.disposition !== "ignored" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "ignored")} type="button">Ignore</button> : null}{candidate.disposition !== "pending" ? <button className="secondary-action" disabled={busyCandidate !== null} onClick={() => void updateCandidate(candidate, "pending")} type="button">Return to pending</button> : null}</div></li>)}</ul>}
           {candidateMessage ? <p aria-live="polite" className="safe-note">{candidateMessage}</p> : null}
         </section>
         <ProblemReviewHistory problemId={problemId} learningStatus={canonicalDetail.lifecycle.learningStatus} />
@@ -2305,9 +2308,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <section className="content-panel" aria-labelledby="learning-lifecycle-heading">
         <h2 id="learning-lifecycle-heading">Learning lifecycle</h2>
         <p><strong>Current status:</strong> {learningStatusLabel(detail.lifecycle.learningStatus)}</p>
-        {detail.lifecycle.nextReviewDueLocalDate ? (
-          <p><strong>Next Review due:</strong> {detail.lifecycle.nextReviewDueLocalDate}</p>
-        ) : null}
+        <NextReviewDue localDate={detail.lifecycle.nextReviewDueLocalDate} />
         <div className="action-row">
           {detail.lifecycle.availableActions.map((action) => (
             <button
@@ -2374,7 +2375,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       ) : noteReadState === null ? (
          <section className="empty-state" aria-busy="true"><p>正在读取当前个人 Markdown…</p></section>
       ) : noteReadState.state === "vaultUnavailable" ? (
-         <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>
+        <VaultUnavailableNotice />
       ) : noteReadState.state === "locationAnomaly" ? (
         <section className="empty-state" role="status">
            <h2>Note location needs attention</h2>
@@ -2404,21 +2405,31 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
             </div>
           ) : <button className="danger-action" onClick={() => setShowMissingNoteDeleteConfirm(true)} type="button">Confirm file was deleted…</button>}
         </section>
-      ) : (
-        <section className="content-panel" aria-label="Personal Markdown projection">
-           <h2>我的笔记</h2>
-          {noteReadState.relocated ? <p className="safe-note">The note binding was restored to its current location.</p> : null}
-           <h3>已识别章节</h3>
-           {noteReadState.projection.knownSections.length ? <ul>{noteReadState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>没有找到已识别章节。</p>}
-           <h3>解题路线</h3>
-           {noteReadState.projection.solutionRoutes.length ? <ol>{noteReadState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>没有找到解题路线。</p>}
-          {noteReadState.projection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
-        </section>
-      )
+      ) : <PersonalNoteProjectionPanel readState={noteReadState} />
     ) : null}
     <ProblemReviewHistory contestId={contestId} index={index} learningStatus={detail.lifecycle.learningStatus} />
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>Statement capture is pending</h2><p>Retry the contest import to capture this statement. Existing data remains unchanged.</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>Preparing the local statement…</p></section> : <section className="content-panel statement-view"><div className="statement-heading-row"><h2>Statement snapshot</h2></div><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
   </>;
+}
+
+function NextReviewDue({ localDate }: { localDate: string | null }) {
+  return localDate ? <p><strong>Next Review due:</strong> {localDate}</p> : null;
+}
+
+function VaultUnavailableNotice() {
+  return <section className="empty-state" role="status"><h2>Vault is unavailable</h2><p>Live Markdown access is temporarily unavailable. The Personal Problem and its System Facts were preserved.</p></section>;
+}
+
+function PersonalNoteProjectionPanel({ readState }: { readState: Extract<PersonalNoteReadStateDto, { state: "ready" }> }) {
+  return <section className="content-panel" aria-label="Personal Markdown projection">
+    <h2>我的笔记</h2>
+    {readState.relocated ? <p className="safe-note">The note binding was restored to its current location.</p> : null}
+    <h3>已识别章节</h3>
+    {readState.projection.knownSections.length ? <ul>{readState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>没有找到已识别章节。</p>}
+    <h3>解题路线</h3>
+    {readState.projection.solutionRoutes.length ? <ol>{readState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>没有找到解题路线。</p>}
+    {readState.projection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>Duplicate section: {warning.name} ({warning.count})</p>)}
+  </section>;
 }
 
 const reviewFailureReasonOptions: ReadonlyArray<readonly [ReviewFailureReasonCodeDto, string]> = [
