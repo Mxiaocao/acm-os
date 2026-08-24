@@ -10,6 +10,243 @@ pub use acm_os_domain::{
     ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedRewardRequest {
+    pub occurrence_id: String,
+    pub qualification: Option<ProblemSolvedQualificationInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedQualificationInput {
+    pub qualification: acm_os_domain::ProblemSolvedQualification,
+    pub reason: acm_os_domain::ProblemSolvedEvaluationReason,
+    pub evaluated_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedSourceContext {
+    pub occurrence_id: String,
+    pub problem_id: i64,
+    pub semantic_kind: acm_os_domain::ProblemSolvedSemanticKind,
+    pub activation_relation: acm_os_domain::ProblemSolvedActivationRelation,
+    pub occurred_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedEvaluationRecord {
+    pub occurrence_id: String,
+    pub problem_id: i64,
+    pub qualification: acm_os_domain::ProblemSolvedQualification,
+    pub reason: acm_os_domain::ProblemSolvedEvaluationReason,
+    pub evaluated_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedPositiveClaimRecord {
+    pub problem_id: i64,
+    pub reward_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemSolvedRewardResult {
+    pub disposition: ProblemSolvedRewardDisposition,
+    pub reward_event_id: String,
+    pub problem_id: i64,
+    pub source_occurred_at_utc: String,
+    pub activation_relation: String,
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: String,
+    pub policy_key: String,
+    pub policy_version: i64,
+    pub ledger_entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedRewardDisposition {
+    Created,
+    AlreadyProcessed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedRewardError {
+    QualificationRequired,
+    OutOfScope,
+    ExplicitQualificationNotAllowedPreActivation,
+    EvaluationConflict,
+    DecisionConflict,
+    Unavailable,
+    SourceNotFound,
+    SourceInvalid,
+    RewardInactive,
+    DecisionInvalid,
+    PositiveClaimAlreadyTaken,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ProblemSolvedRewardPort {
+    async fn load_problem_solved_source(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<ProblemSolvedSourceContext, ProblemSolvedRewardError>;
+
+    async fn load_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluationRecord>, ProblemSolvedRewardError>;
+
+    async fn create_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        input: &ProblemSolvedQualificationInput,
+    ) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError>;
+
+    async fn load_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaimRecord>, ProblemSolvedRewardError>;
+
+    async fn load_processed_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedRewardResult>, ProblemSolvedRewardError>;
+
+    async fn process_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+        decision: acm_os_domain::ProblemSolvedRewardDecision,
+    ) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError>;
+}
+
+pub async fn process_problem_solved_reward<P: ProblemSolvedRewardPort>(
+    port: &P,
+    request: ProblemSolvedRewardRequest,
+) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError> {
+    let source = port
+        .load_problem_solved_source(&request.occurrence_id)
+        .await?;
+    if source.semantic_kind != acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion {
+        return Err(ProblemSolvedRewardError::OutOfScope);
+    }
+    if source.activation_relation == acm_os_domain::ProblemSolvedActivationRelation::PreActivation {
+        if request.qualification.is_some() {
+            return Err(ProblemSolvedRewardError::ExplicitQualificationNotAllowedPreActivation);
+        }
+        if let Some(result) = port
+            .load_processed_problem_solved_reward(&request.occurrence_id)
+            .await?
+        {
+            return Ok(result);
+        }
+        let decision = acm_os_domain::ProblemSolvedPolicy::reward_decision(
+            acm_os_domain::ProblemSolvedPolicyOutcome::PreActivationZero,
+        )
+        .expect("pre-activation has a fixed decision");
+        return port
+            .process_problem_solved_reward(&request.occurrence_id, decision)
+            .await;
+    }
+
+    let evaluation = match port
+        .load_problem_solved_evaluation(&request.occurrence_id)
+        .await?
+    {
+        Some(existing) => {
+            if let Some(input) = request.qualification.as_ref() {
+                if existing.problem_id != source.problem_id
+                    || existing.qualification != input.qualification
+                    || existing.reason != input.reason
+                    || existing.evaluated_at_utc != input.evaluated_at_utc
+                {
+                    return Err(ProblemSolvedRewardError::EvaluationConflict);
+                }
+            }
+            existing
+        }
+        None => {
+            let input = request
+                .qualification
+                .as_ref()
+                .ok_or(ProblemSolvedRewardError::QualificationRequired)?;
+            if !acm_os_domain::ProblemSolvedPolicy::reason_is_valid(
+                input.qualification,
+                input.reason,
+            ) {
+                return Err(ProblemSolvedRewardError::DecisionInvalid);
+            }
+            match port
+                .create_problem_solved_evaluation(&request.occurrence_id, source.problem_id, input)
+                .await
+            {
+                Ok(evaluation) => evaluation,
+                Err(ProblemSolvedRewardError::DecisionConflict) => {
+                    let existing = port
+                        .load_problem_solved_evaluation(&request.occurrence_id)
+                        .await?
+                        .ok_or(ProblemSolvedRewardError::DecisionConflict)?;
+                    if existing.problem_id != source.problem_id
+                        || existing.qualification != input.qualification
+                        || existing.reason != input.reason
+                        || existing.evaluated_at_utc != input.evaluated_at_utc
+                    {
+                        return Err(ProblemSolvedRewardError::EvaluationConflict);
+                    }
+                    existing
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+
+    if let Some(result) = port
+        .load_processed_problem_solved_reward(&request.occurrence_id)
+        .await?
+    {
+        return Ok(result);
+    }
+
+    let claim = port
+        .load_problem_solved_positive_claim(source.problem_id)
+        .await?;
+    let state = acm_os_domain::ProblemSolvedPolicy::evaluation_state(evaluation.qualification);
+    let outcome =
+        acm_os_domain::ProblemSolvedPolicy::decide(acm_os_domain::ProblemSolvedPolicyContext {
+            semantic_kind: source.semantic_kind,
+            activation_relation: source.activation_relation,
+            evaluation: Some(state),
+            positive_claim_exists: claim.is_some(),
+        });
+    let decision = acm_os_domain::ProblemSolvedPolicy::reward_decision(outcome)
+        .expect("post-activation evaluated source has a fixed decision");
+    match port
+        .process_problem_solved_reward(&request.occurrence_id, decision)
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(ProblemSolvedRewardError::PositiveClaimAlreadyTaken)
+            if outcome == acm_os_domain::ProblemSolvedPolicyOutcome::AttemptQualifiedPositive =>
+        {
+            let winner = port
+                .load_problem_solved_positive_claim(source.problem_id)
+                .await?
+                .ok_or(ProblemSolvedRewardError::IntegrityViolation)?;
+            if winner.problem_id != source.problem_id || winner.reward_event_id.is_empty() {
+                return Err(ProblemSolvedRewardError::IntegrityViolation);
+            }
+            let loser_decision = acm_os_domain::ProblemSolvedPolicy::reward_decision(
+                acm_os_domain::ProblemSolvedPolicyOutcome::AlreadyRewardedZero,
+            )
+            .expect("already-rewarded has a fixed decision");
+            port.process_problem_solved_reward(&request.occurrence_id, loser_decision)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// The canonical, adapter-validated import contract.  It deliberately has no
 /// network or database details: adapters produce it and persistence consumes
 /// it after identity validation.
@@ -3199,7 +3436,8 @@ fn normalize_candidate_target(target_ref: &str) -> Result<String, KnowledgeCandi
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
@@ -3659,5 +3897,580 @@ mod tests {
             ),
             Err(ManualContestError::DuplicateProblem)
         );
+    }
+
+    struct ProblemSolvedPolicyPortFake {
+        source: ProblemSolvedSourceContext,
+        evaluation: RefCell<Option<ProblemSolvedEvaluationRecord>>,
+        claim_reads: RefCell<VecDeque<Option<ProblemSolvedPositiveClaimRecord>>>,
+        processed: RefCell<Option<ProblemSolvedRewardResult>>,
+        create_calls: Cell<usize>,
+        process_calls: RefCell<Vec<acm_os_domain::ProblemSolvedRewardDecision>>,
+        process_results:
+            RefCell<VecDeque<Result<ProblemSolvedRewardResult, ProblemSolvedRewardError>>>,
+    }
+
+    impl ProblemSolvedPolicyPortFake {
+        fn new(
+            source: ProblemSolvedSourceContext,
+            evaluation: Option<ProblemSolvedEvaluationRecord>,
+            claim_reads: Vec<Option<ProblemSolvedPositiveClaimRecord>>,
+        ) -> Self {
+            Self {
+                source,
+                evaluation: RefCell::new(evaluation),
+                claim_reads: RefCell::new(claim_reads.into()),
+                processed: RefCell::new(None),
+                create_calls: Cell::new(0),
+                process_calls: RefCell::new(Vec::new()),
+                process_results: RefCell::new(VecDeque::new()),
+            }
+        }
+
+        fn input(
+            qualification: acm_os_domain::ProblemSolvedQualification,
+            reason: acm_os_domain::ProblemSolvedEvaluationReason,
+        ) -> ProblemSolvedQualificationInput {
+            ProblemSolvedQualificationInput {
+                qualification,
+                reason,
+                evaluated_at_utc: "2026-08-24T00:00:00.000Z".to_owned(),
+            }
+        }
+
+        fn source(
+            relation: acm_os_domain::ProblemSolvedActivationRelation,
+            semantic_kind: acm_os_domain::ProblemSolvedSemanticKind,
+        ) -> ProblemSolvedSourceContext {
+            ProblemSolvedSourceContext {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                semantic_kind,
+                activation_relation: relation,
+                occurred_at_utc: "2026-08-24T00:00:00.000Z".to_owned(),
+            }
+        }
+
+        fn valid_result(
+            &self,
+            decision: acm_os_domain::ProblemSolvedRewardDecision,
+        ) -> ProblemSolvedRewardResult {
+            ProblemSolvedRewardResult {
+                disposition: ProblemSolvedRewardDisposition::Created,
+                reward_event_id: "event".to_owned(),
+                problem_id: self.source.problem_id,
+                source_occurred_at_utc: self.source.occurred_at_utc.clone(),
+                activation_relation: "post_activation".to_owned(),
+                xp_amount: decision.xp_amount,
+                coin_amount: decision.coin_amount,
+                decision_reason: decision.decision_reason.to_owned(),
+                policy_key: decision.policy_key.to_owned(),
+                policy_version: decision.policy_version,
+                ledger_entry_ids: Vec::new(),
+            }
+        }
+    }
+
+    impl ProblemSolvedRewardPort for ProblemSolvedPolicyPortFake {
+        async fn load_problem_solved_source(
+            &self,
+            _occurrence_id: &str,
+        ) -> Result<ProblemSolvedSourceContext, ProblemSolvedRewardError> {
+            Ok(self.source.clone())
+        }
+
+        async fn load_problem_solved_evaluation(
+            &self,
+            _occurrence_id: &str,
+        ) -> Result<Option<ProblemSolvedEvaluationRecord>, ProblemSolvedRewardError> {
+            Ok(self.evaluation.borrow().clone())
+        }
+
+        async fn create_problem_solved_evaluation(
+            &self,
+            _occurrence_id: &str,
+            _problem_id: i64,
+            input: &ProblemSolvedQualificationInput,
+        ) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError> {
+            self.create_calls.set(self.create_calls.get() + 1);
+            let evaluation = ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: self.source.problem_id,
+                qualification: input.qualification,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            };
+            *self.evaluation.borrow_mut() = Some(evaluation.clone());
+            Ok(evaluation)
+        }
+
+        async fn load_problem_solved_positive_claim(
+            &self,
+            _problem_id: i64,
+        ) -> Result<Option<ProblemSolvedPositiveClaimRecord>, ProblemSolvedRewardError> {
+            Ok(self.claim_reads.borrow_mut().pop_front().flatten())
+        }
+
+        async fn load_processed_problem_solved_reward(
+            &self,
+            _occurrence_id: &str,
+        ) -> Result<Option<ProblemSolvedRewardResult>, ProblemSolvedRewardError> {
+            Ok(self.processed.borrow().clone())
+        }
+
+        async fn process_problem_solved_reward(
+            &self,
+            _occurrence_id: &str,
+            decision: acm_os_domain::ProblemSolvedRewardDecision,
+        ) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError> {
+            self.process_calls.borrow_mut().push(decision);
+            if let Some(result) = self.process_results.borrow_mut().pop_front() {
+                return result;
+            }
+            Ok(self.valid_result(decision))
+        }
+    }
+
+    #[test]
+    fn r3c2_pre_activation_is_zero_without_evaluation() {
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PreActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            None,
+            vec![None],
+        );
+        let result = run_ready(process_problem_solved_reward(
+            &port,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "occurrence".to_owned(),
+                qualification: None,
+            },
+        ))
+        .expect("pre-activation result");
+        assert_eq!(result.xp_amount, 0);
+        assert_eq!(result.coin_amount, 0);
+        assert_eq!(result.decision_reason, "pre_activation");
+        assert_eq!(port.create_calls.get(), 0);
+        assert_eq!(port.process_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn r3c2_post_activation_requires_explicit_qualification() {
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            None,
+            vec![None],
+        );
+        assert_eq!(
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: None,
+                },
+            )),
+            Err(ProblemSolvedRewardError::QualificationRequired)
+        );
+        assert_eq!(port.create_calls.get(), 0);
+        assert!(port.process_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn r3c2_pre_activation_explicit_qualification_rejects_before_writes() {
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PreActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            None,
+            vec![None],
+        );
+        let request = ProblemSolvedRewardRequest {
+            occurrence_id: "occurrence".to_owned(),
+            qualification: Some(ProblemSolvedPolicyPortFake::input(
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+            )),
+        };
+        assert_eq!(
+            run_ready(process_problem_solved_reward(&port, request)),
+            Err(ProblemSolvedRewardError::ExplicitQualificationNotAllowedPreActivation)
+        );
+        assert_eq!(port.create_calls.get(), 0);
+        assert!(port.process_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn r3c2_nonqualifying_reasons_map_to_exact_zero_decisions() {
+        for reason in [
+            acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+            acm_os_domain::ProblemSolvedEvaluationReason::InsufficientDigestion,
+            acm_os_domain::ProblemSolvedEvaluationReason::Other,
+        ] {
+            let port = ProblemSolvedPolicyPortFake::new(
+                ProblemSolvedPolicyPortFake::source(
+                    acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                    acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+                ),
+                None,
+                vec![None],
+            );
+            let result = run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: Some(ProblemSolvedPolicyPortFake::input(
+                        acm_os_domain::ProblemSolvedQualification::NonQualifying,
+                        reason,
+                    )),
+                },
+            ))
+            .expect("nonqualifying result");
+            assert_eq!(result.xp_amount, 0);
+            assert_eq!(result.coin_amount, 0);
+            assert_eq!(result.decision_reason, "non_qualifying");
+            assert_eq!(port.create_calls.get(), 1);
+            assert_eq!(port.process_calls.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn r3c2_qualifying_flow_attempts_fixed_positive_once() {
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            None,
+            vec![None],
+        );
+        let result = run_ready(process_problem_solved_reward(
+            &port,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "occurrence".to_owned(),
+                qualification: Some(ProblemSolvedPolicyPortFake::input(
+                    acm_os_domain::ProblemSolvedQualification::Qualifying,
+                    acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+                )),
+            },
+        ))
+        .expect("qualifying result");
+        assert_eq!((result.xp_amount, result.coin_amount), (100, 100));
+        assert_eq!(result.decision_reason, "qualified_positive");
+        assert_eq!(port.create_calls.get(), 1);
+        let calls = port.process_calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].xp_amount, calls[0].coin_amount), (100, 100));
+    }
+
+    #[test]
+    fn r3c2_identical_evaluation_retry_skips_creation() {
+        for qualification in [
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedQualification::NonQualifying,
+        ] {
+            let reason = if qualification == acm_os_domain::ProblemSolvedQualification::Qualifying {
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested
+            } else {
+                acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry
+            };
+            let input = ProblemSolvedPolicyPortFake::input(qualification, reason);
+            let evaluation = ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification,
+                reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            };
+            let port = ProblemSolvedPolicyPortFake::new(
+                ProblemSolvedPolicyPortFake::source(
+                    acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                    acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+                ),
+                Some(evaluation),
+                vec![None],
+            );
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: Some(input),
+                },
+            ))
+            .expect("identical evaluation retry");
+            assert_eq!(port.create_calls.get(), 0);
+            assert_eq!(port.process_calls.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn r3c2_conflicting_evaluation_fails_before_processing_even_when_processed() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            Some(ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification: acm_os_domain::ProblemSolvedQualification::Qualifying,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            }),
+            vec![None],
+        );
+        *port.processed.borrow_mut() = Some(
+            port.valid_result(
+                acm_os_domain::ProblemSolvedPolicy::reward_decision(
+                    acm_os_domain::ProblemSolvedPolicyOutcome::AttemptQualifiedPositive,
+                )
+                .expect("decision"),
+            ),
+        );
+        let conflicting = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::NonQualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+        );
+        assert_eq!(
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: Some(conflicting),
+                },
+            )),
+            Err(ProblemSolvedRewardError::EvaluationConflict)
+        );
+        assert!(port.process_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn r3c2_same_positive_occurrence_returns_existing_processed_result() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            Some(ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification: input.qualification,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            }),
+            vec![Some(ProblemSolvedPositiveClaimRecord {
+                problem_id: 7,
+                reward_event_id: "winner".to_owned(),
+            })],
+        );
+        let existing = port.valid_result(
+            acm_os_domain::ProblemSolvedPolicy::reward_decision(
+                acm_os_domain::ProblemSolvedPolicyOutcome::AttemptQualifiedPositive,
+            )
+            .expect("decision"),
+        );
+        *port.processed.borrow_mut() = Some(existing.clone());
+        let result = run_ready(process_problem_solved_reward(
+            &port,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "occurrence".to_owned(),
+                qualification: Some(input),
+            },
+        ))
+        .expect("existing result");
+        assert_eq!(result, existing);
+        assert!(port.process_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn r3c2_later_qualifying_occurrence_uses_already_rewarded_zero() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            None,
+            vec![Some(ProblemSolvedPositiveClaimRecord {
+                problem_id: 7,
+                reward_event_id: "winner".to_owned(),
+            })],
+        );
+        let result = run_ready(process_problem_solved_reward(
+            &port,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "occurrence".to_owned(),
+                qualification: Some(input),
+            },
+        ))
+        .expect("later result");
+        assert_eq!((result.xp_amount, result.coin_amount), (0, 0));
+        assert_eq!(result.decision_reason, "already_rewarded");
+        assert_eq!(port.process_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn r3c2_claim_race_retries_loser_once_after_valid_winner_reload() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let winner = Some(ProblemSolvedPositiveClaimRecord {
+            problem_id: 7,
+            reward_event_id: "winner".to_owned(),
+        });
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            Some(ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification: input.qualification,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            }),
+            vec![None, winner],
+        );
+        port.process_results.borrow_mut().extend([
+            Err(ProblemSolvedRewardError::PositiveClaimAlreadyTaken),
+            Ok(port.valid_result(
+                acm_os_domain::ProblemSolvedPolicy::reward_decision(
+                    acm_os_domain::ProblemSolvedPolicyOutcome::AlreadyRewardedZero,
+                )
+                .expect("zero decision"),
+            )),
+        ]);
+        let result = run_ready(process_problem_solved_reward(
+            &port,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "occurrence".to_owned(),
+                qualification: Some(input),
+            },
+        ))
+        .expect("race recovery");
+        assert_eq!(result.decision_reason, "already_rewarded");
+        assert_eq!(port.process_calls.borrow().len(), 2);
+        assert_eq!(
+            port.process_calls.borrow()[0].decision_reason,
+            "qualified_positive"
+        );
+        assert_eq!(
+            port.process_calls.borrow()[1].decision_reason,
+            "already_rewarded"
+        );
+    }
+
+    #[test]
+    fn r3c2_generic_failure_is_not_downgraded_to_zero() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            Some(ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification: input.qualification,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            }),
+            vec![None],
+        );
+        port.process_results
+            .borrow_mut()
+            .push_back(Err(ProblemSolvedRewardError::DatabaseFailure));
+        assert_eq!(
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: Some(input),
+                },
+            )),
+            Err(ProblemSolvedRewardError::DatabaseFailure)
+        );
+        assert_eq!(port.process_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn r3c2_typed_conflict_without_valid_winner_fails_closed() {
+        let input = ProblemSolvedPolicyPortFake::input(
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            ),
+            Some(ProblemSolvedEvaluationRecord {
+                occurrence_id: "occurrence".to_owned(),
+                problem_id: 7,
+                qualification: input.qualification,
+                reason: input.reason,
+                evaluated_at_utc: input.evaluated_at_utc.clone(),
+            }),
+            vec![None, None],
+        );
+        port.process_results
+            .borrow_mut()
+            .push_back(Err(ProblemSolvedRewardError::PositiveClaimAlreadyTaken));
+        assert_eq!(
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: Some(input),
+                },
+            )),
+            Err(ProblemSolvedRewardError::IntegrityViolation)
+        );
+        assert_eq!(port.process_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn r3c2_contest_personal_solve_is_out_of_scope_without_writes() {
+        let port = ProblemSolvedPolicyPortFake::new(
+            ProblemSolvedPolicyPortFake::source(
+                acm_os_domain::ProblemSolvedActivationRelation::PostActivation,
+                acm_os_domain::ProblemSolvedSemanticKind::ContestPersonalSolve,
+            ),
+            None,
+            vec![None],
+        );
+        assert_eq!(
+            run_ready(process_problem_solved_reward(
+                &port,
+                ProblemSolvedRewardRequest {
+                    occurrence_id: "occurrence".to_owned(),
+                    qualification: None,
+                },
+            )),
+            Err(ProblemSolvedRewardError::OutOfScope)
+        );
+        assert_eq!(port.create_calls.get(), 0);
+        assert!(port.process_calls.borrow().is_empty());
     }
 }

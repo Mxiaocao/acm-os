@@ -251,6 +251,148 @@ impl ReviewSchedulingEngine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedSemanticKind {
+    LearningCompletion,
+    ContestPersonalSolve,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedQualification {
+    Qualifying,
+    NonQualifying,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedEvaluationReason {
+    ExplicitlyAcceptedDigested,
+    MechanicalReentry,
+    InsufficientDigestion,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedEvaluationState {
+    Qualifying,
+    NonQualifying,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedPolicyOutcome {
+    NeedsQualification,
+    PreActivationZero,
+    NonQualifyingZero,
+    AttemptQualifiedPositive,
+    AlreadyRewardedZero,
+    OutOfScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProblemSolvedRewardDecision {
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: &'static str,
+    pub policy_key: &'static str,
+    pub policy_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProblemSolvedPolicyContext {
+    pub semantic_kind: ProblemSolvedSemanticKind,
+    pub activation_relation: ProblemSolvedActivationRelation,
+    pub evaluation: Option<ProblemSolvedEvaluationState>,
+    pub positive_claim_exists: bool,
+}
+
+pub struct ProblemSolvedPolicy;
+
+impl ProblemSolvedPolicy {
+    pub const POLICY_KEY: &'static str = "problem_solved_v1";
+    pub const POLICY_VERSION: i64 = 1;
+    pub const POSITIVE_XP: i64 = 100;
+    pub const POSITIVE_COIN: i64 = 100;
+
+    pub fn decide(context: ProblemSolvedPolicyContext) -> ProblemSolvedPolicyOutcome {
+        use ProblemSolvedActivationRelation::PreActivation;
+        use ProblemSolvedEvaluationState::{NonQualifying, Qualifying};
+        use ProblemSolvedPolicyOutcome::*;
+        if context.semantic_kind != ProblemSolvedSemanticKind::LearningCompletion {
+            return OutOfScope;
+        }
+        if context.activation_relation == PreActivation {
+            return PreActivationZero;
+        }
+        match context.evaluation {
+            None => NeedsQualification,
+            Some(NonQualifying) => NonQualifyingZero,
+            Some(Qualifying) if context.positive_claim_exists => AlreadyRewardedZero,
+            Some(Qualifying) => AttemptQualifiedPositive,
+        }
+    }
+
+    pub const fn reward_decision(
+        outcome: ProblemSolvedPolicyOutcome,
+    ) -> Option<ProblemSolvedRewardDecision> {
+        use ProblemSolvedPolicyOutcome::*;
+        let (xp_amount, coin_amount, decision_reason) = match outcome {
+            PreActivationZero => (0, 0, "pre_activation"),
+            NonQualifyingZero => (0, 0, "non_qualifying"),
+            AttemptQualifiedPositive => {
+                (Self::POSITIVE_XP, Self::POSITIVE_COIN, "qualified_positive")
+            }
+            AlreadyRewardedZero => (0, 0, "already_rewarded"),
+            NeedsQualification | OutOfScope => return None,
+        };
+        Some(ProblemSolvedRewardDecision {
+            xp_amount,
+            coin_amount,
+            decision_reason,
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        })
+    }
+
+    pub const fn evaluation_state(
+        qualification: ProblemSolvedQualification,
+    ) -> ProblemSolvedEvaluationState {
+        match qualification {
+            ProblemSolvedQualification::Qualifying => ProblemSolvedEvaluationState::Qualifying,
+            ProblemSolvedQualification::NonQualifying => {
+                ProblemSolvedEvaluationState::NonQualifying
+            }
+        }
+    }
+
+    pub const fn reason_is_valid(
+        qualification: ProblemSolvedQualification,
+        reason: ProblemSolvedEvaluationReason,
+    ) -> bool {
+        matches!(
+            (qualification, reason),
+            (
+                ProblemSolvedQualification::Qualifying,
+                ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::MechanicalReentry
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::InsufficientDigestion
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::Other
+            )
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewAttemptType {
     FirstColdStart,
     LongTermReview,
@@ -2401,6 +2543,54 @@ mod tests {
             Err(TodayPlannerError::LaneMismatch {
                 problem_id: "wrong-lane".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn problem_solved_policy_matrix_and_fixed_decisions() {
+        use ProblemSolvedActivationRelation::{PostActivation, PreActivation};
+        use ProblemSolvedEvaluationState::{NonQualifying, Qualifying};
+        use ProblemSolvedPolicyOutcome::*;
+        let base = |relation, evaluation, claim| {
+            ProblemSolvedPolicy::decide(ProblemSolvedPolicyContext {
+                semantic_kind: ProblemSolvedSemanticKind::LearningCompletion,
+                activation_relation: relation,
+                evaluation,
+                positive_claim_exists: claim,
+            })
+        };
+        assert_eq!(base(PreActivation, None, false), PreActivationZero);
+        assert_eq!(base(PostActivation, None, false), NeedsQualification);
+        assert_eq!(
+            base(PostActivation, Some(NonQualifying), false),
+            NonQualifyingZero
+        );
+        assert_eq!(
+            base(PostActivation, Some(Qualifying), false),
+            AttemptQualifiedPositive
+        );
+        assert_eq!(
+            base(PostActivation, Some(Qualifying), true),
+            AlreadyRewardedZero
+        );
+        assert_eq!(
+            ProblemSolvedPolicy::reward_decision(AttemptQualifiedPositive),
+            Some(ProblemSolvedRewardDecision {
+                xp_amount: 100,
+                coin_amount: 100,
+                decision_reason: "qualified_positive",
+                policy_key: "problem_solved_v1",
+                policy_version: 1,
+            })
+        );
+        assert_eq!(
+            ProblemSolvedPolicy::decide(ProblemSolvedPolicyContext {
+                semantic_kind: ProblemSolvedSemanticKind::ContestPersonalSolve,
+                activation_relation: PostActivation,
+                evaluation: Some(Qualifying),
+                positive_claim_exists: false,
+            }),
+            OutOfScope
         );
     }
 }

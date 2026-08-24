@@ -28,11 +28,14 @@ use acm_os_application::{
     PersonalNoteReadError, PersonalNoteReadPort, PersonalNoteReadState,
     PreparedPersonalNoteDeletion, PrerequisiteLinkTarget, ProblemIdentityType,
     ProblemLifecycleError, ProblemLifecyclePort, ProblemLifecycleState, ProblemMarkdownProjection,
-    ProblemMasteryProjection, RelatedKnowledgeProblemProjection, RevealedReviewHelp, ReviewAttempt,
-    ReviewAttemptError, ReviewAttemptPort, ReviewAttemptStatus, ReviewCompletionContext,
-    ReviewCompletionInput, ReviewFailureReason, ReviewFocusView, ReviewHelpDrawerView,
-    ReviewHelpItem, ReviewHistoryItem, ReviewHistoryView, StartupGateStatus, StartupRecoveryReason,
-    StatementReadState, StatementSnapshotDraft, SubmissionFact, TodayEntryOrigin, TodayEntryStatus,
+    ProblemMasteryProjection, ProblemSolvedEvaluationRecord, ProblemSolvedPositiveClaimRecord,
+    ProblemSolvedQualificationInput, ProblemSolvedRewardDisposition, ProblemSolvedRewardError,
+    ProblemSolvedRewardPort, ProblemSolvedRewardResult, ProblemSolvedSourceContext,
+    RelatedKnowledgeProblemProjection, RevealedReviewHelp, ReviewAttempt, ReviewAttemptError,
+    ReviewAttemptPort, ReviewAttemptStatus, ReviewCompletionContext, ReviewCompletionInput,
+    ReviewFailureReason, ReviewFocusView, ReviewHelpDrawerView, ReviewHelpItem, ReviewHistoryItem,
+    ReviewHistoryView, StartupGateStatus, StartupRecoveryReason, StatementReadState,
+    StatementSnapshotDraft, SubmissionFact, TodayEntryOrigin, TodayEntryStatus,
     TodayGenerationCandidate, TodayGenerationContext, TodayReplanPreview, TodaySnapshot,
     TodaySnapshotEntry, TodaySnapshotError, TodaySnapshotPort, WeeklyAcmBudgetPort,
     WeeklyAcmBudgetSchedule, WorkspaceConfiguration, WorkspaceConfigurationPort,
@@ -13260,6 +13263,258 @@ async fn verify_and_publish_backup(
     })
 }
 
+fn map_problem_solved_error(error: RewardProcessingError) -> ProblemSolvedRewardError {
+    match error {
+        RewardProcessingError::Unavailable => ProblemSolvedRewardError::Unavailable,
+        RewardProcessingError::SourceNotFound => ProblemSolvedRewardError::SourceNotFound,
+        RewardProcessingError::SourceInvalid => ProblemSolvedRewardError::SourceInvalid,
+        RewardProcessingError::RewardInactive => ProblemSolvedRewardError::RewardInactive,
+        RewardProcessingError::DecisionInvalid => ProblemSolvedRewardError::DecisionInvalid,
+        RewardProcessingError::DecisionConflict => ProblemSolvedRewardError::DecisionConflict,
+        RewardProcessingError::PositiveClaimAlreadyTaken => {
+            ProblemSolvedRewardError::PositiveClaimAlreadyTaken
+        }
+        RewardProcessingError::IntegrityViolation => ProblemSolvedRewardError::IntegrityViolation,
+        RewardProcessingError::DatabaseFailure | RewardProcessingError::InvalidLimit => {
+            ProblemSolvedRewardError::DatabaseFailure
+        }
+    }
+}
+
+fn map_problem_solved_evaluation(
+    evaluation: ProblemSolvedEvaluation,
+) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError> {
+    let qualification = match evaluation.qualification.as_str() {
+        "qualifying" => acm_os_domain::ProblemSolvedQualification::Qualifying,
+        "non_qualifying" => acm_os_domain::ProblemSolvedQualification::NonQualifying,
+        _ => return Err(ProblemSolvedRewardError::IntegrityViolation),
+    };
+    let reason = match evaluation.reason_code.as_str() {
+        "explicitly_accepted_digested" => {
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested
+        }
+        "mechanical_reentry" => acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+        "insufficient_digestion" => {
+            acm_os_domain::ProblemSolvedEvaluationReason::InsufficientDigestion
+        }
+        "other" => acm_os_domain::ProblemSolvedEvaluationReason::Other,
+        _ => return Err(ProblemSolvedRewardError::IntegrityViolation),
+    };
+    if evaluation.policy_key != "problem_solved_v1"
+        || evaluation.policy_version != 1
+        || !acm_os_domain::ProblemSolvedPolicy::reason_is_valid(qualification, reason)
+    {
+        return Err(ProblemSolvedRewardError::IntegrityViolation);
+    }
+    Ok(ProblemSolvedEvaluationRecord {
+        occurrence_id: evaluation.problem_completion_occurrence_id,
+        problem_id: evaluation.problem_id,
+        qualification,
+        reason,
+        evaluated_at_utc: evaluation.evaluated_at_utc,
+    })
+}
+
+impl ProblemSolvedRewardPort for DatabaseRuntime {
+    async fn load_problem_solved_source(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<ProblemSolvedSourceContext, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let authority = load_reward_activation_authority(&mut transaction)
+            .await
+            .map_err(map_problem_solved_error)?;
+        let activation_at = authority
+            .activated_at_utc
+            .ok_or(ProblemSolvedRewardError::RewardInactive)?;
+        let row: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT problem_id, recorded_at_utc, semantic_kind
+             FROM problem_completion_occurrences WHERE id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let (problem_id, occurred_at_utc, semantic_kind) =
+            row.ok_or(ProblemSolvedRewardError::SourceNotFound)?;
+        let source_time = parse_reward_utc_millis(&occurred_at_utc)
+            .ok_or(ProblemSolvedRewardError::SourceInvalid)?;
+        let activation_time = parse_reward_utc_millis(&activation_at)
+            .ok_or(ProblemSolvedRewardError::IntegrityViolation)?;
+        let semantic_kind = match semantic_kind.as_str() {
+            "learning_completion" => acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            "contest_personal_solve" => {
+                acm_os_domain::ProblemSolvedSemanticKind::ContestPersonalSolve
+            }
+            _ => acm_os_domain::ProblemSolvedSemanticKind::Other,
+        };
+        let activation_relation = if source_time <= activation_time {
+            acm_os_domain::ProblemSolvedActivationRelation::PreActivation
+        } else {
+            acm_os_domain::ProblemSolvedActivationRelation::PostActivation
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        Ok(ProblemSolvedSourceContext {
+            occurrence_id: occurrence_id.to_owned(),
+            problem_id,
+            semantic_kind,
+            activation_relation,
+            occurred_at_utc,
+        })
+    }
+
+    async fn load_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluationRecord>, ProblemSolvedRewardError> {
+        DatabaseRuntime::load_problem_solved_evaluation(self, occurrence_id)
+            .await
+            .map_err(map_problem_solved_error)?
+            .map(map_problem_solved_evaluation)
+            .transpose()
+    }
+
+    async fn create_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        input: &ProblemSolvedQualificationInput,
+    ) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError> {
+        let qualification = match input.qualification {
+            acm_os_domain::ProblemSolvedQualification::Qualifying => "qualifying",
+            acm_os_domain::ProblemSolvedQualification::NonQualifying => "non_qualifying",
+        };
+        let reason = match input.reason {
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested => {
+                "explicitly_accepted_digested"
+            }
+            acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry => "mechanical_reentry",
+            acm_os_domain::ProblemSolvedEvaluationReason::InsufficientDigestion => {
+                "insufficient_digestion"
+            }
+            acm_os_domain::ProblemSolvedEvaluationReason::Other => "other",
+        };
+        DatabaseRuntime::create_problem_solved_evaluation(
+            self,
+            occurrence_id,
+            problem_id,
+            qualification,
+            reason,
+            &input.evaluated_at_utc,
+        )
+        .await
+        .map_err(map_problem_solved_error)
+        .and_then(map_problem_solved_evaluation)
+    }
+
+    async fn load_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaimRecord>, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let claim = load_valid_positive_claim(pool, problem_id)
+            .await
+            .map_err(map_problem_solved_error)?;
+        Ok(claim.map(|claim| ProblemSolvedPositiveClaimRecord {
+            problem_id: claim.problem_id,
+            reward_event_id: claim.reward_event_id,
+        }))
+    }
+
+    async fn load_processed_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedRewardResult>, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let result = load_reward_result(
+            &mut connection,
+            &RewardSource::ProblemCompletionOccurrence {
+                occurrence_id: occurrence_id.to_owned(),
+            },
+        )
+        .await
+        .map_err(map_problem_solved_error)?;
+        Ok(result.map(|result| ProblemSolvedRewardResult {
+            disposition: match result.disposition {
+                RewardProcessingDisposition::Created => ProblemSolvedRewardDisposition::Created,
+                RewardProcessingDisposition::AlreadyProcessed => {
+                    ProblemSolvedRewardDisposition::AlreadyProcessed
+                }
+            },
+            reward_event_id: result.reward_event_id,
+            problem_id: result.problem_id,
+            source_occurred_at_utc: result.source_occurred_at_utc,
+            activation_relation: result.activation_relation,
+            xp_amount: result.xp_amount,
+            coin_amount: result.coin_amount,
+            decision_reason: result.decision_reason,
+            policy_key: result.policy_key,
+            policy_version: result.policy_version,
+            ledger_entry_ids: result.ledger_entry_ids,
+        }))
+    }
+
+    async fn process_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+        decision: acm_os_domain::ProblemSolvedRewardDecision,
+    ) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError> {
+        DatabaseRuntime::process_reward(
+            self,
+            &RewardSource::ProblemCompletionOccurrence {
+                occurrence_id: occurrence_id.to_owned(),
+            },
+            &RewardDecision {
+                xp_amount: decision.xp_amount,
+                coin_amount: decision.coin_amount,
+                decision_reason: decision.decision_reason.to_owned(),
+                policy_key: decision.policy_key.to_owned(),
+                policy_version: decision.policy_version,
+            },
+        )
+        .await
+        .map_err(map_problem_solved_error)
+        .map(|result| ProblemSolvedRewardResult {
+            disposition: match result.disposition {
+                RewardProcessingDisposition::Created => ProblemSolvedRewardDisposition::Created,
+                RewardProcessingDisposition::AlreadyProcessed => {
+                    ProblemSolvedRewardDisposition::AlreadyProcessed
+                }
+            },
+            reward_event_id: result.reward_event_id,
+            problem_id: result.problem_id,
+            source_occurred_at_utc: result.source_occurred_at_utc,
+            activation_relation: result.activation_relation,
+            xp_amount: result.xp_amount,
+            coin_amount: result.coin_amount,
+            decision_reason: result.decision_reason,
+            policy_key: result.policy_key,
+            policy_version: result.policy_version,
+            ledger_entry_ids: result.ledger_entry_ids,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -13270,20 +13525,22 @@ mod tests {
         confirm_knowledge_markdown_deleted, confirm_knowledge_understanding, create_personal_note,
         delete_personal_note, import_codeforces_contest, knowledge_relocation_candidates,
         list_knowledge_candidates, load_knowledge_detail, load_or_generate_today_snapshot,
-        preview_today_extra_suggestions, preview_today_replan, query_workspace_configuration,
-        rebind_knowledge_node, rebuild_knowledge_index, rebuild_knowledge_relations,
-        register_knowledge_candidate, reorder_today_snapshot, resolve_knowledge_identity_conflict,
-        reveal_review_help, review_focus, review_help_drawer, review_history,
-        search_knowledge_index, set_knowledge_candidate_disposition, start_or_resume_review,
-        transition_problem_lifecycle, update_problem_mastery_evidence, void_review,
-        weekly_acm_budget_for_date, ContestImportDraft, ContestImportPort, ContestImportSource,
-        ContestImportSourceError, ContestImportStatus, ContestProblemSlotDraft, ContestReadPort,
-        PersonalNoteError, PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState,
-        ProblemIdentityType, ProblemLifecyclePort, ReviewCompletionInput, ReviewFailureReason,
-        StartupGateStatus, StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft,
-        SubmissionFact, TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
-        WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
-        WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
+        preview_today_extra_suggestions, preview_today_replan, process_problem_solved_reward,
+        query_workspace_configuration, rebind_knowledge_node, rebuild_knowledge_index,
+        rebuild_knowledge_relations, register_knowledge_candidate, reorder_today_snapshot,
+        resolve_knowledge_identity_conflict, reveal_review_help, review_focus, review_help_drawer,
+        review_history, search_knowledge_index, set_knowledge_candidate_disposition,
+        start_or_resume_review, transition_problem_lifecycle, update_problem_mastery_evidence,
+        void_review, weekly_acm_budget_for_date, ContestImportDraft, ContestImportPort,
+        ContestImportSource, ContestImportSourceError, ContestImportStatus,
+        ContestProblemSlotDraft, ContestReadPort, PersonalNoteError, PersonalNotePatchError,
+        PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType, ProblemLifecyclePort,
+        ProblemSolvedQualificationInput, ProblemSolvedRewardPort, ProblemSolvedRewardRequest,
+        ReviewCompletionInput, ReviewFailureReason, StartupGateStatus, StartupRecoveryReason,
+        StatementAssetDraft, StatementSnapshotDraft, SubmissionFact, TodaySnapshotPort,
+        WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule, WorkspaceConfigurationDraft,
+        WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
+        INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::migrate::{Migration, MigrationType, Migrator};
     use sqlx::{Executor, SqlSafeStr};
@@ -13743,6 +14000,177 @@ mod tests {
         .await
         .expect("R3C1 source fixture");
         runtime
+    }
+
+    fn r3c2_request(
+        occurrence_id: &str,
+        qualification: acm_os_domain::ProblemSolvedQualification,
+        reason: acm_os_domain::ProblemSolvedEvaluationReason,
+    ) -> ProblemSolvedRewardRequest {
+        ProblemSolvedRewardRequest {
+            occurrence_id: occurrence_id.to_owned(),
+            qualification: Some(ProblemSolvedQualificationInput {
+                qualification,
+                reason,
+                evaluated_at_utc: "2026-08-24T12:34:56.600Z".to_owned(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn r3c2_application_qualifying_flow_is_durable_and_idempotent() {
+        let directory = TempDir::new().expect("R3C2 database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let request = r3c2_request(
+            "00000000-0000-0000-0000-000000000701",
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let first = process_problem_solved_reward(&runtime, request.clone())
+            .await
+            .expect("R3C2 positive");
+        let retry = process_problem_solved_reward(&runtime, request)
+            .await
+            .expect("R3C2 retry");
+        assert_eq!((first.xp_amount, first.coin_amount), (100, 100));
+        assert_eq!(
+            retry.disposition,
+            acm_os_application::ProblemSolvedRewardDisposition::AlreadyProcessed
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_completion_evaluations),
+                    (SELECT COUNT(*) FROM reward_problem_solved_positive_claims),
+                    (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("R3C2 counts");
+        assert_eq!(counts, (1, 1, 1, 1, 2));
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r3c2_application_nonqualifying_flow_writes_zero_without_claim() {
+        let directory = TempDir::new().expect("R3C2 nonqual database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000702', 1,
+                     'learning_completion', '2026-08-24T12:34:56.503Z')",
+        )
+        .execute(pool)
+        .await
+        .expect("nonqual source");
+        let result = process_problem_solved_reward(
+            &runtime,
+            r3c2_request(
+                "00000000-0000-0000-0000-000000000702",
+                acm_os_domain::ProblemSolvedQualification::NonQualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+            ),
+        )
+        .await
+        .expect("R3C2 zero");
+        assert_eq!((result.xp_amount, result.coin_amount), (0, 0));
+        assert_eq!(result.decision_reason, "non_qualifying");
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_completion_evaluations),
+                    (SELECT COUNT(*) FROM reward_problem_solved_positive_claims),
+                    (SELECT COUNT(*) FROM reward_ledger_entries)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("zero counts");
+        assert_eq!(counts, (1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn r3c2_application_later_qualifying_occurrence_is_already_rewarded() {
+        let directory = TempDir::new().expect("R3C2 later database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000703', 1,
+                     'learning_completion', '2026-08-24T12:34:56.503Z')",
+        )
+        .execute(pool)
+        .await
+        .expect("later source");
+        process_problem_solved_reward(
+            &runtime,
+            r3c2_request(
+                "00000000-0000-0000-0000-000000000701",
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+            ),
+        )
+        .await
+        .expect("winner");
+        let later = process_problem_solved_reward(
+            &runtime,
+            r3c2_request(
+                "00000000-0000-0000-0000-000000000703",
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+            ),
+        )
+        .await
+        .expect("later qualifying");
+        assert_eq!((later.xp_amount, later.coin_amount), (0, 0));
+        assert_eq!(later.decision_reason, "already_rewarded");
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r3c2_application_recovers_after_evaluation_commit_before_reward() {
+        let directory = TempDir::new().expect("R3C2 recovery database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000701",
+                1,
+                "qualifying",
+                "explicitly_accepted_digested",
+                "2026-08-24T12:34:56.600Z",
+            )
+            .await
+            .expect("durable evaluation");
+        let result = process_problem_solved_reward(
+            &runtime,
+            ProblemSolvedRewardRequest {
+                occurrence_id: "00000000-0000-0000-0000-000000000701".to_owned(),
+                qualification: None,
+            },
+        )
+        .await
+        .expect("recovered reward");
+        assert_eq!((result.xp_amount, result.coin_amount), (100, 100));
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
     }
 
     #[tokio::test]
@@ -25972,5 +26400,18 @@ mod tests {
             acm_os_domain::TodayCandidateReason::DueLongTermReview
         );
         assert_eq!(today.entries[0].status, TodayEntryStatus::NotStarted);
+    }
+
+    #[tokio::test]
+    async fn r3c2_problem_solved_port_preserves_unavailable_error() {
+        let runtime = DatabaseRuntime::recovery(StartupRecoveryReason::DatabaseUnavailable);
+        assert_eq!(
+            <DatabaseRuntime as ProblemSolvedRewardPort>::load_problem_solved_source(
+                &runtime,
+                "occurrence"
+            )
+            .await,
+            Err(ProblemSolvedRewardError::Unavailable)
+        );
     }
 }
