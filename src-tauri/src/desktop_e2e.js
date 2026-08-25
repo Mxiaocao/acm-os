@@ -92,6 +92,10 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       if (snapshot.entries.length !== expectedTitles.length) {
         throw new Error(`Later Today expected ${expectedTitles.length} entries, got ${snapshot.entries.length}`);
       }
+      if (new Set(snapshot.entries.map((entry) => entry.entryId)).size !== snapshot.entries.length
+        || new Set(snapshot.entries.map((entry) => entry.problemId)).size !== snapshot.entries.length) {
+        throw new Error("Later Today snapshot contained duplicate entry or Problem identities");
+      }
       snapshot.entries.forEach((entry, index) => {
         if (entry.problemTitle !== expectedTitles[index]
           || entry.position !== index
@@ -229,6 +233,138 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await stage("driver-started");
       const configured = await invoke("desktop_e2e_context");
       if (configured.phase === "verify-restart") {
+        const expectedProblems = [
+          ["A", "Desktop E2E Problem"],
+          ["B", "Desktop E2E Study Problem"],
+          ["C", "Desktop E2E Extra Study Problem"],
+        ];
+        await waitFor(
+          () => document.querySelector('nav a[href="/today"]') !== null,
+          "primary Today route after restart",
+        );
+
+        const problemDetails = await Promise.all(expectedProblems.map(([index]) => invoke(
+          "lightweight_problem_detail",
+          { input: { contestId: 1979, index } },
+        )));
+        problemDetails.forEach((detail, index) => {
+          const expected = expectedProblems[index];
+          if (detail.index !== expected[0]
+            || detail.title !== expected[1]
+            || detail.identityType !== "personal"
+            || !detail.personalNote
+            || detail.lifecycle.learningStatus !== "longTermReview"
+            || detail.lifecycle.nextReviewDueLocalDate !== "2026-08-24"
+            || detail.reviewAction !== "startReview") {
+            throw new Error(`Restart Problem ${expected[0]} did not preserve its learned long-term Review state`);
+          }
+        });
+        if (new Set(problemDetails.map((detail) => detail.personalNote.vaultRelativePath)).size !== problemDetails.length) {
+          throw new Error("Restart Problems did not preserve unique Personal Note bindings");
+        }
+        await stage("restart-learning-restored");
+
+        const reviewHistories = await Promise.all(expectedProblems.map(([index]) => invoke(
+          "review_history",
+          { input: { contestId: 1979, index } },
+        )));
+        reviewHistories.forEach((history, index) => {
+          const completed = history.attempts.filter((attempt) => attempt.status === "completed");
+          const active = history.attempts.filter((attempt) => attempt.status === "inProgress");
+          if (history.index !== expectedProblems[index][0]
+            || history.attempts.length !== 1
+            || completed.length !== 1
+            || active.length !== 0
+            || completed[0].completedLocalDate !== "2026-08-14") {
+            throw new Error(`Restart Problem ${expectedProblems[index][0]} did not preserve exactly one completed Review and zero active attempts`);
+          }
+        });
+        await stage("restart-reviews-restored");
+
+        const knowledgeIndex = await invoke("knowledge_index", { input: { query: "" } });
+        const segmentNodes = knowledgeIndex.nodes.filter((node) => node.displayName === "Segment Tree");
+        if (segmentNodes.length !== 1) throw new Error("Restart did not preserve exactly one Segment Tree Knowledge node");
+        const segmentNodeId = segmentNodes[0].knowledgeNodeId;
+        const segmentDetail = await invoke("knowledge_detail", { input: { knowledgeNodeId: segmentNodeId } });
+        const expectedRelatedTitles = expectedProblems.map(([, title]) => title);
+        if (segmentDetail.understanding?.current !== "basic"
+          || segmentDetail.understanding?.historicalHighest !== "basic"
+          || segmentDetail.relatedProblems.length !== expectedProblems.length
+          || new Set(segmentDetail.relatedProblems.map((problem) => problem.problemId)).size !== expectedProblems.length
+          || expectedRelatedTitles.some((title) => !segmentDetail.relatedProblems.some((problem) => problem.title === title))) {
+          throw new Error("Restart Segment Tree Knowledge state was not the authoritative basic/three-Problem state");
+        }
+        const reevaluation = await invoke("knowledge_reevaluation_suggestion", { input: { knowledgeNodeId: segmentNodeId } });
+        if (!reevaluation.shouldSuggest || reevaluation.qualifyingProblemCount !== 3) {
+          throw new Error("Restart Segment Tree reevaluation was not the authoritative three-Problem suggestion");
+        }
+        await navigateTo("Knowledge", "Knowledge index");
+        await clickText("Segment Tree");
+        await waitFor(() => document.querySelector(".knowledge-understanding select") !== null, "persisted Knowledge detail");
+        assertText(document.querySelector(".knowledge-understanding select")?.value ?? "<missing>", "basic", "persisted Knowledge understanding");
+        await stage("restart-knowledge-restored");
+
+        await navigateTo("Problems");
+        await clickText("A. Desktop E2E Problem");
+        const candidates = await invoke("knowledge_candidates", { input: { contestId: 1979, index: "A" } });
+        const ignoredCandidate = candidates.filter((candidate) => candidate.targetRef === "Segment Tree Candidate"
+          && candidate.disposition === "ignored");
+        const acceptedIntent = candidates.filter((candidate) => candidate.targetRef === "Fenwick Tree Intent"
+          && candidate.disposition === "acceptedIntent"
+          && candidate.knowledgeNodeId !== null);
+        if (candidates.length !== 2
+          || new Set(candidates.map((candidate) => candidate.fingerprint)).size !== 2
+          || ignoredCandidate.length !== 1
+          || acceptedIntent.length !== 1) {
+          throw new Error("Restart Knowledge candidate dispositions were not restored uniquely");
+        }
+        await acceptKnowledgeCandidate("Fenwick Tree Intent");
+        const candidatesAfterPatch = await invoke("knowledge_candidates", { input: { contestId: 1979, index: "A" } });
+        if (candidatesAfterPatch.length !== 1
+          || candidatesAfterPatch[0].targetRef !== "Segment Tree Candidate"
+          || candidatesAfterPatch[0].disposition !== "ignored") {
+          throw new Error("Restart explicit Safe Patch did not consume only the accepted Fenwick intent");
+        }
+        const fenwickDetail = await invoke("knowledge_detail", { input: { knowledgeNodeId: acceptedIntent[0].knowledgeNodeId } });
+        if (fenwickDetail.relatedProblems.length !== 1
+          || fenwickDetail.relatedProblems[0].title !== expectedProblems[0][1]) {
+          throw new Error("Restart explicit Safe Patch did not preserve one unique Fenwick relation");
+        }
+        await stage("restart-candidate-ignored-restored");
+        await stage("restart-accepted-intent-explicitly-safe-patched");
+
+        await navigateTo("Knowledge", "Knowledge index");
+        await clickText("Segment Tree");
+        await waitFor(() => document.querySelector(".knowledge-understanding select")?.value === "basic", "persisted Segment Tree detail");
+        await stage("restart-safe-patch-relation-restored");
+        await stage("restart-reevaluation-suggestion-restored");
+
+        await navigateTo("Today");
+        await assertTodayLongTermReviews(expectedRelatedTitles);
+        await stage("restart-today-restored");
+
+        await navigateTo("Settings");
+        await waitFor(() => document.querySelector("form.weekly-budget-form") !== null, "persisted weekly settings form");
+        const weekly = await invoke("weekly_acm_budget");
+        const expectedWeekly = { monday: 95, tuesday: 73, wednesday: null, thursday: 101, friday: 47, saturday: 0, sunday: 95 };
+        if (Object.entries(expectedWeekly).some(([day, value]) => weekly[day] !== value)) {
+          throw new Error("Restart weekly settings did not preserve the authoritative schedule");
+        }
+        await stage("restart-weekly-restored");
+
+        await setDate("2026-08-31");
+        await navigateTo("Today");
+        const nextMonday = await invoke("today_snapshot", { input: { budgetMinutes: null } });
+        if (nextMonday.localDate !== "2026-08-31" || nextMonday.budgetMinutes !== 95) {
+          throw new Error("Restart next Monday Today plan did not preserve the weekly default");
+        }
+        await stage("next-week-default-restored");
+        await invoke("desktop_e2e_finish", { input: { result: "passed" } });
+        await invoke("desktop_e2e_exit");
+        return;
+      }
+
+      if (configured.phase === "verify-restart-copy-coupled-legacy") {
         await waitFor(
           () => document.querySelector('nav a[href="/today"]') !== null,
           "primary Today route after restart",
