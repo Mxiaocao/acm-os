@@ -58,6 +58,7 @@ const validFrontendPackage = () => ({
     katex: "^0.18.1",
     react: "^19.1.0",
     "react-dom": "^19.1.0",
+    uuid: "^13.0.0",
   },
   devDependencies: {
     "@tauri-apps/cli": "^2",

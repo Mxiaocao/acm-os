@@ -46,7 +46,7 @@ const REQUIRED_LOCAL_RUST_DEPENDENCIES = {
 };
 
 const EXPECTED_FRONTEND_DEPENDENCIES = {
-  dependencies: ["@tauri-apps/api", "katex", "react", "react-dom"],
+  dependencies: ["@tauri-apps/api", "katex", "react", "react-dom", "uuid"],
   devDependencies: [
     "@tauri-apps/cli",
     "@types/react",
