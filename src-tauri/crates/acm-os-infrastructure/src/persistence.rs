@@ -13517,7 +13517,9 @@ impl ProblemSolvedRewardPort for DatabaseRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
+    use std::sync::Arc;
 
     use acm_os_application::{
         accept_existing_knowledge_candidate, accept_today_extra_suggestion, add_extra_problem_link,
@@ -13545,6 +13547,7 @@ mod tests {
     use sqlx::migrate::{Migration, MigrationType, Migrator};
     use sqlx::{Executor, SqlSafeStr};
     use tempfile::TempDir;
+    use tokio::sync::Barrier;
 
     use super::*;
 
@@ -14002,17 +14005,563 @@ mod tests {
         runtime
     }
 
+    fn r3d_runtime_from_pool(pool: SqlitePool) -> DatabaseRuntime {
+        DatabaseRuntime {
+            _pool: Some(pool),
+            _startup_lock: None,
+            status: StartupGateStatus::Ready { schema_version: 31 },
+            markdown_projection_cache: Mutex::new(HashMap::new()),
+            recovery_root: None,
+            app_private_data: None,
+            daily_backup_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn r3d_activation_boundary_is_inclusive_for_pre_activation() {
+        let activation =
+            chrono::DateTime::parse_from_rfc3339("2026-08-24T12:34:56.500Z").expect("activation");
+        let before =
+            chrono::DateTime::parse_from_rfc3339("2026-08-24T12:34:56.499Z").expect("before");
+        let equal =
+            chrono::DateTime::parse_from_rfc3339("2026-08-24T12:34:56.500Z").expect("equal");
+        let after =
+            chrono::DateTime::parse_from_rfc3339("2026-08-24T12:34:56.501Z").expect("after");
+        assert_eq!(
+            reward_activation_relation(before, activation),
+            RewardActivationRelation::PreActivation
+        );
+        assert_eq!(
+            reward_activation_relation(equal, activation),
+            RewardActivationRelation::PreActivation
+        );
+        assert_eq!(
+            reward_activation_relation(after, activation),
+            RewardActivationRelation::PostActivation
+        );
+    }
+
+    #[tokio::test]
+    async fn r3d_real_two_pool_problem_solved_claim_race_has_one_winner() {
+        let directory = TempDir::new().expect("R3D race database");
+        let runtime_one = r3c1_runtime_with_learning_source(&directory).await;
+        let pool_one = runtime_one._pool.as_ref().expect("pool one");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000705', 1,
+                     'learning_completion', '2026-08-24T12:34:56.502Z')",
+        )
+        .execute(pool_one)
+        .await
+        .expect("second occurrence");
+        for occurrence in [
+            "00000000-0000-0000-0000-000000000701",
+            "00000000-0000-0000-0000-000000000705",
+        ] {
+            runtime_one
+                .create_problem_solved_evaluation(
+                    occurrence,
+                    1,
+                    "qualifying",
+                    "explicitly_accepted_digested",
+                    "2026-08-24T12:34:56.600Z",
+                )
+                .await
+                .expect("evaluation");
+        }
+        let pool_two = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("pool two");
+        let runtime_two = r3d_runtime_from_pool(pool_two);
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_one = barrier.clone();
+        let barrier_two = barrier.clone();
+        let request_one = r3c2_request(
+            "00000000-0000-0000-0000-000000000701",
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let request_two = r3c2_request(
+            "00000000-0000-0000-0000-000000000705",
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        async fn race_call(
+            runtime: &DatabaseRuntime,
+            barrier: Arc<Barrier>,
+            request: ProblemSolvedRewardRequest,
+            occurrence_id: &'static str,
+        ) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError> {
+            barrier.wait().await;
+            let mut request = Some(request);
+            for _ in 0..20 {
+                match process_problem_solved_reward(runtime, request.take().expect("request")).await
+                {
+                    Err(ProblemSolvedRewardError::DatabaseFailure) => {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        request = Some(r3c2_request(
+                            occurrence_id,
+                            acm_os_domain::ProblemSolvedQualification::Qualifying,
+                            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+                        ));
+                    }
+                    result => return result,
+                }
+            }
+            Err(ProblemSolvedRewardError::DatabaseFailure)
+        }
+        let (result_one, result_two) = tokio::join!(
+            race_call(
+                &runtime_one,
+                barrier_one,
+                request_one,
+                "00000000-0000-0000-0000-000000000701",
+            ),
+            race_call(
+                &runtime_two,
+                barrier_two,
+                request_two,
+                "00000000-0000-0000-0000-000000000705",
+            )
+        );
+        let result_one = result_one.expect("race result one");
+        let result_two = result_two.expect("race result two");
+        assert_eq!(
+            usize::from(result_one.decision_reason == "qualified_positive")
+                + usize::from(result_two.decision_reason == "qualified_positive"),
+            1
+        );
+        assert_eq!(
+            usize::from(result_one.decision_reason == "already_rewarded")
+                + usize::from(result_two.decision_reason == "already_rewarded"),
+            1
+        );
+        let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_solved_positive_claims),
+                    (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'xp'),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'coin'),
+                    (SELECT COALESCE(SUM(delta), 0) FROM reward_ledger_entries WHERE resource_kind = 'xp')",
+        )
+        .fetch_one(pool_one)
+        .await
+        .expect("race counts");
+        assert_eq!(counts, (1, 2, 2, 1, 1, 100));
+        assert_eq!(
+            runtime_one.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+    }
+
+    async fn r3d_concurrent_application_call(
+        runtime: &DatabaseRuntime,
+        barrier: Arc<Barrier>,
+        request: ProblemSolvedRewardRequest,
+    ) -> (
+        Result<ProblemSolvedRewardResult, ProblemSolvedRewardError>,
+        Result<ProblemSolvedRewardResult, ProblemSolvedRewardError>,
+        usize,
+    ) {
+        barrier.wait().await;
+        let first = process_problem_solved_reward(runtime, request.clone()).await;
+        let mut result = first.clone();
+        let mut retries = 0;
+        while matches!(result, Err(ProblemSolvedRewardError::DatabaseFailure)) && retries < 20 {
+            retries += 1;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            result = process_problem_solved_reward(runtime, request.clone()).await;
+        }
+        (first, result, retries)
+    }
+
+    #[tokio::test]
+    async fn r3d_concurrent_identical_evaluation_converges_to_one_authority() {
+        let directory = TempDir::new().expect("R3D identical evaluation database");
+        let runtime_one = r3c1_runtime_with_learning_source(&directory).await;
+        let pool_two = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("pool two");
+        let runtime_two = r3d_runtime_from_pool(pool_two);
+        let barrier = Arc::new(Barrier::new(2));
+        let request_one = r3c2_request(
+            "00000000-0000-0000-0000-000000000701",
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let request_two = request_one.clone();
+        let (call_one, call_two) = tokio::join!(
+            r3d_concurrent_application_call(&runtime_one, barrier.clone(), request_one),
+            r3d_concurrent_application_call(&runtime_two, barrier, request_two),
+        );
+        println!(
+            "R3D identical race: call_one first={:?} retries={} final={:?}; call_two first={:?} retries={} final={:?}",
+            call_one.0, call_one.2, call_one.1, call_two.0, call_two.2, call_two.1
+        );
+        assert!(
+            call_one.1.is_ok(),
+            "call one did not converge: {:?}",
+            call_one.1
+        );
+        assert!(
+            call_two.1.is_ok(),
+            "call two did not converge: {:?}",
+            call_two.1
+        );
+
+        let pool = runtime_one._pool.as_ref().expect("pool one");
+        let evaluation: (i64, String, String, i64) = sqlx::query_as(
+            "SELECT COUNT(*), MAX(qualification), MAX(reason_code), MAX(policy_version)
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind("00000000-0000-0000-0000-000000000701")
+        .fetch_one(pool)
+        .await
+        .expect("evaluation authority");
+        assert_eq!(
+            evaluation,
+            (
+                1,
+                "qualifying".to_owned(),
+                "explicitly_accepted_digested".to_owned(),
+                1
+            )
+        );
+        let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_completion_event_sources
+                            WHERE problem_completion_occurrence_id = ?1),
+                    (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_problem_solved_positive_claims),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'xp'),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'coin')",
+        )
+        .bind("00000000-0000-0000-0000-000000000701")
+        .fetch_one(pool)
+        .await
+        .expect("identical race counts");
+        assert_eq!(counts, (1, 1, 1, 1, 1, 1));
+        assert_eq!(
+            runtime_one.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r3d_concurrent_conflicting_evaluation_fails_closed() {
+        let directory = TempDir::new().expect("R3D conflicting evaluation database");
+        let runtime_one = r3c1_runtime_with_learning_source(&directory).await;
+        let pool_two = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("pool two");
+        let runtime_two = r3d_runtime_from_pool(pool_two);
+        let barrier = Arc::new(Barrier::new(2));
+        let request_one = r3c2_request(
+            "00000000-0000-0000-0000-000000000701",
+            acm_os_domain::ProblemSolvedQualification::Qualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+        );
+        let request_two = r3c2_request(
+            "00000000-0000-0000-0000-000000000701",
+            acm_os_domain::ProblemSolvedQualification::NonQualifying,
+            acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+        );
+        let (call_one, call_two) = tokio::join!(
+            r3d_concurrent_application_call(&runtime_one, barrier.clone(), request_one),
+            r3d_concurrent_application_call(&runtime_two, barrier, request_two),
+        );
+        println!(
+            "R3D conflicting race: call_one first={:?} retries={} final={:?}; call_two first={:?} retries={} final={:?}",
+            call_one.0, call_one.2, call_one.1, call_two.0, call_two.2, call_two.1
+        );
+        let pool = runtime_one._pool.as_ref().expect("pool one");
+        let evaluation: (String, String) = sqlx::query_as(
+            "SELECT qualification, reason_code
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind("00000000-0000-0000-0000-000000000701")
+        .fetch_one(pool)
+        .await
+        .expect("durable conflicting evaluation");
+        assert!(
+            (evaluation.0 == "qualifying" && evaluation.1 == "explicitly_accepted_digested")
+                || (evaluation.0 == "non_qualifying" && evaluation.1 == "mechanical_reentry")
+        );
+        let results = [&call_one.1, &call_two.1];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(
+                    result,
+                    Err(ProblemSolvedRewardError::EvaluationConflict)
+                ))
+                .count(),
+            1
+        );
+        let expected_reason = if evaluation.0 == "qualifying" {
+            "qualified_positive"
+        } else {
+            "non_qualifying"
+        };
+        let stored_reason: String = sqlx::query_scalar(
+            "SELECT decision_reason FROM reward_grants
+             WHERE reward_event_id = (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                      WHERE problem_completion_occurrence_id = ?1)",
+        )
+        .bind("00000000-0000-0000-0000-000000000701")
+        .fetch_one(pool)
+        .await
+        .expect("stored decision");
+        assert_eq!(stored_reason, expected_reason);
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_problem_completion_event_sources
+                            WHERE problem_completion_occurrence_id = ?1),
+                    (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants)",
+        )
+        .bind("00000000-0000-0000-0000-000000000701")
+        .fetch_one(pool)
+        .await
+        .expect("conflicting race counts");
+        assert_eq!(counts, (1, 1, 1));
+        let account = runtime_one.load_reward_account().await.expect("account");
+        if evaluation.0 == "qualifying" {
+            assert_eq!(
+                account,
+                RewardAccount {
+                    xp_balance: 100,
+                    coin_balance: 100
+                }
+            );
+        } else {
+            assert_eq!(
+                account,
+                RewardAccount {
+                    xp_balance: 0,
+                    coin_balance: 0
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r3d_failed_already_rewarded_zero_rolls_back_and_recovers_after_restart() {
+        let directory = TempDir::new().expect("R3D loser recovery database");
+        let runtime = r3c1_runtime_with_learning_source(&directory).await;
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::query(
+            "INSERT INTO problem_completion_occurrences
+             (id, problem_id, semantic_kind, recorded_at_utc)
+             VALUES ('00000000-0000-0000-0000-000000000703', 1,
+                     'learning_completion', '2026-08-24T12:34:56.503Z')",
+        )
+        .execute(pool)
+        .await
+        .expect("loser source");
+        process_problem_solved_reward(
+            &runtime,
+            r3c2_request(
+                "00000000-0000-0000-0000-000000000701",
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+            ),
+        )
+        .await
+        .expect("positive winner");
+        runtime
+            .create_problem_solved_evaluation(
+                "00000000-0000-0000-0000-000000000703",
+                1,
+                "qualifying",
+                "explicitly_accepted_digested",
+                "2026-08-24T12:34:56.601Z",
+            )
+            .await
+            .expect("durable loser evaluation");
+        let loser_source = RewardSource::ProblemCompletionOccurrence {
+            occurrence_id: "00000000-0000-0000-0000-000000000703".to_owned(),
+        };
+        let already_rewarded = acm_os_domain::ProblemSolvedPolicy::reward_decision(
+            acm_os_domain::ProblemSolvedPolicyOutcome::AlreadyRewardedZero,
+        )
+        .expect("zero policy decision");
+        let zero_decision = RewardDecision {
+            xp_amount: already_rewarded.xp_amount,
+            coin_amount: already_rewarded.coin_amount,
+            decision_reason: already_rewarded.decision_reason.to_owned(),
+            policy_key: already_rewarded.policy_key.to_owned(),
+            policy_version: already_rewarded.policy_version,
+        };
+        assert_eq!(
+            runtime
+                .process_reward_inner(
+                    &loser_source,
+                    &zero_decision,
+                    Some(RewardFailurePoint::AfterGrant)
+                )
+                .await,
+            Err(RewardProcessingError::IntegrityViolation)
+        );
+        let failed_counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events event
+                            WHERE event.id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                               WHERE problem_completion_occurrence_id = ?1)),
+                    (SELECT COUNT(*) FROM reward_problem_completion_event_sources
+                     WHERE problem_completion_occurrence_id = ?1),
+                    (SELECT COUNT(*) FROM reward_grants grant
+                     WHERE grant.reward_event_id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                                     WHERE problem_completion_occurrence_id = ?1)),
+                    (SELECT COUNT(*) FROM reward_ledger_entries),
+                    (SELECT COUNT(*) FROM reward_grant_ledger_origins)",
+        )
+        .bind("00000000-0000-0000-0000-000000000703")
+        .fetch_one(pool)
+        .await
+        .expect("failed loser counts");
+        assert_eq!(failed_counts, (0, 0, 0, 2, 2));
+        let failed_evaluation = runtime
+            .load_problem_solved_evaluation("00000000-0000-0000-0000-000000000703")
+            .await
+            .expect("loser evaluation after rollback")
+            .expect("durable loser evaluation");
+        assert_eq!(failed_evaluation.qualification, "qualifying");
+        assert_eq!(
+            failed_evaluation.reason_code,
+            "explicitly_accepted_digested"
+        );
+        assert_eq!(
+            runtime.load_reward_account().await.expect("winner account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+        drop(runtime);
+
+        let fresh_pool = connect_read_write(&directory.path().join(DATABASE_FILENAME))
+            .await
+            .expect("fresh pool");
+        let fresh_runtime = r3d_runtime_from_pool(fresh_pool);
+        let recovered = process_problem_solved_reward(
+            &fresh_runtime,
+            r3d_request_at(
+                "00000000-0000-0000-0000-000000000703",
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+                "2026-08-24T12:34:56.601Z",
+            ),
+        )
+        .await
+        .expect("loser recovery");
+        assert_eq!((recovered.xp_amount, recovered.coin_amount), (0, 0));
+        assert_eq!(recovered.decision_reason, "already_rewarded");
+        let fresh_pool = fresh_runtime._pool.as_ref().expect("fresh pool");
+        let recovered_counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events event
+                            WHERE event.id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                               WHERE problem_completion_occurrence_id = ?1)),
+                    (SELECT COUNT(*) FROM reward_problem_completion_event_sources
+                     WHERE problem_completion_occurrence_id = ?1),
+                    (SELECT COUNT(*) FROM reward_grants grant
+                     WHERE grant.reward_event_id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                                     WHERE problem_completion_occurrence_id = ?1)),
+                    (SELECT COUNT(*) FROM reward_ledger_entries),
+                    (SELECT COUNT(*) FROM reward_grant_ledger_origins),
+                    (SELECT COUNT(*) FROM reward_problem_solved_positive_claims)",
+        )
+        .bind("00000000-0000-0000-0000-000000000703")
+        .fetch_one(fresh_pool)
+        .await
+        .expect("recovered loser graph");
+        assert_eq!(recovered_counts, (1, 1, 1, 2, 2, 1));
+        let recovered_reason: String = sqlx::query_scalar(
+            "SELECT decision_reason FROM reward_grants
+             WHERE reward_event_id IN (SELECT reward_event_id FROM reward_problem_completion_event_sources
+                                       WHERE problem_completion_occurrence_id = ?1)",
+        )
+        .bind("00000000-0000-0000-0000-000000000703")
+        .fetch_one(fresh_pool)
+        .await
+        .expect("recovered loser decision");
+        assert_eq!(recovered_reason, "already_rewarded");
+        assert_eq!(
+            fresh_runtime
+                .load_reward_account()
+                .await
+                .expect("recovered account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100
+            }
+        );
+        let retry = process_problem_solved_reward(
+            &fresh_runtime,
+            r3d_request_at(
+                "00000000-0000-0000-0000-000000000703",
+                acm_os_domain::ProblemSolvedQualification::Qualifying,
+                acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested,
+                "2026-08-24T12:34:56.601Z",
+            ),
+        )
+        .await
+        .expect("idempotent loser retry");
+        assert_eq!(
+            retry.disposition,
+            ProblemSolvedRewardDisposition::AlreadyProcessed
+        );
+        assert_eq!(
+            fresh_runtime
+                .load_reward_account()
+                .await
+                .expect("retry account"),
+            RewardAccount {
+                xp_balance: 100,
+                coin_balance: 100,
+            }
+        );
+    }
+
     fn r3c2_request(
         occurrence_id: &str,
         qualification: acm_os_domain::ProblemSolvedQualification,
         reason: acm_os_domain::ProblemSolvedEvaluationReason,
+    ) -> ProblemSolvedRewardRequest {
+        r3d_request_at(
+            occurrence_id,
+            qualification,
+            reason,
+            "2026-08-24T12:34:56.600Z",
+        )
+    }
+
+    fn r3d_request_at(
+        occurrence_id: &str,
+        qualification: acm_os_domain::ProblemSolvedQualification,
+        reason: acm_os_domain::ProblemSolvedEvaluationReason,
+        evaluated_at_utc: &str,
     ) -> ProblemSolvedRewardRequest {
         ProblemSolvedRewardRequest {
             occurrence_id: occurrence_id.to_owned(),
             qualification: Some(ProblemSolvedQualificationInput {
                 qualification,
                 reason,
-                evaluated_at_utc: "2026-08-24T12:34:56.600Z".to_owned(),
+                evaluated_at_utc: evaluated_at_utc.to_owned(),
             }),
         }
     }
