@@ -4838,6 +4838,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .commit()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        // Review completion is durable before the immediate Reward attempt. Any
+        // failure remains recoverable through pending Review source processing.
+        let _ = self
+            .process_review_reward(&context.attempt.attempt_id)
+            .await;
         let lifecycle = self
             .load_problem_lifecycle(&context.attempt.problem)
             .await
@@ -8362,6 +8367,179 @@ impl DatabaseRuntime {
         decision: &RewardDecision,
     ) -> Result<RewardProcessingResult, RewardProcessingError> {
         self.process_reward_inner(source, decision, None).await
+    }
+
+    pub async fn process_review_reward(
+        &self,
+        review_attempt_id: &str,
+    ) -> Result<RewardProcessingResult, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let (attempt_type, judgement, completed_at_utc, ordinal): (
+            String,
+            String,
+            String,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT attempt.attempt_type, attempt.judgement, attempt.completed_at_utc,
+                        (SELECT ordinal FROM scheduled_review_ordinal_facts ordinal_fact
+                         WHERE ordinal_fact.review_attempt_id = attempt.id
+                           AND ordinal_fact.problem_id = attempt.problem_id)
+                 FROM review_attempts attempt
+                 WHERE attempt.id = ?1 AND attempt.attempt_status = 'completed'",
+        )
+        .bind(review_attempt_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        .ok_or(RewardProcessingError::SourceNotFound)?;
+        let activation_at = load_reward_activation_authority(&mut connection)
+            .await?
+            .activated_at_utc
+            .ok_or(RewardProcessingError::RewardInactive)?;
+        let source_time = parse_reward_utc_millis(&completed_at_utc)
+            .ok_or(RewardProcessingError::SourceInvalid)?;
+        let activation_time = parse_reward_utc_millis(&activation_at)
+            .ok_or(RewardProcessingError::IntegrityViolation)?;
+        let activation_relation = if reward_activation_relation(source_time, activation_time)
+            == RewardActivationRelation::PreActivation
+        {
+            acm_os_domain::ReviewRewardActivationRelation::PreActivation
+        } else {
+            acm_os_domain::ReviewRewardActivationRelation::PostActivation
+        };
+        let attempt_type = match attempt_type.as_str() {
+            "early_check" => acm_os_domain::ReviewAttemptType::EarlyCheck,
+            "first_cold_start" => acm_os_domain::ReviewAttemptType::FirstColdStart,
+            "long_term_review" => acm_os_domain::ReviewAttemptType::LongTermReview,
+            _ => return Err(RewardProcessingError::SourceInvalid),
+        };
+        let judgement = match judgement.as_str() {
+            "mastered" => acm_os_domain::ReviewJudgement::Mastered,
+            "partial" => acm_os_domain::ReviewJudgement::Partial,
+            "fail" => acm_os_domain::ReviewJudgement::Fail,
+            _ => return Err(RewardProcessingError::SourceInvalid),
+        };
+        let ordinal = ordinal
+            .map(|value| {
+                u64::try_from(value).map_err(|_| RewardProcessingError::IntegrityViolation)
+            })
+            .transpose()?;
+        let decision =
+            acm_os_domain::ReviewRewardPolicy::decide(acm_os_domain::ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation,
+            })
+            .ok_or(RewardProcessingError::DecisionInvalid)?;
+        let decision = RewardDecision {
+            xp_amount: decision.xp_amount,
+            coin_amount: decision.coin_amount,
+            decision_reason: decision.decision_reason.to_owned(),
+            policy_key: decision.policy_key.to_owned(),
+            policy_version: decision.policy_version,
+        };
+        drop(connection);
+        self.process_reward(
+            &RewardSource::Review {
+                review_attempt_id: review_attempt_id.to_owned(),
+            },
+            &decision,
+        )
+        .await
+    }
+
+    pub async fn process_pending_review_rewards(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RewardProcessingResult>, RewardProcessingError> {
+        let sources = self.list_pending_review_sources(limit).await?;
+        let mut results = Vec::new();
+        for source in sources {
+            if let RewardSource::Review { review_attempt_id } = source {
+                if let Ok(result) = self.process_review_reward(&review_attempt_id).await {
+                    results.push(result);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn list_pending_review_sources(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RewardSource>, RewardProcessingError> {
+        if limit == 0 || limit > MAX_PENDING_REWARD_SOURCES {
+            return Err(RewardProcessingError::InvalidLimit);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if load_reward_activation_authority(&mut transaction)
+            .await?
+            .activated_at_utc
+            .is_none()
+        {
+            return Err(RewardProcessingError::RewardInactive);
+        }
+        if !scheduled_review_ordinal_data_is_valid(&mut transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT attempt.id, attempt.completed_at_utc
+             FROM review_attempts attempt
+             WHERE attempt.attempt_status = 'completed'
+               AND (
+                   attempt.attempt_type = 'early_check'
+                   OR (
+                       attempt.attempt_type IN ('first_cold_start', 'long_term_review')
+                       AND EXISTS (
+                           SELECT 1 FROM scheduled_review_ordinal_facts ordinal
+                           WHERE ordinal.review_attempt_id = attempt.id
+                             AND ordinal.problem_id = attempt.problem_id
+                       )
+                   )
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM reward_review_event_sources adapter
+                   WHERE adapter.review_attempt_id = attempt.id
+               )
+             ORDER BY attempt.completed_at_utc ASC, attempt.id ASC
+             LIMIT ?1",
+        )
+        .bind(i64::try_from(limit).map_err(|_| RewardProcessingError::InvalidLimit)?)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let mut sources = Vec::with_capacity(rows.len());
+        for (review_attempt_id, occurred_at_utc) in rows {
+            let source = RewardSource::Review { review_attempt_id };
+            let resolved = resolve_reward_source(&mut transaction, &source).await?;
+            if resolved.occurred_at_utc != occurred_at_utc {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            sources.push(source);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(sources)
     }
 
     async fn process_reward_inner(
@@ -13561,6 +13739,280 @@ mod tests {
             .await
             .expect("s0 fixture migration");
         (path, pool)
+    }
+
+    #[tokio::test]
+    async fn r4d1_review_policy_drives_immediate_and_pending_processing() {
+        let directory = TempDir::new().expect("R4D1 database");
+        let runtime = r2c3_runtime_with_pending_sources(&directory).await;
+        runtime.activate_reward().await.expect("activate Reward");
+        let early = runtime
+            .process_review_reward("00000000-0000-0000-0000-000000000420")
+            .await
+            .expect("Early Check reward");
+        assert_eq!((early.xp_amount, early.coin_amount), (0, 0));
+        let scheduled = runtime
+            .process_review_reward("00000000-0000-0000-0000-000000000430")
+            .await
+            .expect("scheduled reward");
+        assert_eq!((scheduled.xp_amount, scheduled.coin_amount), (0, 0));
+        assert_eq!(
+            runtime
+                .process_review_reward("00000000-0000-0000-0000-000000000430")
+                .await
+                .expect("idempotent retry")
+                .disposition,
+            RewardProcessingDisposition::AlreadyProcessed
+        );
+        assert!(runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("pending retry")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn r4d1_h4_review_recovery_limit_is_scoped_away_from_problem_sources() {
+        let directory = TempDir::new().expect("R4D1 H4 database");
+        let runtime = r2c3_runtime_with_pending_sources(&directory).await;
+        runtime.activate_reward().await.expect("activate Reward");
+        let generic = runtime
+            .list_pending_reward_sources(1)
+            .await
+            .expect("generic pending page");
+        assert!(matches!(
+            generic.first(),
+            Some(RewardSource::ProblemCompletionOccurrence { .. })
+        ));
+        let recovered = runtime
+            .process_pending_review_rewards(1)
+            .await
+            .expect("Review-scoped pending page");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!((recovered[0].xp_amount, recovered[0].coin_amount), (0, 0));
+        assert_eq!(
+            runtime
+                .process_pending_review_rewards(1)
+                .await
+                .expect("idempotent Review recovery")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn r4d1_h4_completion_recovers_after_activation() {
+        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        let _completed = complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion date"),
+        )
+        .await
+        .expect("durable completion while Reward inactive");
+        assert_eq!(
+            runtime.process_review_reward(&attempt.attempt_id).await,
+            Err(RewardProcessingError::RewardInactive)
+        );
+        let pool = runtime._pool.as_ref().expect("pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM reward_review_event_sources WHERE review_attempt_id = ?1",
+            )
+            .bind(&attempt.attempt_id)
+            .fetch_one(pool)
+            .await
+            .expect("pending source count"),
+            0
+        );
+        runtime.activate_reward().await.expect("activate Reward");
+        let recovered = runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("recover Review");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!((recovered[0].xp_amount, recovered[0].coin_amount), (0, 0));
+        assert_eq!(recovered[0].activation_relation, "pre_activation");
+        assert_eq!(recovered[0].decision_reason, "pre_activation");
+        assert!(runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("idempotent recovery")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn r4d1_h4_normal_completion_tiers_same_problem_and_zero_paths() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        runtime.activate_reward().await.expect("activate Reward");
+        let mut attempts = vec![first_attempt];
+        let dates = [
+            "2026-08-14",
+            "2026-08-24",
+            "2026-09-23",
+            "2026-12-07",
+            "2027-05-06",
+        ];
+        for (index, date) in dates.iter().enumerate() {
+            let attempt = if index == 0 {
+                attempts[0].clone()
+            } else {
+                start_or_resume_review(
+                    &runtime,
+                    &problem,
+                    acm_os_domain::LocalDate::parse_iso(date).expect("review date"),
+                )
+                .await
+                .expect("next scheduled Review")
+            };
+            let _result = complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                mastered_input(),
+                acm_os_domain::LocalDate::parse_iso(date).expect("completion date"),
+            )
+            .await
+            .expect("normal completion");
+            attempts.push(attempt);
+        }
+        let pool = runtime._pool.as_ref().expect("pool");
+        let ordinals: Vec<i64> = sqlx::query_scalar(
+            "SELECT ordinal FROM scheduled_review_ordinal_facts ORDER BY ordinal",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("ordinal facts");
+        assert_eq!(ordinals, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(DISTINCT review_attempt_id) FROM reward_review_event_sources",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("distinct Review attempts"),
+            5
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(DISTINCT reward_event_id) FROM reward_review_event_sources",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("distinct Review events"),
+            5
+        );
+        let grants: Vec<(i64, i64, String, String, i64)> = sqlx::query_as(
+            "SELECT grant.xp_amount, grant.coin_amount, grant.decision_reason,
+                    grant.policy_key, grant.policy_version
+             FROM reward_grants grant
+             JOIN reward_events event ON event.id = grant.reward_event_id
+             JOIN reward_review_event_sources source ON source.reward_event_id = event.id
+             ORDER BY source.review_attempt_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Review grants");
+        assert_eq!(grants.len(), 5);
+        assert_eq!(
+            grants.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>(),
+            vec![(20, 20), (30, 30), (40, 40), (50, 50), (50, 50)]
+        );
+        assert!(grants
+            .iter()
+            .all(|row| row.2 == "scheduled_mastered" && row.3 == "review_reward_v1" && row.4 == 1));
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 190,
+                coin_balance: 190,
+            }
+        );
+        assert_eq!(
+            runtime
+                .process_pending_review_rewards(256)
+                .await
+                .expect("replay")
+                .len(),
+            0
+        );
+        let (_early_dir, early_runtime, _vault, _problems, early_problem, scheduled) =
+            review_ready_fixture().await;
+        void_review(&early_runtime, &scheduled.attempt_id, "early check")
+            .await
+            .expect("void");
+        let early = start_or_resume_review(
+            &early_runtime,
+            &early_problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early date"),
+        )
+        .await
+        .expect("Early Check");
+        early_runtime
+            .activate_reward()
+            .await
+            .expect("activate Reward");
+        let _early_result = complete_review(
+            &early_runtime,
+            &early.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-13").expect("early completion"),
+        )
+        .await
+        .expect("Early Check completion");
+        assert_eq!(
+            early_runtime
+                .load_reward_account()
+                .await
+                .expect("zero account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 0,
+            }
+        );
+        let (_partial_dir, partial_runtime, _vault, _problems, _partial_problem, partial_attempt) =
+            review_ready_fixture().await;
+        partial_runtime
+            .activate_reward()
+            .await
+            .expect("activate Reward");
+        let mut partial_input = mastered_input();
+        partial_input.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+        partial_input.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+        complete_review(
+            &partial_runtime,
+            &partial_attempt.attempt_id,
+            partial_input,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("partial completion"),
+        )
+        .await
+        .expect("Scheduled non-Mastered completion");
+        assert_eq!(
+            partial_runtime
+                .load_reward_account()
+                .await
+                .expect("partial zero account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 0,
+            }
+        );
+        let partial_pool = partial_runtime._pool.as_ref().expect("partial pool");
+        let partial_reward: (i64, i64, String) = sqlx::query_as(
+            "SELECT grant.xp_amount, grant.coin_amount, grant.decision_reason
+             FROM reward_grants grant
+             JOIN reward_events event ON event.id = grant.reward_event_id
+             JOIN reward_review_event_sources source ON source.reward_event_id = event.id
+             WHERE source.review_attempt_id = ?1",
+        )
+        .bind(&partial_attempt.attempt_id)
+        .fetch_one(partial_pool)
+        .await
+        .expect("partial Review grant");
+        assert_eq!(partial_reward, (0, 0, "not_mastered".to_owned()));
+        assert_eq!(scheduled_ordinal_snapshot(partial_pool).await.1, 1);
     }
 
     #[tokio::test]

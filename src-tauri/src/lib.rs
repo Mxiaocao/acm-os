@@ -28,6 +28,14 @@ pub fn run() {
                     let database = tauri::async_runtime::block_on(
                         acm_os_infrastructure::start_database(&app_private_data),
                     );
+                    if matches!(
+                        database.status(),
+                        acm_os_application::StartupGateStatus::Ready { .. }
+                    ) {
+                        let _ = tauri::async_runtime::block_on(
+                            database.process_pending_review_rewards(256),
+                        );
+                    }
                     database
                 }
                 Err(_) => DatabaseRuntime::recovery(StartupRecoveryReason::AppDataUnavailable),
