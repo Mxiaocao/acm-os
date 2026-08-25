@@ -17,6 +17,300 @@ pub fn foundation_status() -> FoundationStatusDto {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RewardActivationStateDto {
+    active: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardAccountSummaryDto {
+    xp: i64,
+    coin: i64,
+    level: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRewardSummaryDto {
+    custom_reward_id: String,
+    name: String,
+    coin_cost: i64,
+    status: &'static str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedemptionHistoryItemDto {
+    redemption_id: String,
+    custom_reward_id: String,
+    reward_name: String,
+    coin_cost_paid: i64,
+    redeemed_at_utc: String,
+    refund_id: Option<String>,
+    refunded_at_utc: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCustomRewardInput {
+    name: String,
+    coin_cost: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCustomRewardInput {
+    custom_reward_id: String,
+    name: String,
+    coin_cost: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveCustomRewardInput {
+    custom_reward_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemCustomRewardInput {
+    redemption_id: String,
+    custom_reward_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefundCustomRewardInput {
+    refund_id: String,
+    redemption_id: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedemptionResultDto {
+    disposition: &'static str,
+    redemption_id: String,
+    custom_reward_id: String,
+    coin_cost_paid: i64,
+    redeemed_at_utc: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefundResultDto {
+    disposition: &'static str,
+    refund_id: String,
+    redemption_id: String,
+    refunded_at_utc: String,
+}
+
+fn custom_reward_status(status: acm_os_application::CustomRewardStatus) -> &'static str {
+    match status {
+        acm_os_application::CustomRewardStatus::Active => "active",
+        acm_os_application::CustomRewardStatus::Archived => "archived",
+    }
+}
+
+fn custom_reward_summary_dto(
+    value: acm_os_application::CustomRewardSummary,
+) -> CustomRewardSummaryDto {
+    CustomRewardSummaryDto {
+        custom_reward_id: value.custom_reward_id,
+        name: value.name,
+        coin_cost: value.coin_cost,
+        status: custom_reward_status(value.status),
+    }
+}
+
+fn reward_account_summary_dto(
+    value: acm_os_application::RewardAccountSummary,
+) -> RewardAccountSummaryDto {
+    RewardAccountSummaryDto {
+        xp: value.xp_balance,
+        coin: value.coin_balance,
+        level: value.level,
+    }
+}
+
+fn redemption_history_item_dto(
+    value: acm_os_application::RedemptionHistoryItem,
+) -> RedemptionHistoryItemDto {
+    RedemptionHistoryItemDto {
+        redemption_id: value.redemption_id,
+        custom_reward_id: value.custom_reward_id,
+        reward_name: value.reward_name,
+        coin_cost_paid: value.coin_cost_paid,
+        redeemed_at_utc: value.redeemed_at_utc,
+        refund_id: value.refund_id,
+        refunded_at_utc: value.refunded_at_utc,
+    }
+}
+
+fn redemption_disposition(value: acm_os_application::RedemptionDisposition) -> &'static str {
+    match value {
+        acm_os_application::RedemptionDisposition::Processed => "processed",
+        acm_os_application::RedemptionDisposition::AlreadyProcessed => "alreadyProcessed",
+    }
+}
+
+fn refund_disposition(value: acm_os_application::RefundDisposition) -> &'static str {
+    match value {
+        acm_os_application::RefundDisposition::Processed => "processed",
+        acm_os_application::RefundDisposition::AlreadyProcessed => "alreadyProcessed",
+        acm_os_application::RefundDisposition::AlreadyRefunded => "alreadyRefunded",
+    }
+}
+
+fn redemption_result_dto(value: acm_os_application::RedemptionResult) -> RedemptionResultDto {
+    RedemptionResultDto {
+        disposition: redemption_disposition(value.disposition),
+        redemption_id: value.redemption_id,
+        custom_reward_id: value.custom_reward_id,
+        coin_cost_paid: value.coin_cost_paid,
+        redeemed_at_utc: value.redeemed_at_utc,
+    }
+}
+
+fn refund_result_dto(value: acm_os_application::RefundResult) -> RefundResultDto {
+    RefundResultDto {
+        disposition: refund_disposition(value.disposition),
+        refund_id: value.refund_id,
+        redemption_id: value.redemption_id,
+        refunded_at_utc: value.refunded_at_utc,
+    }
+}
+
+fn validate_reward_intent_id(value: &str) -> Result<(), &'static str> {
+    (value.len() == 36).then_some(()).ok_or("invalid_identity")
+}
+
+#[tauri::command]
+pub async fn reward_activation_state(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<RewardActivationStateDto, &'static str> {
+    acm_os_application::reward_activation_state(database.inner())
+        .await
+        .map(|active| RewardActivationStateDto { active })
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn reward_account_summary(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<RewardAccountSummaryDto, &'static str> {
+    acm_os_application::load_reward_account(database.inner())
+        .await
+        .map(reward_account_summary_dto)
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn list_custom_rewards(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<CustomRewardSummaryDto>, &'static str> {
+    acm_os_application::list_custom_rewards(database.inner())
+        .await
+        .map(|values| values.into_iter().map(custom_reward_summary_dto).collect())
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn reward_redemption_history(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<RedemptionHistoryItemDto>, &'static str> {
+    acm_os_application::list_redemption_history(database.inner())
+        .await
+        .map(|values| {
+            values
+                .into_iter()
+                .map(redemption_history_item_dto)
+                .collect()
+        })
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn activate_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<(), &'static str> {
+    acm_os_application::activate_reward(database.inner())
+        .await
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn create_custom_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: CreateCustomRewardInput,
+) -> Result<CustomRewardSummaryDto, &'static str> {
+    acm_os_application::create_custom_reward(database.inner(), &input.name, input.coin_cost)
+        .await
+        .map(custom_reward_summary_dto)
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn update_custom_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: UpdateCustomRewardInput,
+) -> Result<CustomRewardSummaryDto, &'static str> {
+    acm_os_application::update_custom_reward(
+        database.inner(),
+        &input.custom_reward_id,
+        &input.name,
+        input.coin_cost,
+    )
+    .await
+    .map(custom_reward_summary_dto)
+    .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn archive_custom_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ArchiveCustomRewardInput,
+) -> Result<CustomRewardSummaryDto, &'static str> {
+    acm_os_application::archive_custom_reward(database.inner(), &input.custom_reward_id)
+        .await
+        .map(custom_reward_summary_dto)
+        .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn redeem_custom_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: RedeemCustomRewardInput,
+) -> Result<RedemptionResultDto, &'static str> {
+    validate_reward_intent_id(&input.redemption_id)?;
+    acm_os_application::redeem_custom_reward(
+        database.inner(),
+        &input.redemption_id,
+        &input.custom_reward_id,
+    )
+    .await
+    .map(redemption_result_dto)
+    .map_err(acm_os_application::RewardError::code)
+}
+
+#[tauri::command]
+pub async fn refund_custom_reward(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: RefundCustomRewardInput,
+) -> Result<RefundResultDto, &'static str> {
+    validate_reward_intent_id(&input.refund_id)?;
+    validate_reward_intent_id(&input.redemption_id)?;
+    acm_os_application::refund_custom_reward(
+        database.inner(),
+        &input.refund_id,
+        &input.redemption_id,
+    )
+    .await
+    .map(refund_result_dto)
+    .map_err(acm_os_application::RewardError::code)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemHealthSnapshotDto {
     startup_state: &'static str,
     schema_version: Option<i64>,
@@ -3878,15 +4172,133 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, knowledge_index_error_code, knowledge_understanding_dto,
-        knowledge_understanding_level, normalize_windows_verbatim_path, obsidian_open_uri,
-        parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
+        app_shell_status_dto, custom_reward_status, custom_reward_summary_dto,
+        knowledge_index_error_code, knowledge_understanding_dto, knowledge_understanding_level,
+        normalize_windows_verbatim_path, obsidian_open_uri, parse_review_completion_input,
+        personal_note_read_state_dto, problem_lifecycle_state_dto, redemption_disposition,
+        redemption_history_item_dto, redemption_result_dto, refund_disposition, refund_result_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
-        startup_status_dto, workspace_error_dto, workspace_status_dto, CompleteReviewInput,
+        reward_account_summary_dto, startup_status_dto, validate_reward_intent_id,
+        workspace_error_dto, workspace_status_dto, CompleteReviewInput,
         LightweightProblemDetailDto, PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto,
         ReviewFailureReasonInput, StatementReadStateDto, TodayExtraSuggestionsPreviewDto,
         TodayReplanPreviewDto,
     };
+
+    #[test]
+    fn reward_account_serializes_frontend_fields() {
+        let dto = reward_account_summary_dto(acm_os_application::RewardAccountSummary {
+            xp_balance: 42,
+            coin_balance: 17,
+            level: 3,
+        });
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            json!({"xp": 42, "coin": 17, "level": 3})
+        );
+    }
+
+    #[test]
+    fn custom_reward_and_history_serialization_preserve_projection() {
+        let reward = custom_reward_summary_dto(acm_os_application::CustomRewardSummary {
+            custom_reward_id: "reward".into(),
+            name: "Coffee".into(),
+            coin_cost: 25,
+            status: acm_os_application::CustomRewardStatus::Active,
+        });
+        assert_eq!(
+            serde_json::to_value(reward).unwrap(),
+            json!({"customRewardId": "reward", "name": "Coffee", "coinCost": 25, "status": "active"})
+        );
+        let unrefunded = redemption_history_item_dto(acm_os_application::RedemptionHistoryItem {
+            redemption_id: "redemption".into(),
+            custom_reward_id: "reward".into(),
+            reward_name: "Coffee".into(),
+            coin_cost_paid: 25,
+            redeemed_at_utc: "2026-08-25T00:00:00Z".into(),
+            refund_id: None,
+            refunded_at_utc: None,
+        });
+        assert_eq!(
+            serde_json::to_value(unrefunded).unwrap()["refundId"],
+            json!(null)
+        );
+        let refunded = redemption_history_item_dto(acm_os_application::RedemptionHistoryItem {
+            redemption_id: "redemption".into(),
+            custom_reward_id: "reward".into(),
+            reward_name: "Renamed Coffee".into(),
+            coin_cost_paid: 25,
+            redeemed_at_utc: "2026-08-25T00:00:00Z".into(),
+            refund_id: Some("refund".into()),
+            refunded_at_utc: Some("2026-08-25T01:00:00Z".into()),
+        });
+        assert_eq!(
+            serde_json::to_value(&refunded).unwrap()["coinCostPaid"],
+            json!(25)
+        );
+        assert_eq!(
+            serde_json::to_value(&refunded).unwrap()["refundId"],
+            json!("refund")
+        );
+    }
+
+    #[test]
+    fn reward_dispositions_and_errors_have_stable_codes() {
+        assert_eq!(
+            redemption_disposition(acm_os_application::RedemptionDisposition::Processed),
+            "processed"
+        );
+        assert_eq!(
+            redemption_disposition(acm_os_application::RedemptionDisposition::AlreadyProcessed),
+            "alreadyProcessed"
+        );
+        assert_eq!(
+            refund_disposition(acm_os_application::RefundDisposition::AlreadyRefunded),
+            "alreadyRefunded"
+        );
+        assert_eq!(
+            custom_reward_status(acm_os_application::CustomRewardStatus::Archived),
+            "archived"
+        );
+        assert_eq!(
+            acm_os_application::RewardError::InsufficientCoin.code(),
+            "insufficient_coin"
+        );
+        assert_eq!(
+            acm_os_application::RewardError::RedemptionIntentConflict.code(),
+            "redemption_intent_conflict"
+        );
+    }
+
+    #[test]
+    fn reward_mutation_dtos_preserve_intent_identity_without_generation() {
+        let redemption_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789ab";
+        let refund_id = "018f0d8e-4a5b-7c6d-8e9f-0123456789ac";
+        assert_eq!(validate_reward_intent_id(redemption_id), Ok(()));
+        assert_eq!(validate_reward_intent_id(refund_id), Ok(()));
+        assert_eq!(validate_reward_intent_id("short"), Err("invalid_identity"));
+        let redeem = redemption_result_dto(acm_os_application::RedemptionResult {
+            disposition: acm_os_application::RedemptionDisposition::AlreadyProcessed,
+            redemption_id: redemption_id.into(),
+            custom_reward_id: "reward".into(),
+            coin_cost_paid: 25,
+            redeemed_at_utc: "2026-08-25T00:00:00Z".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(redeem).unwrap()["redemptionId"],
+            json!(redemption_id)
+        );
+        let refund = refund_result_dto(acm_os_application::RefundResult {
+            disposition: acm_os_application::RefundDisposition::Processed,
+            refund_id: refund_id.into(),
+            redemption_id: redemption_id.into(),
+            refunded_at_utc: "2026-08-25T01:00:00Z".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(refund).unwrap()["refundId"],
+            json!(refund_id)
+        );
+    }
 
     #[test]
     fn serializes_ready_startup_contract() {
