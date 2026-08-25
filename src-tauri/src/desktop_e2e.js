@@ -84,6 +84,33 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
           && suggestion?.textContent.match(/\d+/)?.[0] === String(expectedCount);
       }, `${targetRef} Knowledge reevaluation suggestion for ${expectedCount} qualifying Problems`);
     };
+    const assertTodayLongTermReviews = async (expectedTitles) => {
+      const snapshot = await invoke("today_snapshot", { input: { budgetMinutes: null } });
+      if (!snapshot || snapshot.localDate !== "2026-08-24" || snapshot.budgetMinutes !== 180) {
+        throw new Error("Later Today snapshot did not preserve the expected date and budget");
+      }
+      if (snapshot.entries.length !== expectedTitles.length) {
+        throw new Error(`Later Today expected ${expectedTitles.length} entries, got ${snapshot.entries.length}`);
+      }
+      snapshot.entries.forEach((entry, index) => {
+        if (entry.problemTitle !== expectedTitles[index]
+          || entry.position !== index
+          || entry.lane !== "review"
+          || entry.reason !== "dueLongTermReview"
+          || entry.planningCostMinutes !== 30
+          || entry.origin !== "auto"
+          || entry.status !== "notStarted") {
+          throw new Error(`Later Today entry ${index} did not match the authoritative long-term Review state`);
+        }
+      });
+      await waitFor(() => {
+        const rows = [...document.querySelectorAll(".today-list > li.today-entry")];
+        return rows.length === snapshot.entries.length
+          && rows.every((row, index) => row.dataset.entryId === snapshot.entries[index].entryId
+            && row.classList.contains("today-entry--notStarted")
+            && row.querySelector(".today-problem-link strong")?.textContent.trim() === expectedTitles[index]);
+      }, "ordered long-term Review Today rows");
+    };
     const inputValue = (input, value) => {
       if (!input) throw new Error(`Missing input for ${value}`);
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
@@ -450,19 +477,17 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await setDate("2026-08-24");
       await navigateTo("Today");
       await waitFor(() => summaryValue("Budget") === "95 min", "Monday weekly default");
-      inputValue(document.querySelector('input[aria-label="Daily budget in minutes"]'), "180");
+      inputValue(document.querySelector('.today-toolbar form input[type="number"]'), "180");
       document.querySelector(".today-toolbar button[type=submit]").click();
       await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
       document.querySelector('[role="dialog"] button.primary-action').click();
       await waitFor(() => summaryValue("Budget") === "180 min", "applied Monday override");
-      await waitText("Long-term Review");
+      await assertTodayLongTermReviews([
+        "Desktop E2E Problem",
+        "Desktop E2E Study Problem",
+        "Desktop E2E Extra Study Problem",
+      ]);
       await stage("today-generated");
-      if (!/Review[\s\S]*Desktop E2E Problem[\s\S]*Long-term Review/.test(bodyText())) {
-        throw new Error("Later Today did not contain the authoritative Review recall");
-      }
-      if ((bodyText().match(/Long-term Review/g) ?? []).length !== 3) {
-        throw new Error("Later Today did not contain all three authoritative Review recalls");
-      }
 
       await invoke("desktop_e2e_finish", { input: { result: "restart" } });
       await invoke("desktop_e2e_exit");
