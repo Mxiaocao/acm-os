@@ -468,6 +468,49 @@ impl ReviewRewardPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RewardLevel(u64);
+
+impl RewardLevel {
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardLevelError {
+    NegativeXp,
+}
+
+pub struct RewardLevelPolicy;
+
+impl RewardLevelPolicy {
+    pub fn derive(xp: i64) -> Result<RewardLevel, RewardLevelError> {
+        if xp < 0 {
+            return Err(RewardLevelError::NegativeXp);
+        }
+        let xp = xp as u128;
+        let mut lower = 1_u64;
+        let mut upper = xp as u64 + 2;
+
+        while upper - lower > 1 {
+            let candidate = lower + (upper - lower) / 2;
+            if Self::threshold_is_reached(candidate, xp) {
+                lower = candidate;
+            } else {
+                upper = candidate;
+            }
+        }
+        Ok(RewardLevel(lower))
+    }
+
+    fn threshold_is_reached(level: u64, xp: u128) -> bool {
+        let lower_factor = u128::from(level - 1);
+        let upper_factor = u128::from(level) + 2;
+        lower_factor <= (xp / 25) / upper_factor
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewAttemptType {
     FirstColdStart,
@@ -1459,6 +1502,124 @@ mod tests {
         );
         let input = decision(LongTermReview, Mastered, Some(7), false);
         assert_eq!(input, decision(LongTermReview, Mastered, Some(7), false));
+    }
+
+    fn r5d_threshold(level: u64) -> i128 {
+        assert!(level >= 1);
+        25_i128 * i128::from(level - 1) * (i128::from(level) + 2)
+    }
+
+    #[test]
+    fn r5c_xp_to_level_maps_frozen_boundaries() {
+        for (xp, expected_level) in [
+            (0, 1),
+            (1, 1),
+            (99, 1),
+            (100, 2),
+            (101, 2),
+            (249, 2),
+            (250, 3),
+            (449, 3),
+            (450, 4),
+            (699, 4),
+            (700, 5),
+            (999, 5),
+            (1_000, 6),
+            (1_350, 7),
+            (1_750, 8),
+            (2_200, 9),
+            (2_700, 10),
+        ] {
+            assert_eq!(
+                RewardLevelPolicy::derive(xp).map(RewardLevel::number),
+                Ok(expected_level),
+                "unexpected level for {xp} XP"
+            );
+        }
+    }
+
+    #[test]
+    fn r5c_xp_to_level_rejects_negative_input() {
+        assert_eq!(
+            RewardLevelPolicy::derive(-1),
+            Err(RewardLevelError::NegativeXp)
+        );
+        assert_eq!(
+            RewardLevelPolicy::derive(i64::MIN),
+            Err(RewardLevelError::NegativeXp)
+        );
+    }
+
+    #[test]
+    fn r5c_xp_to_level_handles_i64_max_without_overflow() {
+        let xp = i64::MAX;
+        let level = RewardLevelPolicy::derive(xp)
+            .expect("non-negative XP")
+            .number();
+        let threshold =
+            |candidate: u64| 25_u128 * u128::from(candidate - 1) * (u128::from(candidate) + 2);
+
+        assert!(level >= 1);
+        assert!(threshold(level) <= xp as u128);
+        assert!(threshold(level + 1) > xp as u128);
+    }
+
+    #[test]
+    fn r5d_i64_max_matches_exact_independent_oracle() {
+        let level = RewardLevelPolicy::derive(i64::MAX)
+            .expect("non-negative XP")
+            .number();
+
+        assert_eq!(level, 607_400_099);
+        assert_eq!(r5d_threshold(level), 9_223_372_021_815_247_450);
+        assert_eq!(r5d_threshold(level + 1), 9_223_372_052_185_252_450);
+        assert!(r5d_threshold(level) <= i128::from(i64::MAX));
+        assert!(r5d_threshold(level + 1) > i128::from(i64::MAX));
+    }
+
+    #[test]
+    fn r5d_representative_thresholds_are_inclusive() {
+        for level in [2_u64, 3, 10, 100, 1_000, 10_000, 1_000_000] {
+            let threshold = i64::try_from(r5d_threshold(level)).expect("threshold fits i64");
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold - 1).map(RewardLevel::number),
+                Ok(level - 1)
+            );
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold).map(RewardLevel::number),
+                Ok(level)
+            );
+        }
+    }
+
+    #[test]
+    fn r5d_dense_first_thousand_level_boundaries_are_exact() {
+        for level in 2_u64..=1_000 {
+            let threshold = i64::try_from(r5d_threshold(level)).expect("threshold fits i64");
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold - 1).map(RewardLevel::number),
+                Ok(level - 1),
+                "just below Level {level}"
+            );
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold).map(RewardLevel::number),
+                Ok(level),
+                "at Level {level} threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn r5d_derivation_is_monotonic_over_early_xp_range() {
+        let mut previous = RewardLevelPolicy::derive(0).expect("zero XP").number();
+        for xp in 1_i64..=10_000 {
+            let current = RewardLevelPolicy::derive(xp)
+                .expect("non-negative XP")
+                .number();
+            assert!(current >= previous, "Level decreased at {xp} XP");
+            assert!(current - previous <= 1, "Level jumped at {xp} XP");
+            previous = current;
+        }
     }
 
     #[test]
