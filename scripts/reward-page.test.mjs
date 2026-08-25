@@ -197,6 +197,7 @@ test("Custom Reward create, edit, archived filter, and archive confirmation use 
   const calls = [];
   let rewards = [{ customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" }, { customRewardId: "r2", name: "Old prize", coinCost: 9, status: "archived" }];
   const view = await renderApp((command, args) => {
+    calls.push([command, args]);
     if (command === "reward_activation_state") return { active: true };
     if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 1 };
     if (command === "list_custom_rewards") return rewards;
@@ -256,6 +257,181 @@ test("Custom Reward validation rejects blank names and invalid coin costs before
     }
   } finally { await view.cleanup(); }
 });
+
+test("R9E redeem uses one UUIDv7 intent, confirmation, and refresh", { concurrency: false }, async () => {
+  const calls = [];
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 25, status: "active" };
+  const view = await renderApp((command, args) => {
+    calls.push([command, args]);
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 2, xp: 10, coin: 40 };
+    if (command === "list_custom_rewards") return [reward];
+    if (command === "reward_redemption_history") return [];
+    if (command === "redeem_custom_reward") { return { disposition: "processed", redemptionId: args.input.redemptionId, customRewardId: "r1", coinCostPaid: 25, redeemedAtUtc: "2026-08-25T01:00:00Z" }; }
+    return baseIpc(command);
+  });
+  try {
+    const redeem = findButton(view.document, "Redeem");
+    await act(async () => redeem.click());
+    assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /Coffee/);
+    assert.equal(calls.filter(([name]) => name === "redeem_custom_reward").length, 0);
+    const confirm = findButton(view.document, "Redeem reward");
+    await act(async () => confirm.click());
+    const redeemCalls = calls.filter(([name]) => name === "redeem_custom_reward");
+    assert.equal(redeemCalls.length, 1);
+    assert.equal(redeemCalls[0][1].input.customRewardId, "r1");
+    assert.match(redeemCalls[0][1].input.redemptionId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+    assert.ok(calls.filter(([name]) => name === "reward_account_summary").length >= 2);
+  } finally { await view.cleanup(); }
+});
+
+test("R9E history uses historical paid cost and refund sends only IDs", { concurrency: false }, async () => {
+  const calls = [];
+  const reads = [];
+  const historyItem = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee", coinCostPaid: 12, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null };
+  const view = await renderApp((command, args) => {
+    if (command === "reward_account_summary" || command === "reward_redemption_history") reads.push(command);
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 3 };
+    if (command === "list_custom_rewards") return [{ customRewardId: "r1", name: "Coffee", coinCost: 99, status: "archived" }];
+    if (command === "reward_redemption_history") return [historyItem];
+    if (command === "refund_custom_reward") { calls.push([command, args]); return { disposition: "alreadyRefunded", refundId: args.input.refundId, redemptionId: args.input.redemptionId, refundedAtUtc: "2026-08-25T02:00:00Z" }; }
+    return baseIpc(command);
+  });
+  try {
+    assert.match(view.document.body.textContent, /12 Coin paid/);
+    assert.match(view.document.body.textContent, /Not refunded/);
+    await act(async () => findButton(view.document, "Refund").click());
+    assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /12 Coin/);
+    await act(async () => findButton(view.document, "Refund reward").click()); await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][1].input.redemptionId, historyItem.redemptionId);
+    assert.match(calls[0][1].input.refundId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    assert.equal(Object.keys(calls[0][1].input).sort().join(","), "redemptionId,refundId");
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+    assert.ok(reads.filter((command) => command === "reward_account_summary").length >= 2);
+    assert.ok(reads.filter((command) => command === "reward_redemption_history").length >= 2);
+  } finally { await view.cleanup(); }
+});
+
+test("R9E redeem retries reuse one intent, pending duplicates are ignored, and a new action gets a new UUIDv7", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 25, status: "active" };
+  const calls = [];
+  let resolveRetry;
+  let attempt = 0;
+  const retryPending = new Promise((resolve) => { resolveRetry = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 2, xp: 10, coin: 40 };
+    if (command === "list_custom_rewards") return [reward];
+    if (command === "reward_redemption_history") return [];
+    if (command === "redeem_custom_reward") {
+      calls.push(args.input);
+      attempt += 1;
+      if (attempt === 1) return Promise.reject("temporary_failure");
+      if (attempt === 2) return retryPending;
+      return { disposition: "alreadyProcessed", redemptionId: args.input.redemptionId, customRewardId: "r1", coinCostPaid: 25, redeemedAtUtc: "2026-08-25T01:00:00Z" };
+    }
+    return baseIpc(command);
+  });
+  try {
+    await act(async () => findButton(view.document, "Redeem").click());
+    await act(async () => findButton(view.document, "Redeem reward").click());
+    await settle();
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /Retry the same intent/);
+    const firstId = calls[0].redemptionId;
+    assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const retry = findButton(view.document, "Redeem reward");
+    act(() => { retry.click(); retry.click(); });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].redemptionId, firstId);
+    await act(async () => resolveRetry({ disposition: "processed", redemptionId: firstId, customRewardId: "r1", coinCostPaid: 25, redeemedAtUtc: "2026-08-25T01:00:00Z" }));
+    await settle();
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+
+    await act(async () => findButton(view.document, "Redeem").click());
+    await act(async () => findButton(view.document, "Redeem reward").click());
+    await settle();
+    assert.equal(calls.length, 3);
+    assert.match(calls[2].redemptionId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    assert.notEqual(calls[2].redemptionId, firstId);
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+  } finally { await view.cleanup(); }
+});
+
+test("R9E refund retries reuse one intent, pending duplicates are ignored, and a new action gets a new UUIDv7", { concurrency: false }, async () => {
+  const first = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee", coinCostPaid: 12, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null };
+  const second = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ac", customRewardId: "r2", rewardName: "Tea", coinCostPaid: 8, redeemedAtUtc: "2026-08-25T00:30:00Z", refundId: null, refundedAtUtc: null };
+  let history = [first, second];
+  const calls = [];
+  let resolveRetry;
+  let attempt = 0;
+  const retryPending = new Promise((resolve) => { resolveRetry = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 10 };
+    if (command === "list_custom_rewards") return [];
+    if (command === "reward_redemption_history") return history;
+    if (command === "refund_custom_reward") {
+      calls.push(args.input);
+      attempt += 1;
+      if (attempt === 1) return Promise.reject("temporary_failure");
+      if (attempt === 2) return retryPending;
+      history = [{ ...first, refundId: "settled-first", refundedAtUtc: "2026-08-25T02:00:00Z" }, { ...second, refundId: args.input.refundId, refundedAtUtc: "2026-08-25T03:00:00Z" }];
+      return { disposition: "alreadyProcessed", refundId: args.input.refundId, redemptionId: args.input.redemptionId, refundedAtUtc: "2026-08-25T03:00:00Z" };
+    }
+    return baseIpc(command);
+  });
+  try {
+    await act(async () => findButton(view.document, "Refund").click());
+    await act(async () => findButton(view.document, "Refund reward").click());
+    await settle();
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /Retry the same intent/);
+    const firstId = calls[0].refundId;
+    assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const retry = findButton(view.document, "Refund reward");
+    act(() => { retry.click(); retry.click(); });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].refundId, firstId);
+    history = [{ ...first, refundId: firstId, refundedAtUtc: "2026-08-25T02:00:00Z" }, second];
+    await act(async () => resolveRetry({ disposition: "processed", refundId: firstId, redemptionId: first.redemptionId, refundedAtUtc: "2026-08-25T02:00:00Z" }));
+    await settle();
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+
+    await act(async () => findButton(view.document, "Refund").click());
+    await act(async () => findButton(view.document, "Refund reward").click());
+    await settle();
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].redemptionId, second.redemptionId);
+    assert.match(calls[2].refundId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    assert.notEqual(calls[2].refundId, firstId);
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+  } finally { await view.cleanup(); }
+});
+
+test("R9E transaction dialog Escape restores the originating action", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
+  const view = await renderApp((command) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 10 };
+    if (command === "list_custom_rewards") return [reward];
+    if (command === "reward_redemption_history") return [];
+    return baseIpc(command);
+  });
+  try {
+    const redeem = findButton(view.document, "Redeem");
+    await act(async () => redeem.click());
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await settle();
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+    assert.equal(view.document.activeElement, redeem);
+  } finally { await view.cleanup(); }
+});
+
 function baseIpc(command) {
   if (command === "foundation_status") return { status: "ready", core: "acm-os" };
   if (command === "app_shell_status") {
