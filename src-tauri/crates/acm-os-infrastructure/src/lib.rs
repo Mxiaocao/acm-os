@@ -8,7 +8,9 @@ mod persistence;
 mod safe_patch;
 
 pub use persistence::{
-    start_database, DatabaseRuntime, RestoreRollbackCleanupError, SystemHealthSnapshot,
+    start_database, CustomRewardRedemption, CustomRewardRedemptionDisposition,
+    CustomRewardRedemptionError, CustomRewardRedemptionResult, DatabaseRuntime,
+    RestoreRollbackCleanupError, SystemHealthSnapshot,
 };
 
 pub fn current_local_date() -> Result<acm_os_domain::LocalDate, ()> {

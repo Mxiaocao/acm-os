@@ -147,6 +147,39 @@ pub enum CustomRewardError {
     DatabaseFailure,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemption {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRedemptionDisposition {
+    Processed,
+    AlreadyProcessed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemptionResult {
+    pub disposition: CustomRewardRedemptionDisposition,
+    pub redemption: CustomRewardRedemption,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRedemptionError {
+    Unavailable,
+    InvalidIdentity,
+    NotFound,
+    Archived,
+    RewardInactive,
+    InsufficientBalance,
+    IntentConflict,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewardProcessingError {
     Unavailable,
@@ -210,6 +243,42 @@ fn validate_custom_reward_id(value: &str) -> Result<(), CustomRewardError> {
     } else {
         Err(CustomRewardError::InvalidIdentity)
     }
+}
+
+fn validate_redemption_id(value: &str) -> Result<(), CustomRewardRedemptionError> {
+    if uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(CustomRewardRedemptionError::InvalidIdentity)
+    }
+}
+
+fn parse_custom_reward_redemption_row(
+    redemption_id: String,
+    custom_reward_id: String,
+    coin_cost_paid: i64,
+    redeemed_at_utc: String,
+) -> Result<CustomRewardRedemption, CustomRewardRedemptionError> {
+    validate_redemption_id(&redemption_id)?;
+    if uuid::Uuid::parse_str(&custom_reward_id)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_none()
+        || !validate_custom_reward_coin_cost(coin_cost_paid).is_ok()
+        || parse_reward_utc_millis(&redeemed_at_utc).is_none()
+    {
+        return Err(CustomRewardRedemptionError::IntegrityViolation);
+    }
+    Ok(CustomRewardRedemption {
+        redemption_id,
+        custom_reward_id,
+        coin_cost_paid,
+        redeemed_at_utc,
+    })
 }
 
 fn canonical_custom_reward_name(value: &str) -> Result<String, CustomRewardError> {
@@ -8444,13 +8513,261 @@ impl DatabaseRuntime {
             ._pool
             .as_ref()
             .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Self::load_reward_account_from_connection(&mut connection).await
+    }
+
+    pub async fn load_custom_reward_redemption(
+        &self,
+        redemption_id: &str,
+    ) -> Result<CustomRewardRedemption, CustomRewardRedemptionError> {
+        validate_redemption_id(redemption_id)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRedemptionError::Unavailable)?;
+        let row: Option<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        let row = row.ok_or(CustomRewardRedemptionError::NotFound)?;
+        parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3)
+    }
+
+    pub async fn redeem_custom_reward(
+        &self,
+        redemption_id: &str,
+        custom_reward_id: &str,
+    ) -> Result<CustomRewardRedemptionResult, CustomRewardRedemptionError> {
+        validate_redemption_id(redemption_id)?;
+        validate_custom_reward_id(custom_reward_id)
+            .map_err(|_| CustomRewardRedemptionError::InvalidIdentity)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRedemptionError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+
+        // SQLite's deferred BEGIN permits a read race. BEGIN IMMEDIATE takes the writer
+        // reservation before any validation, so two redemption attempts cannot both spend
+        // the same reconstructed balance.
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+
+        let existing: Option<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        if let Some(row) = existing {
+            let redemption = match parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            if redemption.custom_reward_id != custom_reward_id {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRedemptionError::IntentConflict);
+            }
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+            return Ok(CustomRewardRedemptionResult {
+                disposition: CustomRewardRedemptionDisposition::AlreadyProcessed,
+                redemption,
+            });
+        }
+
+        let activation = match load_reward_activation_authority(&mut connection).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(Self::map_redemption_reward_error(error));
+            }
+        };
+        if activation.activated_at_utc.is_none() {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::RewardInactive);
+        }
+
+        let reward_row: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards WHERE custom_reward_id = ?1",
+        )
+        .bind(custom_reward_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        let reward_row = match reward_row {
+            Some(row) => row,
+            None => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRedemptionError::NotFound);
+            }
+        };
+        let reward = match parse_custom_reward_row(
+            reward_row.0,
+            reward_row.1,
+            reward_row.2,
+            reward_row.3,
+            reward_row.4,
+            reward_row.5,
+        )
+        .map_err(Self::map_redemption_custom_reward_error)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(error);
+            }
+        };
+        if reward.status == CustomRewardStatus::Archived {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::Archived);
+        }
+
+        let account = match Self::load_reward_account_from_connection(&mut connection).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(Self::map_redemption_reward_error(error));
+            }
+        };
+        if account.coin_balance < reward.coin_cost {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::InsufficientBalance);
+        }
+
+        let redeemed_at_utc = reward_now_utc();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_redemptions
+             (redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(redemption_id)
+        .bind(custom_reward_id)
+        .bind(reward.coin_cost)
+        .bind(&redeemed_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        let ledger_entry_id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO reward_ledger_entries
+             (id, resource_kind, delta, recorded_at_utc) VALUES (?1, 'coin', ?2, ?3)",
+        )
+        .bind(&ledger_entry_id)
+        .bind(-reward.coin_cost)
+        .bind(&redeemed_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_redemption_ledger_origins
+             (ledger_entry_id, redemption_id, resource_kind)
+             VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&ledger_entry_id)
+        .bind(redemption_id)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        Ok(CustomRewardRedemptionResult {
+            disposition: CustomRewardRedemptionDisposition::Processed,
+            redemption: CustomRewardRedemption {
+                redemption_id: redemption_id.to_owned(),
+                custom_reward_id: custom_reward_id.to_owned(),
+                coin_cost_paid: reward.coin_cost,
+                redeemed_at_utc,
+            },
+        })
+    }
+
+    async fn load_reward_account_from_connection(
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<RewardAccount, RewardProcessingError> {
+        let invalid_origin: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reward_ledger_entries entry
+             WHERE EXISTS (
+                 SELECT 1 FROM reward_grant_ledger_origins origin
+                 LEFT JOIN reward_grants grant ON grant.reward_event_id = origin.reward_event_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (grant.reward_event_id IS NULL OR origin.resource_kind != entry.resource_kind
+                        OR entry.delta <= 0
+                        OR entry.delta != CASE origin.resource_kind
+                            WHEN 'xp' THEN grant.xp_amount
+                            WHEN 'coin' THEN grant.coin_amount
+                            ELSE NULL END)
+             )
+             OR EXISTS (
+                 SELECT 1 FROM custom_reward_redemption_ledger_origins origin
+                 LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                        OR entry.resource_kind != 'coin' OR entry.delta != -redemption.coin_cost_paid)
+             )
+             OR EXISTS (
+                 SELECT 1 FROM custom_reward_refund_ledger_origins origin
+                 LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+                 LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (refund.refund_id IS NULL OR redemption.redemption_id IS NULL
+                        OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                        OR entry.delta != redemption.coin_cost_paid)
+             )",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if invalid_origin != 0 {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
         let rows: Vec<(String, String, i64, String, i64)> = sqlx::query_as(
             "SELECT entry.id, entry.resource_kind, entry.delta, entry.recorded_at_utc,
-                    (SELECT COUNT(*) FROM reward_grant_ledger_origins origin
-                     WHERE origin.ledger_entry_id = entry.id)
-             FROM reward_ledger_entries entry ORDER BY entry.id",
+                (SELECT COUNT(*) FROM (
+                    SELECT ledger_entry_id FROM reward_grant_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                ))
+         FROM reward_ledger_entries entry ORDER BY entry.id",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(|_| RewardProcessingError::DatabaseFailure)?;
         let mut account = RewardAccount {
@@ -8479,6 +8796,40 @@ impl DatabaseRuntime {
                 .ok_or(RewardProcessingError::IntegrityViolation)?;
         }
         Ok(account)
+    }
+
+    fn map_redemption_reward_error(error: RewardProcessingError) -> CustomRewardRedemptionError {
+        match error {
+            RewardProcessingError::Unavailable => CustomRewardRedemptionError::Unavailable,
+            RewardProcessingError::RewardInactive => CustomRewardRedemptionError::RewardInactive,
+            RewardProcessingError::IntegrityViolation => {
+                CustomRewardRedemptionError::IntegrityViolation
+            }
+            _ => CustomRewardRedemptionError::DatabaseFailure,
+        }
+    }
+
+    fn map_redemption_custom_reward_error(error: CustomRewardError) -> CustomRewardRedemptionError {
+        match error {
+            CustomRewardError::NotFound => CustomRewardRedemptionError::NotFound,
+            CustomRewardError::Archived => CustomRewardRedemptionError::Archived,
+            CustomRewardError::IntegrityViolation | CustomRewardError::InvalidStatus => {
+                CustomRewardRedemptionError::IntegrityViolation
+            }
+            CustomRewardError::Unavailable => CustomRewardRedemptionError::Unavailable,
+            _ => CustomRewardRedemptionError::IntegrityViolation,
+        }
+    }
+
+    fn map_redemption_sql_error(error: sqlx::Error) -> CustomRewardRedemptionError {
+        if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+            CustomRewardRedemptionError::IntentConflict
+        } else if matches!(&error, sqlx::Error::Database(database) if database.is_check_violation() || database.is_foreign_key_violation())
+        {
+            CustomRewardRedemptionError::IntegrityViolation
+        } else {
+            CustomRewardRedemptionError::DatabaseFailure
+        }
     }
 
     pub async fn create_problem_solved_evaluation(
@@ -10877,6 +11228,7 @@ async fn validate_schema_contract(
             | 30
             | 31
             | 32
+            | 33
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -11019,13 +11371,16 @@ async fn validate_schema_contract(
         validate_scheduled_review_ordinal_contract(pool).await?;
     }
     if schema_version >= 30 {
-        validate_reward_durable_core_contract(pool).await?;
+        validate_reward_durable_core_contract(pool, schema_version).await?;
     }
     if schema_version >= 31 {
         validate_problem_solved_reward_contract(pool).await?;
     }
     if schema_version >= 32 {
         validate_custom_reward_contract(pool).await?;
+    }
+    if schema_version >= 33 {
+        validate_custom_reward_redemption_contract(pool).await?;
     }
     Ok(())
 }
@@ -11685,6 +12040,91 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "table".to_owned(),
                 "custom_rewards".to_owned(),
                 "custom_rewards".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 33 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "custom_reward_redemptions_by_reward".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_refunds".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemptions_no_update".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemptions_no_delete".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refunds_no_update".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refunds_no_delete".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_insert_guard".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_no_update".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_no_delete".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_insert_guard".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_no_update".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_no_delete".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_exactly_one_insert_guard".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -12645,6 +13085,7 @@ async fn scheduled_review_ordinal_data_is_valid(
 
 async fn validate_reward_durable_core_contract(
     pool: &SqlitePool,
+    schema_version: i64,
 ) -> Result<(), StartupRecoveryReason> {
     for (table, columns) in [
         (
@@ -12909,19 +13350,32 @@ async fn validate_reward_durable_core_contract(
         }
     }
 
-    let invalid_ledger_origin_participation: i64 = sqlx::query_scalar(
+    let invalid_ledger_origin_sql = if schema_version >= 33 {
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM (
+                    SELECT ledger_entry_id FROM reward_grant_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                )) != 1"
+    } else {
         "SELECT COUNT(*) FROM reward_ledger_entries entry
          WHERE (SELECT COUNT(*) FROM reward_grant_ledger_origins origin
-                WHERE origin.ledger_entry_id = entry.id) != 1",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+                WHERE origin.ledger_entry_id = entry.id) != 1"
+    };
+    let invalid_ledger_origin_participation: i64 = sqlx::query_scalar(invalid_ledger_origin_sql)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
     if invalid_ledger_origin_participation != 0 {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
 
-    let invalid_reward_links: i64 = sqlx::query_scalar(
+    let mut invalid_reward_links_sql = String::from(
         "SELECT COUNT(*) FROM (
              SELECT grant.reward_event_id AS authority_id
              FROM reward_grants grant
@@ -12962,10 +13416,36 @@ async fn validate_reward_durable_core_contract(
              GROUP BY source.reward_event_id
              HAVING COUNT(*) != 1
          ) invalid",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    );
+    if schema_version >= 33 {
+        let marker =
+            "             UNION ALL\n             SELECT source.problem_completion_occurrence_id";
+        let r7_links = "             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM custom_reward_redemption_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+             WHERE entry.id IS NULL OR redemption.redemption_id IS NULL
+                OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                OR entry.delta != -redemption.coin_cost_paid
+             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM custom_reward_refund_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+             WHERE entry.id IS NULL OR refund.refund_id IS NULL OR redemption.redemption_id IS NULL
+                OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                OR entry.delta != redemption.coin_cost_paid
+";
+        invalid_reward_links_sql =
+            invalid_reward_links_sql.replacen(marker, &(r7_links.to_owned() + marker), 1);
+    }
+    let invalid_reward_links: i64 =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(invalid_reward_links_sql))
+            .fetch_one(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
     if invalid_reward_links != 0 {
         return Err(StartupRecoveryReason::IntegrityCheckFailed);
     }
@@ -13290,6 +13770,113 @@ async fn validate_custom_reward_contract(pool: &SqlitePool) -> Result<(), Startu
     Ok(())
 }
 
+async fn validate_custom_reward_redemption_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "custom_reward_redemptions",
+        &[
+            "redemption_id",
+            "custom_reward_id",
+            "coin_cost_paid",
+            "redeemed_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_refunds",
+        &["refund_id", "redemption_id", "refunded_at_utc"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_redemption_ledger_origins",
+        &["ledger_entry_id", "redemption_id", "resource_kind"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_refund_ledger_origins",
+        &["ledger_entry_id", "refund_id", "resource_kind"],
+    )
+    .await?;
+    validate_strong_identity_unique(pool, "custom_reward_refunds", &["redemption_id"]).await?;
+    validate_strong_identity_unique(
+        pool,
+        "custom_reward_redemption_ledger_origins",
+        &["redemption_id"],
+    )
+    .await?;
+    validate_strong_identity_unique(pool, "custom_reward_refund_ledger_origins", &["refund_id"])
+        .await?;
+
+    let redemptions: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+         FROM custom_reward_redemptions",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for row in redemptions {
+        if parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3).is_err() {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+    let refunds: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT refund_id, redemption_id, refunded_at_utc FROM custom_reward_refunds",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (refund_id, redemption_id, refunded_at_utc) in refunds {
+        if uuid::Uuid::parse_str(&refund_id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || uuid::Uuid::parse_str(&redemption_id)
+                .ok()
+                .filter(|id| id.get_version_num() == 7)
+                .is_none()
+            || parse_reward_utc_millis(&refunded_at_utc).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM (
+             SELECT ledger_entry_id FROM reward_grant_ledger_origins WHERE ledger_entry_id = entry.id
+             UNION ALL SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins WHERE ledger_entry_id = entry.id
+             UNION ALL SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins WHERE ledger_entry_id = entry.id
+         )) != 1
+         OR EXISTS (
+             SELECT 1 FROM custom_reward_redemption_ledger_origins origin
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+             WHERE origin.ledger_entry_id = entry.id
+               AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                    OR entry.resource_kind != 'coin' OR entry.delta != -redemption.coin_cost_paid)
+         )
+         OR EXISTS (
+             SELECT 1 FROM custom_reward_refund_ledger_origins origin
+             LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+             WHERE origin.ledger_entry_id = entry.id
+               AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                    OR entry.resource_kind != 'coin' OR entry.delta != redemption.coin_cost_paid)
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_links != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
 async fn validate_table_columns(
     pool: &SqlitePool,
     table: &str,
@@ -13349,6 +13936,14 @@ async fn validate_table_columns(
             "PRAGMA table_xinfo('reward_problem_solved_positive_claims')"
         }
         "custom_rewards" => "PRAGMA table_xinfo('custom_rewards')",
+        "custom_reward_redemptions" => "PRAGMA table_xinfo('custom_reward_redemptions')",
+        "custom_reward_refunds" => "PRAGMA table_xinfo('custom_reward_refunds')",
+        "custom_reward_redemption_ledger_origins" => {
+            "PRAGMA table_xinfo('custom_reward_redemption_ledger_origins')"
+        }
+        "custom_reward_refund_ledger_origins" => {
+            "PRAGMA table_xinfo('custom_reward_refund_ledger_origins')"
+        }
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -14851,9 +15446,9 @@ mod tests {
             inspect_schema_version(&fresh_pool)
                 .await
                 .expect("fresh version"),
-            32
+            33
         );
-        validate_schema_contract(&fresh_pool, 32)
+        validate_schema_contract(&fresh_pool, 33)
             .await
             .expect("fresh schema contract");
         verify_integrity(&fresh_pool)
@@ -14871,7 +15466,7 @@ mod tests {
                 .fetch_one(&fresh_pool)
                 .await
                 .expect("fresh ledger");
-        assert_eq!(applied_before, 32);
+        assert_eq!(applied_before, 33);
         let migration29 = MIGRATOR
             .iter()
             .find(|migration| migration.version == 29)
@@ -14903,9 +15498,9 @@ mod tests {
             inspect_schema_version(&existing_pool)
                 .await
                 .expect("upgraded version"),
-            32
+            33
         );
-        validate_schema_contract(&existing_pool, 32)
+        validate_schema_contract(&existing_pool, 33)
             .await
             .expect("upgraded schema contract");
         verify_integrity(&existing_pool)
@@ -14919,7 +15514,7 @@ mod tests {
                 .fetch_one(&existing_pool)
                 .await
                 .expect("existing ledger"),
-            32
+            33
         );
     }
 
@@ -14966,7 +15561,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(
@@ -15286,7 +15881,7 @@ mod tests {
         DatabaseRuntime {
             _pool: Some(pool),
             _startup_lock: None,
-            status: StartupGateStatus::Ready { schema_version: 32 },
+            status: StartupGateStatus::Ready { schema_version: 33 },
             markdown_projection_cache: Mutex::new(HashMap::new()),
             recovery_root: None,
             app_private_data: None,
@@ -16364,7 +16959,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(
@@ -16604,7 +17199,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pending = runtime.list_pending_reward_sources(10).await.unwrap();
         assert!(pending.contains(&s3));
@@ -16836,7 +17431,7 @@ mod tests {
         let competitor = DatabaseRuntime {
             _pool: Some(second_pool),
             _startup_lock: None,
-            status: StartupGateStatus::Ready { schema_version: 32 },
+            status: StartupGateStatus::Ready { schema_version: 33 },
             markdown_projection_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             recovery_root: None,
             app_private_data: Some(directory.path().to_owned()),
@@ -17003,8 +17598,8 @@ mod tests {
              FROM sqlite_master
              WHERE name NOT LIKE 'reward_%'
                AND tbl_name NOT LIKE 'reward_%'
-               AND name NOT LIKE 'custom_rewards%'
-               AND tbl_name NOT LIKE 'custom_rewards%'
+               AND name NOT LIKE 'custom_reward%'
+               AND tbl_name NOT LIKE 'custom_reward%'
              ORDER BY type, name, tbl_name",
         )
         .fetch_all(&pool)
@@ -17018,8 +17613,8 @@ mod tests {
              FROM sqlite_master
              WHERE name NOT LIKE 'reward_%'
                AND tbl_name NOT LIKE 'reward_%'
-               AND name NOT LIKE 'custom_rewards%'
-               AND tbl_name NOT LIKE 'custom_rewards%'
+               AND name NOT LIKE 'custom_reward%'
+               AND tbl_name NOT LIKE 'custom_reward%'
              ORDER BY type, name, tbl_name",
         )
         .fetch_all(&pool)
@@ -17048,7 +17643,7 @@ mod tests {
                 "reward_review_event_sources",
             ]
         );
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 32);
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 33);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT schema_generation FROM app_metadata WHERE singleton = 1",
@@ -17056,9 +17651,9 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            32
+            33
         );
-        validate_schema_contract(&pool, 32)
+        validate_schema_contract(&pool, 33)
             .await
             .expect("schema 30 contract");
         verify_integrity(&pool).await.expect("schema 30 integrity");
@@ -17208,7 +17803,7 @@ mod tests {
             let runtime = start_database(directory.path()).await;
             assert_eq!(
                 runtime.status(),
-                &StartupGateStatus::Ready { schema_version: 32 }
+                &StartupGateStatus::Ready { schema_version: 33 }
             );
             let pool = runtime._pool.as_ref().expect("ready pool");
             sqlx::query("UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1")
@@ -17262,8 +17857,8 @@ mod tests {
             .await
             .expect("migration 30");
 
-        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 32);
-        validate_schema_contract(&pool, 32)
+        assert_eq!(inspect_schema_version(&pool).await.expect("version"), 33);
+        validate_schema_contract(&pool, 33)
             .await
             .expect("schema 30 contract");
         assert_eq!(
@@ -17273,7 +17868,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("schema generation"),
-            32
+            33
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences",)
@@ -17348,7 +17943,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("upgraded pool");
         assert_eq!(
@@ -17358,7 +17953,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("schema generation"),
-            32
+            33
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -17390,7 +17985,7 @@ mod tests {
             .expect("empty ordinal authority"),
             0
         );
-        validate_schema_contract(pool, 32)
+        validate_schema_contract(pool, 33)
             .await
             .expect("schema 31 contract");
 
@@ -17425,7 +18020,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let reopened_pool = reopened._pool.as_ref().expect("reopened pool");
         assert_eq!(
@@ -17488,7 +18083,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("activated pool");
         let activated: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -17560,7 +18155,7 @@ mod tests {
         let reopened = start_database(directory.path()).await;
         assert_eq!(
             reopened.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = reopened._pool.as_ref().expect("reopened pool");
         let durable: Vec<(i64, i64, i64)> = sqlx::query_as(
@@ -19037,9 +19632,9 @@ mod tests {
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            32
+            33
         );
-        validate_schema_contract(&runtime_pool, 32)
+        validate_schema_contract(&runtime_pool, 33)
             .await
             .expect("schema 31 contract");
         assert_eq!(
@@ -19057,7 +19652,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -21025,14 +21620,14 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 32);
+        assert_eq!(ledger_count, 33);
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -21045,7 +21640,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -21077,7 +21672,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-32-"));
+            .starts_with("schema-10-to-33-"));
     }
 
     #[tokio::test]
@@ -25717,7 +26312,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -25783,7 +26378,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -25816,7 +26411,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -25861,7 +26456,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -26026,7 +26621,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -26238,7 +26833,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 32);
+        assert_eq!(preview.supported_schema_version, 33);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -26720,7 +27315,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -26812,7 +27407,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-32-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-33-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -27072,7 +27667,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -27106,7 +27701,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -27815,7 +28410,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -28253,7 +28848,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 32 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("R6C1 pool");
         let columns: Vec<String> =
@@ -28436,5 +29031,289 @@ mod tests {
             runtime.load_custom_reward(&invalid_id).await,
             Err(CustomRewardError::InvalidStatus)
         );
+    }
+
+    #[tokio::test]
+    async fn r7c1_redemption_debit_is_atomic_idempotent_and_price_snapshotted() {
+        let directory = TempDir::new().expect("R7C1 RED database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let reward = runtime
+            .create_custom_reward("R7 reward", 500)
+            .await
+            .expect("custom reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 500),
+            )
+            .await
+            .expect("seed coin");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let first = runtime
+            .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("redemption");
+        assert_eq!(
+            first.disposition,
+            CustomRewardRedemptionDisposition::Processed
+        );
+        assert_eq!(first.redemption.coin_cost_paid, 500);
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("account")
+                .coin_balance,
+            0
+        );
+        let retry = runtime
+            .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("retry");
+        assert_eq!(
+            retry.disposition,
+            CustomRewardRedemptionDisposition::AlreadyProcessed
+        );
+        assert_eq!(retry.redemption, first.redemption);
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM custom_reward_redemptions),
+                    (SELECT COUNT(*) FROM custom_reward_redemption_ledger_origins),
+                    (SELECT COUNT(*) FROM reward_events)",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("redemption counts");
+        assert_eq!(counts, (1, 1, 1));
+        runtime
+            .update_custom_reward(&reward.custom_reward_id, "R7 reward", 700)
+            .await
+            .expect("update price");
+        assert_eq!(
+            runtime
+                .load_custom_reward_redemption(&redemption_id)
+                .await
+                .expect("historical redemption")
+                .coin_cost_paid,
+            500
+        );
+    }
+
+    #[tokio::test]
+    async fn r7c1_redemption_rejects_inactive_archived_insufficient_and_conflicting_intents() {
+        let directory = TempDir::new().expect("R7C1 eligibility database");
+        let runtime = start_database(directory.path()).await;
+        let reward = runtime
+            .create_custom_reward("eligibility", 500)
+            .await
+            .expect("reward");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::RewardInactive)
+        );
+        runtime.activate_reward().await.expect("activation");
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::InsufficientBalance)
+        );
+        let archived = runtime
+            .archive_custom_reward(&reward.custom_reward_id)
+            .await
+            .expect("archive");
+        assert_eq!(archived.status, CustomRewardStatus::Archived);
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&uuid::Uuid::now_v7().to_string(), &reward.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::Archived)
+        );
+        let other = runtime
+            .create_custom_reward("other", 1)
+            .await
+            .expect("other reward");
+        let other_redemption_id = uuid::Uuid::now_v7().to_string();
+        let conflict_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO custom_reward_redemptions
+             (redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc)
+             VALUES (?1, ?2, 1, '2026-08-25T00:00:00.000Z')",
+        )
+        .bind(&conflict_id)
+        .bind(&other.custom_reward_id)
+        .execute(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("conflict fixture");
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&conflict_id, &reward.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::IntentConflict)
+        );
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&other_redemption_id, &reward.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::Archived)
+        );
+        assert_eq!(
+            runtime
+                .redeem_custom_reward(&other_redemption_id, &other.custom_reward_id)
+                .await,
+            Err(CustomRewardRedemptionError::InsufficientBalance)
+        );
+    }
+
+    #[tokio::test]
+    async fn r7c1_two_pools_serialize_coin_spend_without_overspend() {
+        let directory = TempDir::new().expect("R7C1 concurrency database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let reward = runtime
+            .create_custom_reward("concurrent", 400)
+            .await
+            .expect("reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 500),
+            )
+            .await
+            .expect("seed balance");
+        let path = directory.path().join(DATABASE_FILENAME);
+        drop(runtime);
+        let pool_a = connect_read_write(&path).await.expect("pool A");
+        let pool_b = connect_read_write(&path).await.expect("pool B");
+        let runtime_a = test_runtime_from_pool(pool_a);
+        let runtime_b = test_runtime_from_pool(pool_b);
+        let id_a = uuid::Uuid::now_v7().to_string();
+        let id_b = uuid::Uuid::now_v7().to_string();
+        let (a, b) = tokio::join!(
+            runtime_a.redeem_custom_reward(&id_a, &reward.custom_reward_id),
+            runtime_b.redeem_custom_reward(&id_b, &reward.custom_reward_id)
+        );
+        let successes = [a, b]
+            .iter()
+            .filter(|result| matches!(result, Ok(value) if value.disposition == CustomRewardRedemptionDisposition::Processed))
+            .count();
+        assert_eq!(successes, 1);
+        let final_balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(delta), 0) FROM reward_ledger_entries WHERE resource_kind = 'coin'",
+        )
+        .fetch_one(runtime_a._pool.as_ref().expect("pool A"))
+        .await
+        .expect("final balance");
+        assert_eq!(final_balance, 100);
+        let redemption_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM custom_reward_redemptions")
+                .fetch_one(runtime_a._pool.as_ref().expect("pool A"))
+                .await
+                .expect("redemption count");
+        assert_eq!(redemption_count, 1);
+    }
+
+    #[tokio::test]
+    async fn r7c1_refund_schema_and_typed_origin_are_schema_only_but_validated() {
+        let directory = TempDir::new().expect("R7C1 refund schema database");
+        let runtime = start_database(directory.path()).await;
+        let reward = runtime
+            .create_custom_reward("refund fixture", 500)
+            .await
+            .expect("reward");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let refund_id = uuid::Uuid::now_v7().to_string();
+        let redemption_ledger_id = uuid::Uuid::now_v7().to_string();
+        let refund_ledger_id = uuid::Uuid::now_v7().to_string();
+        let pool = runtime._pool.as_ref().expect("pool");
+        sqlx::query(
+            "INSERT INTO custom_reward_redemptions
+             (redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc)
+             VALUES (?1, ?2, 500, '2026-08-25T00:00:00.000Z')",
+        )
+        .bind(&redemption_id)
+        .bind(&reward.custom_reward_id)
+        .execute(pool)
+        .await
+        .expect("redemption fixture");
+        sqlx::query(
+            "INSERT INTO custom_reward_refunds (refund_id, redemption_id, refunded_at_utc)
+             VALUES (?1, ?2, '2026-08-25T00:00:01.000Z')",
+        )
+        .bind(&refund_id)
+        .bind(&redemption_id)
+        .execute(pool)
+        .await
+        .expect("refund fixture");
+        assert!(sqlx::query(
+            "INSERT INTO custom_reward_refunds (refund_id, redemption_id, refunded_at_utc)
+             VALUES (?1, ?2, '2026-08-25T00:00:02.000Z')",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&redemption_id)
+        .execute(pool)
+        .await
+        .is_err());
+        sqlx::query(
+            "INSERT INTO reward_ledger_entries (id, resource_kind, delta, recorded_at_utc)
+             VALUES (?1, 'coin', -500, '2026-08-25T00:00:00.000Z'),
+                    (?2, 'coin', 500, '2026-08-25T00:00:01.000Z')",
+        )
+        .bind(&redemption_ledger_id)
+        .bind(&refund_ledger_id)
+        .execute(pool)
+        .await
+        .expect("ledger fixtures");
+        sqlx::query(
+            "INSERT INTO custom_reward_redemption_ledger_origins
+             (ledger_entry_id, redemption_id, resource_kind) VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&redemption_ledger_id)
+        .bind(&redemption_id)
+        .execute(pool)
+        .await
+        .expect("redemption origin fixture");
+        sqlx::query(
+            "INSERT INTO custom_reward_refund_ledger_origins
+             (ledger_entry_id, refund_id, resource_kind) VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&refund_ledger_id)
+        .bind(&refund_id)
+        .execute(pool)
+        .await
+        .expect("refund origin fixture");
+        assert_eq!(
+            runtime.load_reward_account().await.expect("refund account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 0,
+            }
+        );
+        assert!(sqlx::query(
+            "INSERT INTO custom_reward_refund_ledger_origins
+             (ledger_entry_id, refund_id, resource_kind) VALUES (?1, ?2, 'xp')",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&refund_id)
+        .execute(pool)
+        .await
+        .is_err());
+    }
+
+    fn test_runtime_from_pool(pool: SqlitePool) -> DatabaseRuntime {
+        DatabaseRuntime {
+            _pool: Some(pool),
+            _startup_lock: None,
+            status: StartupGateStatus::Ready { schema_version: 33 },
+            markdown_projection_cache: Mutex::new(HashMap::new()),
+            recovery_root: None,
+            app_private_data: None,
+            daily_backup_lock: tokio::sync::Mutex::new(()),
+        }
     }
 }
