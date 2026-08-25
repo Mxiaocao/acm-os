@@ -16,8 +16,63 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
     const waitText = (value) => waitFor(() => bodyText().includes(value), value);
     const clickText = async (value) => {
       const matches = (item) => item.textContent.trim().startsWith(value);
-      await waitFor(() => [...document.querySelectorAll("button, a")].some(matches), value);
-      [...document.querySelectorAll("button, a")].find(matches).click();
+      await waitFor(() => {
+        const item = [...document.querySelectorAll("button, a")].find(matches);
+        if (!item) return false;
+        item.click();
+        return true;
+      }, value);
+    };
+    const lifecycleSection = () => document.querySelector('section[aria-labelledby="learning-lifecycle-heading"]');
+    const lifecyclePrimary = () => lifecycleSection()?.querySelector(".action-row button.primary-action");
+    const advanceLifecycle = async (label) => {
+      let action;
+      await waitFor(() => {
+        action = lifecyclePrimary();
+        return action != null;
+      }, `${label} lifecycle action`);
+      action.click();
+      await waitFor(() => !document.contains(action), `${label} lifecycle transition`);
+    };
+    const assertNextReviewDate = async (expected) => {
+      await waitFor(() => {
+        const text = lifecycleSection()?.textContent ?? "";
+        return text.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] === expected;
+      }, `next Review date ${expected}`);
+    };
+    const startReview = async () => {
+      let action;
+      await waitFor(() => {
+        action = lifecyclePrimary();
+        return action != null;
+      }, "Review action");
+      action.click();
+      await waitFor(() => window.location.pathname.startsWith("/review/"), "Review route");
+      await waitFor(() => document.querySelector("form.review-facts-form") !== null, "Review facts form");
+    };
+    const completeReview = async () => {
+      let completionControl;
+      await waitFor(() => {
+        completionControl = document.querySelector("form.review-facts-form button[type=submit]");
+        return completionControl !== null;
+      }, "Review completion control");
+      completionControl.click();
+      await waitFor(() => {
+        const card = document.querySelector('section.review-evidence-card[aria-labelledby="review-evidence-title"]');
+        if (!card) return false;
+        return card.querySelector("h2")?.textContent.trim() !== ""
+          && card.querySelectorAll("h3").length >= 2
+          && card.querySelector("ul") !== null;
+      }, "completed Review evidence");
+    };
+    const returnToToday = async () => {
+      let returnControl;
+      await waitFor(() => {
+        returnControl = document.querySelector('main.review-shell header button.secondary-action');
+        return returnControl !== null;
+      }, "Return to Today control");
+      returnControl.click();
+      await waitFor(() => window.location.pathname === "/today", "Today route after Review");
     };
     const inputValue = (input, value) => {
       if (!input) throw new Error(`Missing input for ${value}`);
@@ -112,15 +167,20 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       const primaryRoute = {
         Today: "/today",
         Contests: "/contests",
+        Problems: "/problems",
         Knowledge: "/knowledge",
         Settings: "/settings",
       }[label];
       if (primaryRoute) {
+        let routeControl;
         await waitFor(
-          () => document.querySelector(`nav a[href="${primaryRoute}"]`) !== null,
+          () => {
+            routeControl = document.querySelector(`nav a[href="${primaryRoute}"]`);
+            return routeControl !== null;
+          },
           `${label} primary route`,
         );
-        document.querySelector(`nav a[href="${primaryRoute}"]`).click();
+        routeControl.click();
         await waitFor(() => window.location.pathname === primaryRoute, `${label} route`);
       } else {
         await clickText(label);
@@ -318,75 +378,60 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await clickText("A. Desktop E2E Problem");
       await acceptKnowledgeCandidate("Segment Tree");
       await stage("candidate-safe-patched");
-      await clickText("加入补题");
-      await waitText("开始学习");
-      await clickText("开始学习");
-      await waitText("我已经补懂");
-      await clickText("我已经补懂");
-      await waitText("Next Review due: 2026-08-14");
+      await advanceLifecycle("join upsolve");
+      await advanceLifecycle("start learning");
+      await advanceLifecycle("mark understood");
+      await assertNextReviewDate("2026-08-14");
       await stage("problem-a-learned");
 
-      await clickText("我的题库");
+      await navigateTo("Problems");
       await clickText("B. Desktop E2E Study Problem");
       await createPersonalNote();
       await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "B", fingerprint: "be".repeat(32), targetRef: "Segment Tree" } });
-      await clickText("我的题库");
+      await navigateTo("Problems");
       await clickText("B. Desktop E2E Study Problem");
-      await clickText("Accept existing Knowledge");
-      await waitText("verified as a formal relation");
-      await clickText("加入补题");
-      await waitText("开始学习");
-      await clickText("开始学习");
-      await waitText("我已经补懂");
-      await clickText("我已经补懂");
-      await waitText("Next Review due: 2026-08-14");
+      await acceptKnowledgeCandidate("Segment Tree");
+      await advanceLifecycle("join upsolve");
+      await advanceLifecycle("start learning");
+      await advanceLifecycle("mark understood");
+      await assertNextReviewDate("2026-08-14");
       await stage("problem-b-learned");
 
-      await clickText("我的题库");
+      await navigateTo("Problems");
       await clickText("C. Desktop E2E Extra Study Problem");
       await createPersonalNote();
       await invoke("register_knowledge_candidate", { input: { contestId: 1979, index: "C", fingerprint: "ce".repeat(32), targetRef: "Segment Tree" } });
-      await clickText("我的题库");
+      await navigateTo("Problems");
       await clickText("C. Desktop E2E Extra Study Problem");
-      await clickText("Accept existing Knowledge");
-      await waitText("verified as a formal relation");
-      await clickText("加入补题");
-      await waitText("开始学习");
-      await clickText("开始学习");
-      await waitText("我已经补懂");
-      await clickText("我已经补懂");
-      await waitText("Next Review due: 2026-08-14");
+      await acceptKnowledgeCandidate("Segment Tree");
+      await advanceLifecycle("join upsolve");
+      await advanceLifecycle("start learning");
+      await advanceLifecycle("mark understood");
+      await assertNextReviewDate("2026-08-14");
       await stage("problem-c-learned");
 
       await setDate("2026-08-14");
-      await clickText("我的题库");
+      await navigateTo("Problems");
       await clickText("A. Desktop E2E Problem");
-      await waitText("Start Review");
-      await clickText("Start Review");
-      await waitText("Finish this Review");
-      await clickText("Complete from facts");
-      await waitText("Mastered");
+      await startReview();
+      await completeReview();
       await stage("review-a-completed");
 
-      await clickText("Return to Today");
-      await clickText("我的题库");
+      await returnToToday();
+      await navigateTo("Problems");
       await clickText("B. Desktop E2E Study Problem");
-      await clickText("Start Review");
-      await waitText("Finish this Review");
-      await clickText("Complete from facts");
-      await waitText("Mastered");
+      await startReview();
+      await completeReview();
       await stage("review-b-completed");
 
-      await clickText("Return to Today");
-      await clickText("我的题库");
+      await returnToToday();
+      await navigateTo("Problems");
       await clickText("C. Desktop E2E Extra Study Problem");
-      await clickText("Start Review");
-      await waitText("Finish this Review");
-      await clickText("Complete from facts");
-      await waitText("Mastered");
+      await startReview();
+      await completeReview();
       await stage("review-c-completed");
 
-      await clickText("Return to Today");
+      await returnToToday();
       await navigateTo("Knowledge", "Knowledge index");
       await clickText("Segment Tree");
       await waitText("Consider re-evaluating this Knowledge status");
