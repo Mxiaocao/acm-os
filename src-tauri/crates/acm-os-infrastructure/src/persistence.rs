@@ -13741,6 +13741,104 @@ mod tests {
         (path, pool)
     }
 
+    async fn install_r4e2_review_reward_failure_injection(pool: &SqlitePool) {
+        sqlx::raw_sql(
+            "CREATE TABLE r4e2_review_reward_failures (
+                 review_attempt_id TEXT PRIMARY KEY
+             );
+             CREATE TRIGGER r4e2_fail_selected_review_reward
+             BEFORE INSERT ON reward_grants
+             WHEN EXISTS (
+                 SELECT 1
+                 FROM reward_review_event_sources source
+                 JOIN r4e2_review_reward_failures failure
+                   ON failure.review_attempt_id = source.review_attempt_id
+                 WHERE source.reward_event_id = NEW.reward_event_id
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'R4E2 injected Review reward failure');
+             END;",
+        )
+        .execute(pool)
+        .await
+        .expect("install R4E2 Review reward failure injection");
+    }
+
+    async fn set_r4e2_review_reward_failure(
+        pool: &SqlitePool,
+        review_attempt_id: &str,
+        should_fail: bool,
+    ) {
+        let query = if should_fail {
+            "INSERT INTO r4e2_review_reward_failures (review_attempt_id) VALUES (?1)"
+        } else {
+            "DELETE FROM r4e2_review_reward_failures WHERE review_attempt_id = ?1"
+        };
+        sqlx::query(query)
+            .bind(review_attempt_id)
+            .execute(pool)
+            .await
+            .expect("configure R4E2 Review reward failure");
+    }
+
+    async fn r4e2_review_reward_artifact_counts(
+        pool: &SqlitePool,
+        review_attempt_id: &str,
+    ) -> (i64, i64, i64, i64) {
+        sqlx::query_as(
+            "SELECT
+                 (SELECT COUNT(*)
+                  FROM reward_events event
+                  JOIN reward_review_event_sources source
+                    ON source.reward_event_id = event.id
+                  WHERE source.review_attempt_id = ?1),
+                 (SELECT COUNT(*)
+                  FROM reward_review_event_sources
+                  WHERE review_attempt_id = ?1),
+                 (SELECT COUNT(*)
+                  FROM reward_grants grant
+                  JOIN reward_review_event_sources source
+                    ON source.reward_event_id = grant.reward_event_id
+                  WHERE source.review_attempt_id = ?1),
+                 (SELECT COUNT(*)
+                  FROM reward_grant_ledger_origins origin
+                  JOIN reward_review_event_sources source
+                    ON source.reward_event_id = origin.reward_event_id
+                  WHERE source.review_attempt_id = ?1)",
+        )
+        .bind(review_attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("R4E2 Review reward artifact counts")
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct R4e2RawRewardTableCounts {
+        events: i64,
+        review_sources: i64,
+        grants: i64,
+        ledger_entries: i64,
+    }
+
+    async fn r4e2_raw_reward_table_counts(pool: &SqlitePool) -> R4e2RawRewardTableCounts {
+        let (events, review_sources, grants, ledger_entries) = sqlx::query_as(
+            "SELECT
+                 (SELECT COUNT(*) FROM reward_events),
+                 (SELECT COUNT(*) FROM reward_review_event_sources),
+                 (SELECT COUNT(*) FROM reward_grants),
+                 (SELECT COUNT(*) FROM reward_ledger_entries)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("R4E2 raw reward table counts");
+        R4e2RawRewardTableCounts {
+            events,
+            review_sources,
+            grants,
+            ledger_entries,
+        }
+    }
+
     #[tokio::test]
     async fn r4d1_review_policy_drives_immediate_and_pending_processing() {
         let directory = TempDir::new().expect("R4D1 database");
@@ -14013,6 +14111,393 @@ mod tests {
         .expect("partial Review grant");
         assert_eq!(partial_reward, (0, 0, "not_mastered".to_owned()));
         assert_eq!(scheduled_ordinal_snapshot(partial_pool).await.1, 1);
+    }
+
+    #[tokio::test]
+    async fn r4e2_p9_invalid_policy_context_fails_closed_without_reward_side_effects() {
+        let (_directory, runtime, _vault, _problems, _problem, attempt) =
+            review_ready_fixture().await;
+        complete_review(
+            &runtime,
+            &attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion date"),
+        )
+        .await
+        .expect("durable Scheduled completion while Reward inactive");
+        let pool = runtime._pool.as_ref().expect("pool");
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+
+        sqlx::raw_sql(
+            "DROP TRIGGER scheduled_review_ordinal_attempt_identity_immutable;
+             DROP TRIGGER completed_scheduled_review_no_update;",
+        )
+        .execute(pool)
+        .await
+        .expect("open isolated invalid-policy fixture");
+        sqlx::query(
+            "UPDATE review_attempts
+             SET attempt_type = 'early_check', started_early = 1
+             WHERE id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .execute(pool)
+        .await
+        .expect("inject Early Check carrying a Scheduled ordinal");
+        let policy_facts: (String, String, Option<i64>) = sqlx::query_as(
+            "SELECT attempt.attempt_type, attempt.judgement, ordinal.ordinal
+             FROM review_attempts attempt
+             LEFT JOIN scheduled_review_ordinal_facts ordinal
+               ON ordinal.review_attempt_id = attempt.id
+              AND ordinal.problem_id = attempt.problem_id
+             WHERE attempt.id = ?1",
+        )
+        .bind(&attempt.attempt_id)
+        .fetch_one(pool)
+        .await
+        .expect("invalid policy facts");
+        assert_eq!(
+            policy_facts,
+            ("early_check".to_owned(), "mastered".to_owned(), Some(1))
+        );
+
+        runtime.activate_reward().await.expect("activate Reward");
+        let before_artifacts = r4e2_review_reward_artifact_counts(pool, &attempt.attempt_id).await;
+        let before_raw_totals = r4e2_raw_reward_table_counts(pool).await;
+        let before_account = runtime.load_reward_account().await.expect("account before");
+        assert_eq!(
+            runtime.process_review_reward(&attempt.attempt_id).await,
+            Err(RewardProcessingError::DecisionInvalid)
+        );
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &attempt.attempt_id).await,
+            before_artifacts
+        );
+        assert_eq!(before_artifacts, (0, 0, 0, 0));
+        assert_eq!(r4e2_raw_reward_table_counts(pool).await, before_raw_totals);
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account after"),
+            before_account
+        );
+    }
+
+    #[tokio::test]
+    async fn r4e2_b7_pre_activation_ordinal_advances_later_mastered_tier() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("pre-activation Scheduled completion");
+        let pool = runtime._pool.as_ref().expect("pool");
+        assert_eq!(scheduled_ordinal_snapshot(pool).await, (0, 1, 1, vec![1]));
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &first_attempt.attempt_id).await,
+            (0, 0, 0, 0)
+        );
+
+        runtime.activate_reward().await.expect("activate Reward");
+        let recovered = runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("recover pre-activation Review");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!((recovered[0].xp_amount, recovered[0].coin_amount), (0, 0));
+        assert_eq!(recovered[0].activation_relation, "pre_activation");
+        assert_eq!(recovered[0].decision_reason, "pre_activation");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second Scheduled Review");
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+        )
+        .await
+        .expect("post-activation Scheduled completion");
+        let second_reward = runtime
+            .process_review_reward(&second_attempt.attempt_id)
+            .await
+            .expect("durable second reward");
+        assert_eq!(
+            second_reward.disposition,
+            RewardProcessingDisposition::AlreadyProcessed
+        );
+        assert_eq!(
+            (second_reward.xp_amount, second_reward.coin_amount),
+            (30, 30)
+        );
+        assert_eq!(second_reward.activation_relation, "post_activation");
+        assert_eq!(second_reward.decision_reason, "scheduled_mastered");
+        assert_eq!(
+            scheduled_ordinal_snapshot(pool).await,
+            (0, 2, 2, vec![1, 2])
+        );
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("advanced account"),
+            RewardAccount {
+                xp_balance: 30,
+                coin_balance: 30,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r4e2_b8_non_mastered_ordinal_advances_later_mastered_tier() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        runtime.activate_reward().await.expect("activate Reward");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let mut partial = mastered_input();
+        partial.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+        partial.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            partial,
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("non-Mastered Scheduled completion");
+        let first_reward = runtime
+            .process_review_reward(&first_attempt.attempt_id)
+            .await
+            .expect("durable non-Mastered reward");
+        assert_eq!((first_reward.xp_amount, first_reward.coin_amount), (0, 0));
+        assert_eq!(first_reward.decision_reason, "not_mastered");
+
+        let relearned_on =
+            acm_os_domain::LocalDate::parse_iso("2026-08-15").expect("relearning date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::StartRelearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, relearned_on)
+                .await
+                .expect("relearning transition");
+        }
+
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-18").expect("new-cycle due"),
+        )
+        .await
+        .expect("new-cycle Scheduled Review");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-18").expect("second completion"),
+        )
+        .await
+        .expect("Mastered Scheduled completion");
+        let second_reward = runtime
+            .process_review_reward(&second_attempt.attempt_id)
+            .await
+            .expect("durable second reward");
+        assert_eq!(
+            (second_reward.xp_amount, second_reward.coin_amount),
+            (30, 30)
+        );
+        assert_eq!(second_reward.decision_reason, "scheduled_mastered");
+        let pool = runtime._pool.as_ref().expect("pool");
+        assert_eq!(
+            scheduled_ordinal_snapshot(pool).await,
+            (0, 2, 2, vec![1, 2])
+        );
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 30,
+                coin_balance: 30,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r4e2_c7_c8_recovery_continues_after_selected_source_failure() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        runtime.activate_reward().await.expect("activate Reward");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        install_r4e2_review_reward_failure_injection(pool).await;
+        set_r4e2_review_reward_failure(pool, &first_attempt.attempt_id, true).await;
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("first completion survives injected Reward failure");
+
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second Scheduled Review");
+        set_r4e2_review_reward_failure(pool, &second_attempt.attempt_id, true).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+        )
+        .await
+        .expect("second completion survives injected Reward failure");
+        assert_eq!(
+            runtime
+                .list_pending_review_sources(10)
+                .await
+                .expect("selected page"),
+            vec![
+                RewardSource::Review {
+                    review_attempt_id: first_attempt.attempt_id.clone(),
+                },
+                RewardSource::Review {
+                    review_attempt_id: second_attempt.attempt_id.clone(),
+                },
+            ]
+        );
+
+        set_r4e2_review_reward_failure(pool, &second_attempt.attempt_id, false).await;
+        let before_raw_totals = r4e2_raw_reward_table_counts(pool).await;
+        let recovered = runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("best-effort recovery page");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!((recovered[0].xp_amount, recovered[0].coin_amount), (30, 30));
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &first_attempt.attempt_id).await,
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &second_attempt.attempt_id).await,
+            (1, 1, 1, 2)
+        );
+        assert_eq!(
+            r4e2_raw_reward_table_counts(pool).await,
+            R4e2RawRewardTableCounts {
+                events: before_raw_totals.events + 1,
+                review_sources: before_raw_totals.review_sources + 1,
+                grants: before_raw_totals.grants + 1,
+                ledger_entries: before_raw_totals.ledger_entries + 2,
+            }
+        );
+        assert_eq!(
+            runtime
+                .list_pending_review_sources(10)
+                .await
+                .expect("remaining pending Review sources"),
+            vec![RewardSource::Review {
+                review_attempt_id: first_attempt.attempt_id.clone(),
+            }]
+        );
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 30,
+                coin_balance: 30,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn r4e2_c12_recovery_allows_two_same_problem_positive_occurrences() {
+        let (_directory, runtime, _vault, _problems, problem, first_attempt) =
+            review_ready_fixture().await;
+        runtime.activate_reward().await.expect("activate Reward");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        install_r4e2_review_reward_failure_injection(pool).await;
+        set_r4e2_review_reward_failure(pool, &first_attempt.attempt_id, true).await;
+        complete_review(
+            &runtime,
+            &first_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("first completion"),
+        )
+        .await
+        .expect("first pending completion");
+
+        let second_attempt = start_or_resume_review(
+            &runtime,
+            &problem,
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second due"),
+        )
+        .await
+        .expect("second Scheduled Review");
+        set_r4e2_review_reward_failure(pool, &second_attempt.attempt_id, true).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        complete_review(
+            &runtime,
+            &second_attempt.attempt_id,
+            mastered_input(),
+            acm_os_domain::LocalDate::parse_iso("2026-08-24").expect("second completion"),
+        )
+        .await
+        .expect("second pending completion");
+        assert_eq!(
+            runtime.list_pending_review_sources(10).await.unwrap().len(),
+            2
+        );
+
+        set_r4e2_review_reward_failure(pool, &first_attempt.attempt_id, false).await;
+        set_r4e2_review_reward_failure(pool, &second_attempt.attempt_id, false).await;
+        let recovered = runtime
+            .process_pending_review_rewards(10)
+            .await
+            .expect("recover both same-problem Reviews");
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|result| (result.xp_amount, result.coin_amount))
+                .collect::<Vec<_>>(),
+            vec![(20, 20), (30, 30)]
+        );
+        assert_ne!(recovered[0].reward_event_id, recovered[1].reward_event_id);
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &first_attempt.attempt_id).await,
+            (1, 1, 1, 2)
+        );
+        assert_eq!(
+            r4e2_review_reward_artifact_counts(pool, &second_attempt.attempt_id).await,
+            (1, 1, 1, 2)
+        );
+        assert_eq!(
+            scheduled_ordinal_snapshot(pool).await,
+            (0, 2, 2, vec![1, 2])
+        );
+        assert_eq!(
+            runtime.load_reward_account().await.expect("account"),
+            RewardAccount {
+                xp_balance: 50,
+                coin_balance: 50,
+            }
+        );
     }
 
     #[tokio::test]
