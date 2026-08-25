@@ -172,6 +172,90 @@ test("Reward activation failure is announced and remains retryable", { concurren
   }
 });
 
+
+test("active Reward page loads active custom rewards and hides archived by default", { concurrency: false }, async () => {
+  const calls = [];
+  const view = await renderApp((command) => {
+    calls.push(command);
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 2, xp: 20, coin: 8 };
+    if (command === "list_custom_rewards") return [
+      { customRewardId: "r-active", name: "Coffee", coinCost: 5, status: "active" },
+      { customRewardId: "r-archived", name: "Old prize", coinCost: 9, status: "archived" },
+    ];
+    return baseIpc(command);
+  });
+  try {
+    assert.match(view.document.body.textContent, /Custom Rewards/);
+    assert.match(view.document.body.textContent, /Coffee/);
+    assert.doesNotMatch(view.document.body.textContent, /Old prize/);
+    assert.equal(calls.includes("list_custom_rewards"), true);
+  } finally { await view.cleanup(); }
+});
+
+test("Custom Reward create, edit, archived filter, and archive confirmation use exact authority inputs", { concurrency: false }, async () => {
+  const calls = [];
+  let rewards = [{ customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" }, { customRewardId: "r2", name: "Old prize", coinCost: 9, status: "archived" }];
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 1 };
+    if (command === "list_custom_rewards") return rewards;
+    if (command === "create_custom_reward") { calls.push([command, args]); rewards = [...rewards, { customRewardId: "r3", name: args.input.name, coinCost: args.input.coinCost, status: "active" }]; return rewards.at(-1); }
+    if (command === "update_custom_reward") { calls.push([command, args]); rewards = rewards.map((r) => r.customRewardId === args.input.customRewardId ? { ...r, name: args.input.name, coinCost: args.input.coinCost } : r); return rewards.find((r) => r.customRewardId === args.input.customRewardId); }
+    if (command === "archive_custom_reward") { calls.push([command, args]); rewards = rewards.map((r) => r.customRewardId === args.input.customRewardId ? { ...r, status: "archived" } : r); return rewards.find((r) => r.customRewardId === args.input.customRewardId); }
+    return baseIpc(command);
+  });
+  try {
+    const archivedToggle = view.document.querySelector('input[type="checkbox"]');
+    assert.ok(archivedToggle);
+    await act(async () => archivedToggle.click()); await settle();
+    assert.match(view.document.body.textContent, /Old prize/);
+    assert.equal([...view.document.querySelectorAll("button")].filter((b) => b.textContent === "Edit").length, 1);
+
+    const nameInput = view.document.querySelector('input[aria-label="Custom reward name"]');
+    const costInput = view.document.querySelector('input[aria-label="Custom reward coin cost"]');
+    await act(async () => { setInput(nameInput, "Weekend walk"); setInput(costInput, "12"); });
+    await act(async () => findButton(view.document, "Create reward").click()); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "create_custom_reward")[1].input, { name: "Weekend walk", coinCost: 12 });
+
+    await act(async () => findButton(view.document, "Edit").click()); await settle();
+    assert.equal(view.document.querySelector('input[aria-label="Edit custom reward name"]').value, "Coffee");
+    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward name"]'), "Tea"));
+    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward coin cost"]'), "7"));
+    await act(async () => findButton(view.document, "Save changes").click()); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "update_custom_reward")[1].input, { customRewardId: "r1", name: "Tea", coinCost: 7 });
+
+    await act(async () => findButton(view.document, "Archive").click()); await settle();
+    assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /Tea/);
+    assert.equal(calls.some(([name]) => name === "archive_custom_reward"), false);
+    await act(async () => findButton(view.document, "Cancel").click()); await settle();
+    assert.equal(calls.some(([name]) => name === "archive_custom_reward"), false);
+    await act(async () => findButton(view.document, "Archive").click());
+    await act(async () => findButton(view.document, "Archive reward").click()); await settle();
+    assert.deepEqual(calls.find(([name]) => name === "archive_custom_reward")[1].input, { customRewardId: "r1" });
+  } finally { await view.cleanup(); }
+});
+
+test("Custom Reward validation rejects blank names and invalid coin costs before IPC", { concurrency: false }, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 1 };
+    if (command === "list_custom_rewards") return [];
+    if (command === "create_custom_reward") { calls.push([command, args]); return null; }
+    return baseIpc(command);
+  });
+  try {
+    const name = view.document.querySelector('input[aria-label="Custom reward name"]');
+    const cost = view.document.querySelector('input[aria-label="Custom reward coin cost"]');
+    for (const value of ["", "0", "-1", "1.5", "9007199254740992"]) {
+      await act(async () => { setInput(name, value === "" ? "" : "Valid"); setInput(cost, value); });
+      await act(async () => findButton(view.document, "Create reward").click()); await settle();
+      assert.equal(calls.length, 0);
+      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /positive safe whole-number/i);
+    }
+  } finally { await view.cleanup(); }
+});
 function baseIpc(command) {
   if (command === "foundation_status") return { status: "ready", core: "acm-os" };
   if (command === "app_shell_status") {
@@ -185,6 +269,8 @@ function baseIpc(command) {
   }
   throw new Error(`unexpected command ${command}`);
 }
+
+function setInput(input, value) { input.value = value; input.dispatchEvent(new input.ownerDocument.defaultView.Event("input", { bubbles: true })); }
 
 function findButton(document, label, index = 0) {
   const matches = [...document.querySelectorAll("button")].filter((button) => button.textContent === label);

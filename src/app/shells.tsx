@@ -111,8 +111,13 @@ import {
 } from "../ipc/startup";
 import {
   activateReward,
+  archiveCustomReward,
+  createCustomReward,
   getRewardAccountSummary,
   getRewardActivationState,
+  listCustomRewards,
+  updateCustomReward,
+  type CustomRewardDto,
   type RewardAccountSummaryDto,
 } from "../ipc/reward";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
@@ -840,12 +845,15 @@ function RewardPage() {
       </section>
     ) : null}
     {activationView === "active" ? (
-      <section aria-labelledby="reward-account-heading" className="content-panel">
-        <h2 id="reward-account-heading">Account</h2>
-        {accountLoading ? <p aria-live="polite">Loading account summary...</p> : null}
-        {accountError ? <div role="alert"><p>Reward account summary could not be loaded.</p><button className="secondary-action" onClick={() => void loadAccount()} type="button">Retry</button></div> : null}
-        {account ? <dl className="detail-list"><dt>Level</dt><dd>{account.level}</dd><dt>XP</dt><dd>{account.xp}</dd><dt>Coin</dt><dd>{account.coin}</dd></dl> : null}
-      </section>
+      <>
+        <section aria-labelledby="reward-account-heading" className="content-panel">
+          <h2 id="reward-account-heading">Account</h2>
+          {accountLoading ? <p aria-live="polite">Loading account summary...</p> : null}
+          {accountError ? <div role="alert"><p>Reward account summary could not be loaded.</p><button className="secondary-action" onClick={() => void loadAccount()} type="button">Retry</button></div> : null}
+          {account ? <dl className="detail-list"><dt>Level</dt><dd>{account.level}</dd><dt>XP</dt><dd>{account.xp}</dd><dt>Coin</dt><dd>{account.coin}</dd></dl> : null}
+        </section>
+        <CustomRewardManagement />
+      </>
     ) : null}
     {confirmationOpen ? (
       <div className="modal-backdrop">
@@ -863,6 +871,50 @@ function RewardPage() {
   </>;
 }
 
+function CustomRewardManagement() {
+  const archiveTriggerRef = useRef<HTMLButtonElement>(null);
+  const archiveDialogRef = useRef<HTMLDivElement>(null);
+  const archiveConfirmRef = useRef<HTMLButtonElement>(null);
+  const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [name, setName] = useState("");
+  const [coinCost, setCoinCost] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editCoinCost, setEditCoinCost] = useState("");
+  const [archiveTarget, setArchiveTarget] = useState<CustomRewardDto | null>(null);
+  const [pending, setPending] = useState(false);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const load = useCallback(async () => { setLoading(true); setError(false); try { setRewards(await listCustomRewards()); } catch { setError(true); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);  useEffect(() => {
+    if (!archiveTarget) return;
+    archiveConfirmRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pending) { event.preventDefault(); setArchiveTarget(null); queueMicrotask(() => archiveTriggerRef.current?.focus()); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [archiveTarget, pending]);
+  const parseCost = (value: string) => { if (!/^\d+$/.test(value)) return null; const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; };
+  const validate = (nextName: string, nextCost: string) => { const cost = parseCost(nextCost); if (!nextName.trim() || cost === null) { setMutationError("Enter a name and a positive safe whole-number coin cost."); return null; } return { name: nextName.trim(), coinCost: cost }; };
+  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (pending) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); } finally { setPending(false); } };
+  const edit = (reward: CustomRewardDto) => { setEditingId(reward.customRewardId); setEditName(reward.name); setEditCoinCost(String(reward.coinCost)); setMutationError(null); };
+  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (pending) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); await load(); } catch { setMutationError("This reward changed elsewhere and is no longer editable. The list was refreshed."); await load(); } finally { setPending(false); } };
+  const archive = async () => { if (!archiveTarget || pending) return; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); await load(); } finally { setPending(false); } };
+  const visible = rewards.filter((reward) => showArchived || reward.status === "active");
+  return <section aria-labelledby="custom-rewards-heading" className="content-panel">
+    <div className="statement-heading-row"><h2 id="custom-rewards-heading">Custom Rewards</h2><label><input checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} type="checkbox" /> Show archived</label></div>
+    {mutationError ? <p aria-live="assertive" className="error-message" role="alert">{mutationError}</p> : null}
+    <form className="action-row" noValidate onSubmit={create}><label>Name<input aria-label="Custom reward name" onInput={(event) => setName(event.currentTarget.value)} value={name} /></label><label>Coin cost<input aria-label="Custom reward coin cost" inputMode="numeric" onInput={(event) => setCoinCost(event.currentTarget.value)} value={coinCost} /></label><button className="primary-action" disabled={pending} type="submit">Create reward</button></form>
+    {loading ? <p aria-live="polite">Loading custom rewards...</p> : null}
+    {error ? <div role="alert"><p>Custom Rewards could not be loaded.</p><button className="secondary-action" onClick={() => void load()} type="button">Retry</button></div> : null}
+    {!loading && !error && visible.length === 0 ? <p>{showArchived ? "No custom rewards yet." : "No active custom rewards yet."}</p> : null}
+    {!loading && !error && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{reward.coinCost} Coin</span><span>{reward.status === "archived" ? "Archived" : "Active"}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">Edit</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">Archive</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>Name<input aria-label="Edit custom reward name" onInput={(event) => setEditName(event.currentTarget.value)} value={editName} /></label><label>Coin cost<input aria-label="Edit custom reward coin cost" onInput={(event) => setEditCoinCost(event.currentTarget.value)} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">Save changes</button><button className="secondary-action" disabled={pending} onClick={() => setEditingId(null)} type="button">Cancel</button></form> : null}</li>)}</ul> : null}
+    {archiveTarget ? <div className="modal-backdrop"><div aria-describedby="archive-reward-description" aria-labelledby="archive-reward-title" aria-modal="true" ref={archiveDialogRef} role="alertdialog"><h2 id="archive-reward-title">Archive {archiveTarget.name}?</h2><p id="archive-reward-description">Archiving is irreversible in Reward V1. This reward remains readable but cannot be edited, redeemed, or restored.</p><div className="button-row"><button className="danger-action" disabled={pending} onClick={() => void archive()} ref={archiveConfirmRef} type="button">{pending ? "Archiving..." : "Archive reward"}</button><button className="secondary-action" disabled={pending} onClick={() => setArchiveTarget(null)} type="button">Cancel</button></div></div></div> : null}
+  </section>;
+}
 function ManualBackupSettings() {
   const [preview, setPreview] = useState<ManualBackupPreviewDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
