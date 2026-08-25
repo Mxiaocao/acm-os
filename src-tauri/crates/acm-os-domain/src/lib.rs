@@ -393,6 +393,82 @@ impl ProblemSolvedPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRewardActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRewardPolicyContext {
+    pub attempt_type: ReviewAttemptType,
+    pub judgement: ReviewJudgement,
+    pub ordinal: Option<u64>,
+    pub activation_relation: ReviewRewardActivationRelation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRewardDecision {
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: &'static str,
+    pub policy_key: &'static str,
+    pub policy_version: i64,
+}
+
+pub struct ReviewRewardPolicy;
+
+impl ReviewRewardPolicy {
+    pub const POLICY_KEY: &'static str = "review_reward_v1";
+    pub const POLICY_VERSION: i64 = 1;
+
+    pub fn decide(context: ReviewRewardPolicyContext) -> Option<ReviewRewardDecision> {
+        let valid_ordinal_shape = match context.attempt_type {
+            ReviewAttemptType::EarlyCheck => context.ordinal.is_none(),
+            ReviewAttemptType::FirstColdStart | ReviewAttemptType::LongTermReview => {
+                context.ordinal.is_some_and(|ordinal| ordinal > 0)
+            }
+        };
+        if !valid_ordinal_shape {
+            return None;
+        }
+        use ReviewRewardActivationRelation::PreActivation;
+        if context.activation_relation == PreActivation {
+            return Some(Self::zero("pre_activation"));
+        }
+        if context.attempt_type == ReviewAttemptType::EarlyCheck {
+            return Some(Self::zero("early_check"));
+        }
+        if context.judgement != ReviewJudgement::Mastered {
+            return Some(Self::zero("not_mastered"));
+        }
+        let ordinal = context.ordinal?;
+        let amount = match ordinal {
+            1 => 20,
+            2 => 30,
+            3 => 40,
+            _ => 50,
+        };
+        Some(ReviewRewardDecision {
+            xp_amount: amount,
+            coin_amount: amount,
+            decision_reason: "scheduled_mastered",
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        })
+    }
+
+    const fn zero(reason: &'static str) -> ReviewRewardDecision {
+        ReviewRewardDecision {
+            xp_amount: 0,
+            coin_amount: 0,
+            decision_reason: reason,
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewAttemptType {
     FirstColdStart,
     LongTermReview,
@@ -1304,6 +1380,85 @@ mod tests {
         let problem = CodeforcesProblemIdentity::new(contest, "A1").expect("problem identity");
         assert_eq!(problem.index(), "A1");
         assert_eq!(problem.contest().contest_id(), 1979);
+    }
+
+    #[test]
+    fn r4c1_review_reward_policy_maps_frozen_cases() {
+        use ReviewAttemptType::{EarlyCheck, FirstColdStart, LongTermReview};
+        use ReviewJudgement::{Fail, Mastered, Partial};
+
+        let decision = |attempt_type, judgement, ordinal, pre_activation| {
+            ReviewRewardPolicy::decide(ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation: if pre_activation {
+                    ReviewRewardActivationRelation::PreActivation
+                } else {
+                    ReviewRewardActivationRelation::PostActivation
+                },
+            })
+            .expect("authoritative review facts")
+        };
+        let assert_zero = |decision: ReviewRewardDecision, reason: &str| {
+            assert_eq!(decision.xp_amount, 0);
+            assert_eq!(decision.coin_amount, 0);
+            assert_eq!(decision.decision_reason, reason);
+            assert_eq!(decision.policy_key, "review_reward_v1");
+            assert_eq!(decision.policy_version, 1);
+        };
+
+        assert_zero(
+            decision(FirstColdStart, Mastered, Some(1), true),
+            "pre_activation",
+        );
+        assert_zero(decision(EarlyCheck, Mastered, None, false), "early_check");
+        assert_zero(decision(EarlyCheck, Fail, None, false), "early_check");
+        assert_zero(
+            decision(FirstColdStart, Fail, Some(1), false),
+            "not_mastered",
+        );
+        assert_zero(
+            decision(LongTermReview, Partial, Some(100), false),
+            "not_mastered",
+        );
+
+        let invalid = |attempt_type, judgement, ordinal, pre_activation| {
+            ReviewRewardPolicy::decide(ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation: if pre_activation {
+                    ReviewRewardActivationRelation::PreActivation
+                } else {
+                    ReviewRewardActivationRelation::PostActivation
+                },
+            })
+        };
+        assert_eq!(invalid(FirstColdStart, Mastered, None, false), None);
+        assert_eq!(invalid(FirstColdStart, Fail, None, false), None);
+        assert_eq!(invalid(LongTermReview, Partial, None, false), None);
+        assert_eq!(invalid(FirstColdStart, Mastered, Some(0), false), None);
+        assert_eq!(invalid(LongTermReview, Fail, Some(0), false), None);
+        assert_eq!(invalid(EarlyCheck, Mastered, Some(1), false), None);
+        assert_eq!(invalid(EarlyCheck, Fail, Some(100), false), None);
+        assert_eq!(invalid(FirstColdStart, Mastered, None, true), None);
+        assert_eq!(invalid(EarlyCheck, Mastered, Some(1), true), None);
+
+        for (ordinal, amount) in [(1, 20), (2, 30), (3, 40), (4, 50), (10, 50), (100, 50)] {
+            let decision = decision(LongTermReview, Mastered, Some(ordinal), false);
+            assert_eq!((decision.xp_amount, decision.coin_amount), (amount, amount));
+            assert_eq!(decision.decision_reason, "scheduled_mastered");
+            assert_eq!(decision.policy_key, "review_reward_v1");
+            assert_eq!(decision.policy_version, 1);
+        }
+
+        assert_eq!(
+            decision(FirstColdStart, Mastered, Some(3), false),
+            decision(LongTermReview, Mastered, Some(3), false)
+        );
+        let input = decision(LongTermReview, Mastered, Some(7), false);
+        assert_eq!(input, decision(LongTermReview, Mastered, Some(7), false));
     }
 
     #[test]
