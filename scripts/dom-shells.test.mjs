@@ -248,7 +248,7 @@ test("Normal shell exposes its frozen navigation, skip link, and focused route h
   try {
     assert.deepEqual(
       [...view.document.querySelectorAll("nav a")].map((link) => link.textContent),
-      ["Today", "Contests", "我的题库", "Knowledge", "Settings"],
+      ["Today", "Contests", "我的题库", "Knowledge", "Reward", "Settings"],
     );
     assert.equal(view.document.querySelector(".skip-link")?.getAttribute("href"), "#main-content");
     assert.equal(view.document.activeElement?.textContent, "Today");

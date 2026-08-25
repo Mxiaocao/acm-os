@@ -109,6 +109,12 @@ import {
   previewDiagnosticExport,
   type DiagnosticExportPreviewDto,
 } from "../ipc/startup";
+import {
+  activateReward,
+  getRewardAccountSummary,
+  getRewardActivationState,
+  type RewardAccountSummaryDto,
+} from "../ipc/reward";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -339,6 +345,7 @@ export function NormalAppShell({
           <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}>Contests</ShellLink>
           <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}>我的题库</ShellLink>
           <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}>Knowledge</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}>Reward</ShellLink>
         </nav>
         <nav aria-label="Tools" className="tool-nav">
           <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}>Settings</ShellLink>
@@ -708,7 +715,152 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   }
   if (page === "contests") return <ContestShelf navigate={navigate} />;
   if (page === "problems") return <ProblemIndex navigate={navigate} />;
+  if (page === "reward") return <RewardPage />;
   return <KnowledgePage navigate={navigate} />;
+}
+
+type RewardActivationView = "loading" | "inactive" | "active" | "error";
+
+function RewardPage() {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const activationTriggerRef = useRef<HTMLButtonElement>(null);
+  const activationDialogRef = useRef<HTMLDivElement>(null);
+  const activationConfirmRef = useRef<HTMLButtonElement>(null);
+  const activatingRef = useRef(false);
+  const [activationView, setActivationView] = useState<RewardActivationView>("loading");
+  const [account, setAccount] = useState<RewardAccountSummaryDto | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [accountError, setAccountError] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [activationError, setActivationError] = useState(false);
+  const [activationSuccess, setActivationSuccess] = useState(false);
+
+  const loadAccount = useCallback(async () => {
+    setAccountLoading(true);
+    setAccountError(false);
+    setAccount(null);
+    try {
+      setAccount(await getRewardAccountSummary());
+    } catch {
+      setAccountError(true);
+    } finally {
+      setAccountLoading(false);
+    }
+  }, []);
+
+  const loadActivation = useCallback(async () => {
+    setActivationView("loading");
+    setAccount(null);
+    setAccountError(false);
+    try {
+      const state = await getRewardActivationState();
+      setActivationView(state.active ? "active" : "inactive");
+      if (state.active) await loadAccount();
+    } catch {
+      setActivationView("error");
+    }
+  }, [loadAccount]);
+
+  useEffect(() => { void loadActivation(); }, [loadActivation]);
+
+  const closeConfirmation = useCallback(() => {
+    if (activatingRef.current) return;
+    setConfirmationOpen(false);
+    setActivationError(false);
+    queueMicrotask(() => activationTriggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!confirmationOpen) return;
+    const dialog = activationDialogRef.current;
+    activationConfirmRef.current?.focus();
+    if (!dialog) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeConfirmation();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [closeConfirmation, confirmationOpen]);
+
+  const confirmActivation = async () => {
+    if (activatingRef.current) return;
+    activatingRef.current = true;
+    setActivating(true);
+    setActivationError(false);
+    setActivationSuccess(false);
+    try {
+      await activateReward();
+      setConfirmationOpen(false);
+      setActivationSuccess(true);
+      await loadActivation();
+    } catch {
+      setActivationError(true);
+    } finally {
+      activatingRef.current = false;
+      setActivating(false);
+    }
+  };
+
+  return <>
+    <PageHeader eyebrow="Account" headingRef={headingRef} title="Reward" />
+    {activationSuccess ? <p aria-live="polite" className="safe-note">Reward Mode enabled.</p> : null}
+    {activationView === "loading" ? <p aria-live="polite">Loading Reward Mode...</p> : null}
+    {activationView === "error" ? (
+      <section className="empty-state" role="alert">
+        <h2>Reward Mode could not be loaded</h2>
+        <p>Your Reward settings and account have not been changed.</p>
+        <button className="secondary-action" onClick={() => void loadActivation()} type="button">Retry</button>
+      </section>
+    ) : null}
+    {activationView === "inactive" ? (
+      <section aria-labelledby="reward-inactive-heading" className="content-panel">
+        <h2 id="reward-inactive-heading">Reward Mode is currently off</h2>
+        <p>Enabling Reward Mode is explicit and cannot be turned off or reset in Reward V1.</p>
+        <p>Historical activity from before activation does not receive positive rewards retroactively.</p>
+        <button className="primary-action" onClick={() => { setActivationError(false); setConfirmationOpen(true); }} ref={activationTriggerRef} type="button">Enable Reward Mode</button>
+      </section>
+    ) : null}
+    {activationView === "active" ? (
+      <section aria-labelledby="reward-account-heading" className="content-panel">
+        <h2 id="reward-account-heading">Account</h2>
+        {accountLoading ? <p aria-live="polite">Loading account summary...</p> : null}
+        {accountError ? <div role="alert"><p>Reward account summary could not be loaded.</p><button className="secondary-action" onClick={() => void loadAccount()} type="button">Retry</button></div> : null}
+        {account ? <dl className="detail-list"><dt>Level</dt><dd>{account.level}</dd><dt>XP</dt><dd>{account.xp}</dd><dt>Coin</dt><dd>{account.coin}</dd></dl> : null}
+      </section>
+    ) : null}
+    {confirmationOpen ? (
+      <div className="modal-backdrop">
+        <div aria-describedby="reward-activation-description" aria-labelledby="reward-activation-title" aria-modal="true" ref={activationDialogRef} role="alertdialog">
+          <h2 id="reward-activation-title">Enable Reward Mode?</h2>
+          <p id="reward-activation-description">This is a one-way action in Reward V1. Reward Mode cannot be turned off or reset, and earlier activity will not receive positive rewards retroactively.</p>
+          {activationError ? <p className="error-message" role="alert">Reward Mode was not enabled. Try again.</p> : null}
+          <div className="button-row">
+            <button className="primary-action" disabled={activating} onClick={() => void confirmActivation()} ref={activationConfirmRef} type="button">{activating ? "Enabling..." : "Enable Reward Mode"}</button>
+            <button className="secondary-action" disabled={activating} onClick={closeConfirmation} type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+  </>;
 }
 
 function ManualBackupSettings() {

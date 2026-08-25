@@ -8,6 +8,7 @@ test("maps the frozen normal application routes", () => {
   assert.deepEqual(parseAppRoute("/contests/"), { kind: "normal", page: "contests" });
   assert.deepEqual(parseAppRoute("problems"), { kind: "normal", page: "problems" });
   assert.deepEqual(parseAppRoute("/knowledge"), { kind: "normal", page: "knowledge" });
+  assert.deepEqual(parseAppRoute("/reward"), { kind: "normal", page: "reward" });
   assert.deepEqual(parseAppRoute("/settings"), { kind: "normal", page: "settings" });
 });
 
