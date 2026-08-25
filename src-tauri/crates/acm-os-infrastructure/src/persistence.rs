@@ -187,6 +187,24 @@ pub struct CustomRewardRefundResult {
     pub refund: CustomRewardRefund,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemptionHistory {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub reward_name: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+    pub refund_id: Option<String>,
+    pub refunded_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardHistoryError {
+    Unavailable,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomRewardRefundError {
     Unavailable,
@@ -8456,6 +8474,21 @@ impl DatabaseRuntime {
         parse_custom_reward_row(row.0, row.1, row.2, row.3, row.4, row.5)
     }
 
+    pub async fn list_custom_rewards(&self) -> Result<Vec<CustomReward>, CustomRewardError> {
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let rows: Vec<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards
+             ORDER BY created_at_utc ASC, custom_reward_id ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        rows.into_iter()
+            .map(|row| parse_custom_reward_row(row.0, row.1, row.2, row.3, row.4, row.5))
+            .collect()
+    }
+
     pub async fn update_custom_reward(
         &self,
         custom_reward_id: &str,
@@ -8621,6 +8654,119 @@ impl DatabaseRuntime {
         .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
         let row = row.ok_or(CustomRewardRefundError::NotFound)?;
         parse_custom_reward_refund_row(row.0, row.1, row.2)
+    }
+
+    pub async fn list_custom_reward_redemption_history(
+        &self,
+    ) -> Result<Vec<CustomRewardRedemptionHistory>, CustomRewardHistoryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardHistoryError::Unavailable)?;
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT redemption.redemption_id,
+                    redemption.custom_reward_id,
+                    reward.custom_reward_id,
+                    reward.name,
+                    reward.coin_cost,
+                    reward.status,
+                    reward.created_at_utc,
+                    reward.updated_at_utc,
+                    redemption.coin_cost_paid,
+                    redemption.redeemed_at_utc,
+                    refund.refund_id,
+                    refund.refunded_at_utc
+             FROM custom_reward_redemptions redemption
+             JOIN custom_rewards reward
+               ON reward.custom_reward_id = redemption.custom_reward_id
+             LEFT JOIN custom_reward_refunds refund
+               ON refund.redemption_id = redemption.redemption_id
+             ORDER BY redemption.redeemed_at_utc DESC, redemption.redemption_id DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| CustomRewardHistoryError::DatabaseFailure)?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    redemption_id,
+                    custom_reward_id,
+                    reward_id,
+                    reward_name,
+                    reward_cost,
+                    reward_status,
+                    reward_created_at,
+                    reward_updated_at,
+                    coin_cost_paid,
+                    redeemed_at_utc,
+                    refund_id,
+                    refunded_at_utc,
+                )| {
+                    let reward = parse_custom_reward_row(
+                        reward_id,
+                        reward_name.clone(),
+                        reward_cost,
+                        reward_status,
+                        reward_created_at,
+                        reward_updated_at,
+                    )
+                    .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                    if reward.custom_reward_id != custom_reward_id {
+                        return Err(CustomRewardHistoryError::IntegrityViolation);
+                    }
+                    let redemption = parse_custom_reward_redemption_row(
+                        redemption_id,
+                        custom_reward_id,
+                        coin_cost_paid,
+                        redeemed_at_utc,
+                    )
+                    .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                    match (refund_id, refunded_at_utc) {
+                        (None, None) => Ok(CustomRewardRedemptionHistory {
+                            redemption_id: redemption.redemption_id,
+                            custom_reward_id: redemption.custom_reward_id,
+                            reward_name: reward.name,
+                            coin_cost_paid: redemption.coin_cost_paid,
+                            redeemed_at_utc: redemption.redeemed_at_utc,
+                            refund_id: None,
+                            refunded_at_utc: None,
+                        }),
+                        (Some(refund_id), Some(refunded_at_utc)) => {
+                            let refund = parse_custom_reward_refund_row(
+                                refund_id,
+                                redemption.redemption_id.clone(),
+                                refunded_at_utc,
+                            )
+                            .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                            Ok(CustomRewardRedemptionHistory {
+                                redemption_id: redemption.redemption_id,
+                                custom_reward_id: redemption.custom_reward_id,
+                                reward_name: reward.name,
+                                coin_cost_paid: redemption.coin_cost_paid,
+                                redeemed_at_utc: redemption.redeemed_at_utc,
+                                refund_id: Some(refund.refund_id),
+                                refunded_at_utc: Some(refund.refunded_at_utc),
+                            })
+                        }
+                        _ => Err(CustomRewardHistoryError::IntegrityViolation),
+                    }
+                },
+            )
+            .collect()
     }
 
     pub async fn redeem_custom_reward(
@@ -29310,6 +29456,230 @@ mod tests {
         assert_eq!(
             runtime.load_custom_reward(&invalid_id).await,
             Err(CustomRewardError::InvalidStatus)
+        );
+    }
+
+    #[tokio::test]
+    async fn r8c1_read_authorities_exist() {
+        let directory = TempDir::new().expect("R8C1 RED database");
+        let runtime = start_database(directory.path()).await;
+        let _ = runtime.list_custom_rewards().await;
+        let _ = runtime.list_custom_reward_redemption_history().await;
+    }
+
+    #[tokio::test]
+    async fn r8c1_custom_reward_list_is_complete_deterministic_durable_and_read_only() {
+        let directory = TempDir::new().expect("R8C1 list database");
+        let runtime = start_database(directory.path()).await;
+        let before_account = runtime.load_reward_account().await.expect("account");
+        let first = runtime
+            .create_custom_reward("Duplicate", 10)
+            .await
+            .expect("first reward");
+        let second = runtime
+            .create_custom_reward("Duplicate", 20)
+            .await
+            .expect("second reward");
+        let archived = runtime
+            .archive_custom_reward(&second.custom_reward_id)
+            .await
+            .expect("archive second reward");
+
+        let listed = runtime.list_custom_rewards().await.expect("list rewards");
+        assert_eq!(listed, vec![first.clone(), archived.clone()]);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|reward| reward.custom_reward_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                first.custom_reward_id.as_str(),
+                archived.custom_reward_id.as_str()
+            ]
+        );
+        assert_eq!(
+            runtime.list_custom_rewards().await.expect("repeat list"),
+            listed
+        );
+        assert_eq!(
+            runtime.load_reward_account().await.expect("after list"),
+            before_account
+        );
+
+        let pool = runtime._pool.as_ref().expect("pool");
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("accounting counts");
+        assert_eq!(counts, (0, 0, 0));
+
+        drop(runtime);
+        let reopened = start_database(directory.path()).await;
+        assert_eq!(
+            reopened.list_custom_rewards().await.expect("reopened list"),
+            listed
+        );
+    }
+
+    #[tokio::test]
+    async fn r8c1_redemption_history_preserves_current_name_paid_price_refund_and_restart() {
+        let directory = TempDir::new().expect("R8C1 history database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        assert_eq!(
+            runtime
+                .list_custom_reward_redemption_history()
+                .await
+                .expect("empty history"),
+            Vec::<CustomRewardRedemptionHistory>::new()
+        );
+        let reward = runtime
+            .create_custom_reward("Milk Tea", 500)
+            .await
+            .expect("reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 1500),
+            )
+            .await
+            .expect("seed coins");
+        runtime.activate_reward().await.expect("activation");
+
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let redemption = runtime
+            .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("redemption");
+        assert_eq!(
+            runtime
+                .list_custom_reward_redemption_history()
+                .await
+                .expect("unrefunded history"),
+            vec![CustomRewardRedemptionHistory {
+                redemption_id: redemption_id.clone(),
+                custom_reward_id: reward.custom_reward_id.clone(),
+                reward_name: "Milk Tea".to_owned(),
+                coin_cost_paid: 500,
+                redeemed_at_utc: redemption.redemption.redeemed_at_utc.clone(),
+                refund_id: None,
+                refunded_at_utc: None,
+            }]
+        );
+
+        let renamed = runtime
+            .update_custom_reward(&reward.custom_reward_id, "Tea", 700)
+            .await
+            .expect("rename and reprice");
+        let second_redemption_id = uuid::Uuid::now_v7().to_string();
+        let second_redemption = runtime
+            .redeem_custom_reward(&second_redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("second redemption");
+        let refund_id = uuid::Uuid::now_v7().to_string();
+        runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund");
+        runtime
+            .archive_custom_reward(&reward.custom_reward_id)
+            .await
+            .expect("archive");
+
+        let history = runtime
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("refunded history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].redemption_id, second_redemption_id);
+        assert_eq!(history[0].custom_reward_id, renamed.custom_reward_id);
+        assert_eq!(history[0].reward_name, "Tea");
+        assert_eq!(history[0].coin_cost_paid, 700);
+        assert_eq!(
+            history[0].redeemed_at_utc,
+            second_redemption.redemption.redeemed_at_utc
+        );
+        assert_eq!(history[0].refund_id, None);
+        assert_eq!(history[0].refunded_at_utc, None);
+        assert_eq!(history[1].redemption_id, redemption_id);
+        assert_eq!(history[1].custom_reward_id, renamed.custom_reward_id);
+        assert_eq!(history[1].reward_name, "Tea");
+        assert_eq!(history[1].coin_cost_paid, 500);
+        assert_eq!(history[1].refund_id.as_deref(), Some(refund_id.as_str()));
+        assert!(history[1].refunded_at_utc.is_some());
+
+        drop(runtime);
+        let reopened = start_database(directory.path()).await;
+        assert_eq!(
+            reopened
+                .list_custom_reward_redemption_history()
+                .await
+                .expect("reopened history"),
+            history
+        );
+    }
+
+    #[tokio::test]
+    async fn r8c1_read_authorities_fail_closed_on_corrupt_rows() {
+        let directory = TempDir::new().expect("R8C1 corruption database");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("pool");
+        let reward_id = uuid::Uuid::now_v7().to_string();
+        sqlx::raw_sql("PRAGMA ignore_check_constraints = ON")
+            .execute(pool)
+            .await
+            .expect("disable checks");
+        sqlx::query(
+            "INSERT INTO custom_rewards
+             (custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc)
+             VALUES (?1, 'Corrupt', 1, 'invalid', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')",
+        )
+        .bind(&reward_id)
+        .execute(pool)
+        .await
+        .expect("corrupt reward");
+        assert_eq!(
+            runtime.list_custom_rewards().await,
+            Err(CustomRewardError::InvalidStatus)
+        );
+
+        let valid_reward = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO custom_rewards
+             (custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc)
+             VALUES (?1, 'Valid', 1, 'active', '2026-08-25T00:00:01.000Z', '2026-08-25T00:00:01.000Z')",
+        )
+        .bind(&valid_reward)
+        .execute(pool)
+        .await
+        .expect("valid reward");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO custom_reward_redemptions
+             (redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc)
+             VALUES (?1, ?2, 1, '2026-08-25T00:00:02.000Z')",
+        )
+        .bind(&redemption_id)
+        .bind(&valid_reward)
+        .execute(pool)
+        .await
+        .expect("redemption");
+        sqlx::query(
+            "INSERT INTO custom_reward_refunds (refund_id, redemption_id, refunded_at_utc)
+             VALUES ('not-a-uuid', ?1, '2026-08-25T00:00:03.000Z')",
+        )
+        .bind(&redemption_id)
+        .execute(pool)
+        .await
+        .expect("incoherent refund");
+        assert_eq!(
+            runtime.list_custom_reward_redemption_history().await,
+            Err(CustomRewardHistoryError::IntegrityViolation)
         );
     }
 

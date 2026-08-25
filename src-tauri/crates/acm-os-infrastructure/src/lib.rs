@@ -8,10 +8,11 @@ mod persistence;
 mod safe_patch;
 
 pub use persistence::{
-    start_database, CustomRewardRedemption, CustomRewardRedemptionDisposition,
-    CustomRewardRedemptionError, CustomRewardRedemptionResult, CustomRewardRefund,
-    CustomRewardRefundDisposition, CustomRewardRefundError, CustomRewardRefundResult,
-    DatabaseRuntime, RestoreRollbackCleanupError, SystemHealthSnapshot,
+    start_database, CustomReward, CustomRewardHistoryError, CustomRewardRedemption,
+    CustomRewardRedemptionDisposition, CustomRewardRedemptionError, CustomRewardRedemptionHistory,
+    CustomRewardRedemptionResult, CustomRewardRefund, CustomRewardRefundDisposition,
+    CustomRewardRefundError, CustomRewardRefundResult, CustomRewardStatus, DatabaseRuntime,
+    RestoreRollbackCleanupError, SystemHealthSnapshot,
 };
 
 pub fn current_local_date() -> Result<acm_os_domain::LocalDate, ()> {
