@@ -167,6 +167,37 @@ pub struct CustomRewardRedemptionResult {
     pub redemption: CustomRewardRedemption,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRefund {
+    pub refund_id: String,
+    pub redemption_id: String,
+    pub refunded_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRefundDisposition {
+    Processed,
+    AlreadyProcessed,
+    AlreadyRefunded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRefundResult {
+    pub disposition: CustomRewardRefundDisposition,
+    pub refund: CustomRewardRefund,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRefundError {
+    Unavailable,
+    InvalidIdentity,
+    NotFound,
+    RedemptionNotFound,
+    IntentConflict,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomRewardRedemptionError {
     Unavailable,
@@ -257,6 +288,18 @@ fn validate_redemption_id(value: &str) -> Result<(), CustomRewardRedemptionError
     }
 }
 
+fn validate_refund_id(value: &str) -> Result<(), CustomRewardRefundError> {
+    if uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(CustomRewardRefundError::InvalidIdentity)
+    }
+}
+
 fn parse_custom_reward_redemption_row(
     redemption_id: String,
     custom_reward_id: String,
@@ -278,6 +321,24 @@ fn parse_custom_reward_redemption_row(
         custom_reward_id,
         coin_cost_paid,
         redeemed_at_utc,
+    })
+}
+
+fn parse_custom_reward_refund_row(
+    refund_id: String,
+    redemption_id: String,
+    refunded_at_utc: String,
+) -> Result<CustomRewardRefund, CustomRewardRefundError> {
+    validate_refund_id(&refund_id)?;
+    if validate_redemption_id(&redemption_id).is_err()
+        || parse_reward_utc_millis(&refunded_at_utc).is_none()
+    {
+        return Err(CustomRewardRefundError::IntegrityViolation);
+    }
+    Ok(CustomRewardRefund {
+        refund_id,
+        redemption_id,
+        refunded_at_utc,
     })
 }
 
@@ -8541,6 +8602,27 @@ impl DatabaseRuntime {
         parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3)
     }
 
+    pub async fn load_custom_reward_refund(
+        &self,
+        refund_id: &str,
+    ) -> Result<CustomRewardRefund, CustomRewardRefundError> {
+        validate_refund_id(refund_id)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRefundError::Unavailable)?;
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE refund_id = ?1",
+        )
+        .bind(refund_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+        let row = row.ok_or(CustomRewardRefundError::NotFound)?;
+        parse_custom_reward_refund_row(row.0, row.1, row.2)
+    }
+
     pub async fn redeem_custom_reward(
         &self,
         redemption_id: &str,
@@ -8714,6 +8796,193 @@ impl DatabaseRuntime {
         })
     }
 
+    pub async fn refund_custom_reward(
+        &self,
+        refund_id: &str,
+        redemption_id: &str,
+    ) -> Result<CustomRewardRefundResult, CustomRewardRefundError> {
+        validate_refund_id(refund_id)?;
+        validate_redemption_id(redemption_id)
+            .map_err(|_| CustomRewardRefundError::InvalidIdentity)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRefundError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+
+        // Serialize the intent lookup and the one-refund check with the writes. This keeps
+        // concurrent refund attempts deterministic while the frozen UNIQUE constraint remains
+        // the durable final guard.
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+
+        let existing_by_id: Option<(String, String, String)> = match sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE refund_id = ?1",
+        )
+        .bind(refund_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        if let Some(row) = existing_by_id {
+            let existing = match parse_custom_reward_refund_row(row.0, row.1, row.2) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            if existing.redemption_id != redemption_id {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::IntentConflict);
+            }
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+            return Ok(CustomRewardRefundResult {
+                disposition: CustomRewardRefundDisposition::AlreadyProcessed,
+                refund: existing,
+            });
+        }
+
+        let redemption_row: Option<(String, String, i64, String)> = match sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        let redemption_row = match redemption_row {
+            Some(row) => row,
+            None => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::RedemptionNotFound);
+            }
+        };
+        let redemption = match parse_custom_reward_redemption_row(
+            redemption_row.0,
+            redemption_row.1,
+            redemption_row.2,
+            redemption_row.3,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(match error {
+                    CustomRewardRedemptionError::InvalidIdentity
+                    | CustomRewardRedemptionError::IntegrityViolation => {
+                        CustomRewardRefundError::IntegrityViolation
+                    }
+                    _ => CustomRewardRefundError::DatabaseFailure,
+                });
+            }
+        };
+
+        let existing_by_redemption: Option<(String, String, String)> = match sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        if let Some(row) = existing_by_redemption {
+            let existing = match parse_custom_reward_refund_row(row.0, row.1, row.2) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+            return Ok(CustomRewardRefundResult {
+                disposition: CustomRewardRefundDisposition::AlreadyRefunded,
+                refund: existing,
+            });
+        }
+
+        let refunded_at_utc = reward_now_utc();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_refunds
+             (refund_id, redemption_id, refunded_at_utc) VALUES (?1, ?2, ?3)",
+        )
+        .bind(refund_id)
+        .bind(redemption_id)
+        .bind(&refunded_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        let ledger_entry_id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO reward_ledger_entries
+             (id, resource_kind, delta, recorded_at_utc) VALUES (?1, 'coin', ?2, ?3)",
+        )
+        .bind(&ledger_entry_id)
+        .bind(redemption.coin_cost_paid)
+        .bind(&refunded_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_refund_ledger_origins
+             (ledger_entry_id, refund_id, resource_kind) VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&ledger_entry_id)
+        .bind(refund_id)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+        Ok(CustomRewardRefundResult {
+            disposition: CustomRewardRefundDisposition::Processed,
+            refund: CustomRewardRefund {
+                refund_id: refund_id.to_owned(),
+                redemption_id: redemption_id.to_owned(),
+                refunded_at_utc,
+            },
+        })
+    }
+
     async fn load_reward_account_from_connection(
         connection: &mut sqlx::SqliteConnection,
     ) -> Result<RewardAccount, RewardProcessingError> {
@@ -8829,6 +9098,17 @@ impl DatabaseRuntime {
             CustomRewardRedemptionError::IntegrityViolation
         } else {
             CustomRewardRedemptionError::DatabaseFailure
+        }
+    }
+
+    fn map_refund_sql_error(error: sqlx::Error) -> CustomRewardRefundError {
+        if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+            CustomRewardRefundError::IntegrityViolation
+        } else if matches!(&error, sqlx::Error::Database(database) if database.is_check_violation() || database.is_foreign_key_violation())
+        {
+            CustomRewardRefundError::IntegrityViolation
+        } else {
+            CustomRewardRefundError::DatabaseFailure
         }
     }
 
@@ -29303,6 +29583,319 @@ mod tests {
         .execute(pool)
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn r7c2_refund_restores_historical_coin_and_survives_restart() {
+        let directory = TempDir::new().expect("R7C2 historical refund database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let reward = runtime
+            .create_custom_reward("historical refund", 500)
+            .await
+            .expect("custom reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 500),
+            )
+            .await
+            .expect("seed coin");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let redemption = runtime
+            .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("redemption");
+        assert_eq!(redemption.redemption.coin_cost_paid, 500);
+        let before_account = runtime.load_reward_account().await.expect("before account");
+        assert_eq!(
+            before_account,
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 0
+            }
+        );
+        let pool = runtime._pool.as_ref().expect("pool");
+        let before_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'xp')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("pre-refund accounting counts");
+
+        runtime
+            .update_custom_reward(&reward.custom_reward_id, "historical refund", 700)
+            .await
+            .expect("reprice reward");
+        runtime
+            .archive_custom_reward(&reward.custom_reward_id)
+            .await
+            .expect("archive reward");
+        let refund_id = uuid::Uuid::now_v7().to_string();
+        let first = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund");
+        assert_eq!(first.disposition, CustomRewardRefundDisposition::Processed);
+        assert_eq!(first.refund.refund_id, refund_id);
+        assert_eq!(first.refund.redemption_id, redemption_id);
+        assert!(parse_reward_utc_millis(&first.refund.refunded_at_utc).is_some());
+        assert_eq!(
+            runtime.load_custom_reward_refund(&refund_id).await,
+            Ok(first.refund.clone())
+        );
+        let refund_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM custom_reward_refunds")
+            .fetch_one(pool)
+            .await
+            .expect("refund count");
+        let credit_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reward_ledger_entries entry
+             JOIN custom_reward_refund_ledger_origins origin
+               ON origin.ledger_entry_id = entry.id
+             WHERE entry.resource_kind = 'coin' AND entry.delta = 500",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("credit count");
+        let origin_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM custom_reward_refund_ledger_origins")
+                .fetch_one(pool)
+                .await
+                .expect("origin count");
+        assert_eq!((refund_rows, credit_rows, origin_rows), (1, 1, 1));
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("refunded account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 500
+            }
+        );
+        let after_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM reward_events),
+                    (SELECT COUNT(*) FROM reward_grants),
+                    (SELECT COUNT(*) FROM reward_ledger_entries WHERE resource_kind = 'xp')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("post-refund accounting counts");
+        assert_eq!(after_counts, before_counts);
+
+        let retry = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("same intent retry");
+        assert_eq!(
+            retry.disposition,
+            CustomRewardRefundDisposition::AlreadyProcessed
+        );
+        assert_eq!(retry.refund, first.refund);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM custom_reward_refund_ledger_origins",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("retry origin count"),
+            1
+        );
+
+        drop(runtime);
+        let reopened = start_database(directory.path()).await;
+        assert_eq!(
+            reopened.load_custom_reward_refund(&refund_id).await,
+            Ok(first.refund.clone())
+        );
+        assert_eq!(
+            reopened
+                .load_reward_account()
+                .await
+                .expect("reopened account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 500
+            }
+        );
+        let reopened_retry = reopened
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("retry after reopen");
+        assert_eq!(
+            reopened_retry.disposition,
+            CustomRewardRefundDisposition::AlreadyProcessed
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM custom_reward_refund_ledger_origins",
+            )
+            .fetch_one(reopened._pool.as_ref().expect("reopened pool"))
+            .await
+            .expect("reopened origin count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn r7c2_refund_orders_intent_conflict_and_missing_redemption_safely() {
+        let directory = TempDir::new().expect("R7C2 ordering database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let reward = runtime
+            .create_custom_reward("ordering refund", 100)
+            .await
+            .expect("custom reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 500),
+            )
+            .await
+            .expect("seed coin");
+        let redemption_a = uuid::Uuid::now_v7().to_string();
+        let redemption_b = uuid::Uuid::now_v7().to_string();
+        runtime
+            .redeem_custom_reward(&redemption_a, &reward.custom_reward_id)
+            .await
+            .expect("redemption A");
+        runtime
+            .redeem_custom_reward(&redemption_b, &reward.custom_reward_id)
+            .await
+            .expect("redemption B");
+        let refund_a = uuid::Uuid::now_v7().to_string();
+        let first = runtime
+            .refund_custom_reward(&refund_a, &redemption_a)
+            .await
+            .expect("first refund");
+        assert_eq!(first.disposition, CustomRewardRefundDisposition::Processed);
+        let second = runtime
+            .refund_custom_reward(&uuid::Uuid::now_v7().to_string(), &redemption_a)
+            .await
+            .expect("second refund intent");
+        assert_eq!(
+            second.disposition,
+            CustomRewardRefundDisposition::AlreadyRefunded
+        );
+        assert_eq!(second.refund, first.refund);
+        assert_eq!(
+            runtime.refund_custom_reward(&refund_a, &redemption_b).await,
+            Err(CustomRewardRefundError::IntentConflict)
+        );
+        let missing_redemption = uuid::Uuid::now_v7().to_string();
+        assert_eq!(
+            runtime
+                .refund_custom_reward(&uuid::Uuid::now_v7().to_string(), &missing_redemption)
+                .await,
+            Err(CustomRewardRefundError::RedemptionNotFound)
+        );
+        assert_eq!(
+            runtime
+                .refund_custom_reward("not-a-uuid", &redemption_a)
+                .await,
+            Err(CustomRewardRefundError::InvalidIdentity)
+        );
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("ordering account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 400
+            }
+        );
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM custom_reward_refunds),
+                    (SELECT COUNT(*) FROM reward_ledger_entries entry
+                     JOIN custom_reward_refund_ledger_origins origin
+                       ON origin.ledger_entry_id = entry.id
+                     WHERE entry.resource_kind = 'coin' AND entry.delta > 0),
+                    (SELECT COUNT(*) FROM custom_reward_refund_ledger_origins)",
+        )
+        .fetch_one(runtime._pool.as_ref().expect("pool"))
+        .await
+        .expect("ordering counts");
+        assert_eq!(counts, (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn r7c2_two_pools_credit_one_refund_once() {
+        let directory = TempDir::new().expect("R7C2 concurrency database");
+        let runtime = r2c2_runtime_with_sources(&directory).await;
+        let reward = runtime
+            .create_custom_reward("concurrent refund", 400)
+            .await
+            .expect("custom reward");
+        runtime
+            .process_reward(
+                &RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                },
+                &reward_decision(0, 500),
+            )
+            .await
+            .expect("seed coin");
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        runtime
+            .redeem_custom_reward(&redemption_id, &reward.custom_reward_id)
+            .await
+            .expect("redemption");
+        let path = directory.path().join(DATABASE_FILENAME);
+        drop(runtime);
+        let pool_a = connect_read_write(&path).await.expect("pool A");
+        let pool_b = connect_read_write(&path).await.expect("pool B");
+        let runtime_a = test_runtime_from_pool(pool_a);
+        let runtime_b = test_runtime_from_pool(pool_b);
+        let refund_a = uuid::Uuid::now_v7().to_string();
+        let refund_b = uuid::Uuid::now_v7().to_string();
+        let (a, b) = tokio::join!(
+            runtime_a.refund_custom_reward(&refund_a, &redemption_id),
+            runtime_b.refund_custom_reward(&refund_b, &redemption_id)
+        );
+        let successes = [a.as_ref(), b.as_ref()]
+            .iter()
+            .filter(|result| {
+                matches!(result, Ok(value) if value.disposition == CustomRewardRefundDisposition::Processed)
+            })
+            .count();
+        assert_eq!(successes, 1);
+        let losers = [a, b]
+            .into_iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Ok(value) if value.disposition == CustomRewardRefundDisposition::AlreadyRefunded
+                )
+            })
+            .count();
+        assert_eq!(losers, 1);
+        assert_eq!(
+            runtime_a
+                .load_reward_account()
+                .await
+                .expect("concurrent account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 500
+            }
+        );
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM custom_reward_refunds),
+                    (SELECT COUNT(*) FROM reward_ledger_entries entry
+                     JOIN custom_reward_refund_ledger_origins origin
+                       ON origin.ledger_entry_id = entry.id
+                     WHERE entry.resource_kind = 'coin' AND entry.delta = 400),
+                    (SELECT COUNT(*) FROM custom_reward_refund_ledger_origins)",
+        )
+        .fetch_one(runtime_a._pool.as_ref().expect("pool A"))
+        .await
+        .expect("concurrent counts");
+        assert_eq!(counts, (1, 1, 1));
     }
 
     fn test_runtime_from_pool(pool: SqlitePool) -> DatabaseRuntime {
