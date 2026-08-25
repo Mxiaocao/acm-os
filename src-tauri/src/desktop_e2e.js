@@ -74,6 +74,16 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       returnControl.click();
       await waitFor(() => window.location.pathname === "/today", "Today route after Review");
     };
+    const assertKnowledgeReevaluation = async (targetRef, expectedLevel, expectedCount) => {
+      await waitFor(() => {
+        const detail = [...document.querySelectorAll("section.knowledge-detail")]
+          .find((section) => section.querySelector("#knowledge-detail-title")?.textContent.trim() === targetRef);
+        const understanding = detail?.querySelector(".knowledge-understanding select");
+        const suggestion = detail?.querySelector(".knowledge-understanding > p.safe-note");
+        return understanding?.value === expectedLevel
+          && suggestion?.textContent.match(/\d+/)?.[0] === String(expectedCount);
+      }, `${targetRef} Knowledge reevaluation suggestion for ${expectedCount} qualifying Problems`);
+    };
     const inputValue = (input, value) => {
       if (!input) throw new Error(`Missing input for ${value}`);
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
@@ -434,8 +444,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await returnToToday();
       await navigateTo("Knowledge", "Knowledge index");
       await clickText("Segment Tree");
-      await waitText("Consider re-evaluating this Knowledge status");
-      await waitText("3 distinct related Problems gained new 真会 Review Evidence");
+      await assertKnowledgeReevaluation("Segment Tree", "basic", 3);
       await stage("reevaluation-suggestion-visible");
 
       await setDate("2026-08-24");
