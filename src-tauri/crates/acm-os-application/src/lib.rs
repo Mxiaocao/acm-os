@@ -6,6 +6,287 @@ use std::path::{Component, Path};
 
 pub const BOUNDARY_NAME: &str = "acm-os-application";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardStatus {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewardAccountRecord {
+    pub xp_balance: i64,
+    pub coin_balance: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRecord {
+    pub custom_reward_id: String,
+    pub name: String,
+    pub coin_cost: i64,
+    pub status: CustomRewardStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedemptionHistoryRecord {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub reward_name: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+    pub refund_id: Option<String>,
+    pub refunded_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedemptionDisposition {
+    Processed,
+    AlreadyProcessed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedemptionResult {
+    pub disposition: RedemptionDisposition,
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefundDisposition {
+    Processed,
+    AlreadyProcessed,
+    AlreadyRefunded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefundResult {
+    pub disposition: RefundDisposition,
+    pub refund_id: String,
+    pub redemption_id: String,
+    pub refunded_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardError {
+    RewardInactive,
+    CustomRewardNotFound,
+    CustomRewardArchived,
+    RedemptionNotFound,
+    RefundNotFound,
+    InsufficientCoin,
+    RedemptionIntentConflict,
+    RefundIntentConflict,
+    AlreadyRefunded,
+    InvalidIdentity,
+    InvalidInput,
+    IntegrityViolation,
+    PersistenceUnavailable,
+    DatabaseFailure,
+}
+
+impl RewardError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::RewardInactive => "reward_inactive",
+            Self::CustomRewardNotFound => "custom_reward_not_found",
+            Self::CustomRewardArchived => "custom_reward_archived",
+            Self::RedemptionNotFound => "redemption_not_found",
+            Self::RefundNotFound => "refund_not_found",
+            Self::InsufficientCoin => "insufficient_coin",
+            Self::RedemptionIntentConflict => "redemption_intent_conflict",
+            Self::RefundIntentConflict => "refund_intent_conflict",
+            Self::AlreadyRefunded => "already_refunded",
+            Self::InvalidIdentity => "invalid_identity",
+            Self::InvalidInput => "invalid_input",
+            Self::IntegrityViolation => "reward_integrity_violation",
+            Self::PersistenceUnavailable => "reward_persistence_unavailable",
+            Self::DatabaseFailure => "reward_database_failure",
+        }
+    }
+}
+
+pub type RewardApplicationError = RewardError;
+
+#[allow(async_fn_in_trait)]
+pub trait RewardPort {
+    async fn is_reward_active(&self) -> Result<bool, RewardError>;
+    async fn activate_reward(&self) -> Result<(), RewardError>;
+    async fn load_reward_account(&self) -> Result<RewardAccountRecord, RewardError>;
+    async fn list_custom_rewards(&self) -> Result<Vec<CustomRewardRecord>, RewardError>;
+    async fn list_redemption_history(&self) -> Result<Vec<RedemptionHistoryRecord>, RewardError>;
+    async fn create_custom_reward(
+        &self,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<CustomRewardRecord, RewardError>;
+    async fn update_custom_reward(
+        &self,
+        custom_reward_id: &str,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<CustomRewardRecord, RewardError>;
+    async fn archive_custom_reward(
+        &self,
+        custom_reward_id: &str,
+    ) -> Result<CustomRewardRecord, RewardError>;
+    async fn redeem_custom_reward(
+        &self,
+        redemption_id: &str,
+        custom_reward_id: &str,
+    ) -> Result<RedemptionResult, RewardError>;
+    async fn refund_custom_reward(
+        &self,
+        refund_id: &str,
+        redemption_id: &str,
+    ) -> Result<RefundResult, RewardError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewardAccountSummary {
+    pub xp_balance: i64,
+    pub coin_balance: i64,
+    pub level: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardSummary {
+    pub custom_reward_id: String,
+    pub name: String,
+    pub coin_cost: i64,
+    pub status: CustomRewardStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedemptionHistoryItem {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub reward_name: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+    pub refund_id: Option<String>,
+    pub refunded_at_utc: Option<String>,
+}
+
+fn reward_summary(record: CustomRewardRecord) -> CustomRewardSummary {
+    CustomRewardSummary {
+        custom_reward_id: record.custom_reward_id,
+        name: record.name,
+        coin_cost: record.coin_cost,
+        status: record.status,
+    }
+}
+
+pub async fn is_reward_active<P: RewardPort>(port: &P) -> Result<bool, RewardError> {
+    port.is_reward_active().await
+}
+
+pub async fn reward_activation_state<P: RewardPort>(port: &P) -> Result<bool, RewardError> {
+    is_reward_active(port).await
+}
+
+pub async fn activate_reward<P: RewardPort>(port: &P) -> Result<(), RewardError> {
+    port.activate_reward().await
+}
+
+pub async fn load_reward_account<P: RewardPort>(
+    port: &P,
+) -> Result<RewardAccountSummary, RewardError> {
+    let account = port.load_reward_account().await?;
+    let level = acm_os_domain::RewardLevelPolicy::derive(account.xp_balance)
+        .map_err(|_| RewardError::IntegrityViolation)?
+        .number();
+    Ok(RewardAccountSummary {
+        xp_balance: account.xp_balance,
+        coin_balance: account.coin_balance,
+        level,
+    })
+}
+
+pub async fn list_custom_rewards<P: RewardPort>(
+    port: &P,
+) -> Result<Vec<CustomRewardSummary>, RewardError> {
+    Ok(port
+        .list_custom_rewards()
+        .await?
+        .into_iter()
+        .map(reward_summary)
+        .collect())
+}
+
+pub async fn list_redemption_history<P: RewardPort>(
+    port: &P,
+) -> Result<Vec<RedemptionHistoryItem>, RewardError> {
+    Ok(port
+        .list_redemption_history()
+        .await?
+        .into_iter()
+        .map(|record| RedemptionHistoryItem {
+            redemption_id: record.redemption_id,
+            custom_reward_id: record.custom_reward_id,
+            reward_name: record.reward_name,
+            coin_cost_paid: record.coin_cost_paid,
+            redeemed_at_utc: record.redeemed_at_utc,
+            refund_id: record.refund_id,
+            refunded_at_utc: record.refunded_at_utc,
+        })
+        .collect())
+}
+
+pub async fn redemption_history<P: RewardPort>(
+    port: &P,
+) -> Result<Vec<RedemptionHistoryItem>, RewardError> {
+    list_redemption_history(port).await
+}
+
+pub async fn create_custom_reward<P: RewardPort>(
+    port: &P,
+    name: &str,
+    coin_cost: i64,
+) -> Result<CustomRewardSummary, RewardError> {
+    Ok(reward_summary(
+        port.create_custom_reward(name, coin_cost).await?,
+    ))
+}
+
+pub async fn update_custom_reward<P: RewardPort>(
+    port: &P,
+    custom_reward_id: &str,
+    name: &str,
+    coin_cost: i64,
+) -> Result<CustomRewardSummary, RewardError> {
+    Ok(reward_summary(
+        port.update_custom_reward(custom_reward_id, name, coin_cost)
+            .await?,
+    ))
+}
+
+pub async fn archive_custom_reward<P: RewardPort>(
+    port: &P,
+    custom_reward_id: &str,
+) -> Result<CustomRewardSummary, RewardError> {
+    Ok(reward_summary(
+        port.archive_custom_reward(custom_reward_id).await?,
+    ))
+}
+
+pub async fn redeem_custom_reward<P: RewardPort>(
+    port: &P,
+    redemption_id: &str,
+    custom_reward_id: &str,
+) -> Result<RedemptionResult, RewardError> {
+    port.redeem_custom_reward(redemption_id, custom_reward_id)
+        .await
+}
+
+pub async fn refund_custom_reward<P: RewardPort>(
+    port: &P,
+    refund_id: &str,
+    redemption_id: &str,
+) -> Result<RefundResult, RewardError> {
+    port.refund_custom_reward(refund_id, redemption_id).await
+}
+
 pub use acm_os_domain::{
     ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,
 };

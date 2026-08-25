@@ -12,7 +12,7 @@ pub use persistence::{
     CustomRewardRedemptionDisposition, CustomRewardRedemptionError, CustomRewardRedemptionHistory,
     CustomRewardRedemptionResult, CustomRewardRefund, CustomRewardRefundDisposition,
     CustomRewardRefundError, CustomRewardRefundResult, CustomRewardStatus, DatabaseRuntime,
-    RestoreRollbackCleanupError, SystemHealthSnapshot,
+    RestoreRollbackCleanupError, RewardProcessingError, SystemHealthSnapshot,
 };
 
 pub fn current_local_date() -> Result<acm_os_domain::LocalDate, ()> {

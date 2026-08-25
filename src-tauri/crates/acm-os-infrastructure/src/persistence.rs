@@ -8286,6 +8286,21 @@ async fn load_reward_activation_authority(
 }
 
 impl DatabaseRuntime {
+    pub async fn reward_is_active(&self) -> Result<bool, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(load_reward_activation_authority(&mut connection)
+            .await?
+            .activated_at_utc
+            .is_some())
+    }
+
     pub async fn activate_reward(&self) -> Result<RewardActivationState, RewardProcessingError> {
         let pool = self
             ._pool
@@ -10475,6 +10490,276 @@ impl DatabaseRuntime {
         )
         .await
         .map(Some)
+    }
+}
+
+fn map_reward_processing_error(error: RewardProcessingError) -> acm_os_application::RewardError {
+    match error {
+        RewardProcessingError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        RewardProcessingError::RewardInactive => acm_os_application::RewardError::RewardInactive,
+        RewardProcessingError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        RewardProcessingError::DatabaseFailure => acm_os_application::RewardError::DatabaseFailure,
+        _ => acm_os_application::RewardError::IntegrityViolation,
+    }
+}
+
+fn map_custom_reward_error(error: CustomRewardError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardError::Unavailable => acm_os_application::RewardError::PersistenceUnavailable,
+        CustomRewardError::InvalidIdentity => acm_os_application::RewardError::InvalidIdentity,
+        CustomRewardError::InvalidName | CustomRewardError::InvalidCoinCost => {
+            acm_os_application::RewardError::InvalidInput
+        }
+        CustomRewardError::NotFound => acm_os_application::RewardError::CustomRewardNotFound,
+        CustomRewardError::Archived => acm_os_application::RewardError::CustomRewardArchived,
+        CustomRewardError::InvalidStatus | CustomRewardError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardError::DatabaseFailure => acm_os_application::RewardError::DatabaseFailure,
+    }
+}
+
+fn map_redemption_error(error: CustomRewardRedemptionError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardRedemptionError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        CustomRewardRedemptionError::InvalidIdentity => {
+            acm_os_application::RewardError::InvalidIdentity
+        }
+        CustomRewardRedemptionError::NotFound => {
+            acm_os_application::RewardError::CustomRewardNotFound
+        }
+        CustomRewardRedemptionError::Archived => {
+            acm_os_application::RewardError::CustomRewardArchived
+        }
+        CustomRewardRedemptionError::RewardInactive => {
+            acm_os_application::RewardError::RewardInactive
+        }
+        CustomRewardRedemptionError::InsufficientBalance => {
+            acm_os_application::RewardError::InsufficientCoin
+        }
+        CustomRewardRedemptionError::IntentConflict => {
+            acm_os_application::RewardError::RedemptionIntentConflict
+        }
+        CustomRewardRedemptionError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardRedemptionError::DatabaseFailure => {
+            acm_os_application::RewardError::DatabaseFailure
+        }
+    }
+}
+
+fn map_refund_error(error: CustomRewardRefundError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardRefundError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        CustomRewardRefundError::InvalidIdentity => {
+            acm_os_application::RewardError::InvalidIdentity
+        }
+        CustomRewardRefundError::NotFound => acm_os_application::RewardError::RefundNotFound,
+        CustomRewardRefundError::RedemptionNotFound => {
+            acm_os_application::RewardError::RedemptionNotFound
+        }
+        CustomRewardRefundError::IntentConflict => {
+            acm_os_application::RewardError::RefundIntentConflict
+        }
+        CustomRewardRefundError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardRefundError::DatabaseFailure => {
+            acm_os_application::RewardError::DatabaseFailure
+        }
+    }
+}
+
+impl acm_os_application::RewardPort for DatabaseRuntime {
+    async fn is_reward_active(&self) -> Result<bool, acm_os_application::RewardError> {
+        self.reward_is_active()
+            .await
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn activate_reward(&self) -> Result<(), acm_os_application::RewardError> {
+        DatabaseRuntime::activate_reward(self)
+            .await
+            .map(|_| ())
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn load_reward_account(
+        &self,
+    ) -> Result<acm_os_application::RewardAccountRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::load_reward_account(self)
+            .await
+            .map(|account| acm_os_application::RewardAccountRecord {
+                xp_balance: account.xp_balance,
+                coin_balance: account.coin_balance,
+            })
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn list_custom_rewards(
+        &self,
+    ) -> Result<Vec<acm_os_application::CustomRewardRecord>, acm_os_application::RewardError> {
+        DatabaseRuntime::list_custom_rewards(self)
+            .await
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| acm_os_application::CustomRewardRecord {
+                        custom_reward_id: item.custom_reward_id,
+                        name: item.name,
+                        coin_cost: item.coin_cost,
+                        status: match item.status {
+                            CustomRewardStatus::Active => {
+                                acm_os_application::CustomRewardStatus::Active
+                            }
+                            CustomRewardStatus::Archived => {
+                                acm_os_application::CustomRewardStatus::Archived
+                            }
+                        },
+                    })
+                    .collect()
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn list_redemption_history(
+        &self,
+    ) -> Result<Vec<acm_os_application::RedemptionHistoryRecord>, acm_os_application::RewardError>
+    {
+        DatabaseRuntime::list_custom_reward_redemption_history(self)
+            .await
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| acm_os_application::RedemptionHistoryRecord {
+                        redemption_id: item.redemption_id,
+                        custom_reward_id: item.custom_reward_id,
+                        reward_name: item.reward_name,
+                        coin_cost_paid: item.coin_cost_paid,
+                        redeemed_at_utc: item.redeemed_at_utc,
+                        refund_id: item.refund_id,
+                        refunded_at_utc: item.refunded_at_utc,
+                    })
+                    .collect()
+            })
+            .map_err(|error| match error {
+                CustomRewardHistoryError::Unavailable => {
+                    acm_os_application::RewardError::PersistenceUnavailable
+                }
+                CustomRewardHistoryError::IntegrityViolation => {
+                    acm_os_application::RewardError::IntegrityViolation
+                }
+                CustomRewardHistoryError::DatabaseFailure => {
+                    acm_os_application::RewardError::DatabaseFailure
+                }
+            })
+    }
+
+    async fn create_custom_reward(
+        &self,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::create_custom_reward(self, name, coin_cost)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Active,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn update_custom_reward(
+        &self,
+        custom_reward_id: &str,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::update_custom_reward(self, custom_reward_id, name, coin_cost)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Active,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn archive_custom_reward(
+        &self,
+        custom_reward_id: &str,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::archive_custom_reward(self, custom_reward_id)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Archived,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn redeem_custom_reward(
+        &self,
+        redemption_id: &str,
+        custom_reward_id: &str,
+    ) -> Result<acm_os_application::RedemptionResult, acm_os_application::RewardError> {
+        DatabaseRuntime::redeem_custom_reward(self, redemption_id, custom_reward_id)
+            .await
+            .map(|result| acm_os_application::RedemptionResult {
+                disposition: match result.disposition {
+                    CustomRewardRedemptionDisposition::Processed => {
+                        acm_os_application::RedemptionDisposition::Processed
+                    }
+                    CustomRewardRedemptionDisposition::AlreadyProcessed => {
+                        acm_os_application::RedemptionDisposition::AlreadyProcessed
+                    }
+                },
+                redemption_id: result.redemption.redemption_id,
+                custom_reward_id: result.redemption.custom_reward_id,
+                coin_cost_paid: result.redemption.coin_cost_paid,
+                redeemed_at_utc: result.redemption.redeemed_at_utc,
+            })
+            .map_err(map_redemption_error)
+    }
+
+    async fn refund_custom_reward(
+        &self,
+        refund_id: &str,
+        redemption_id: &str,
+    ) -> Result<acm_os_application::RefundResult, acm_os_application::RewardError> {
+        DatabaseRuntime::refund_custom_reward(self, refund_id, redemption_id)
+            .await
+            .map(|result| acm_os_application::RefundResult {
+                disposition: match result.disposition {
+                    CustomRewardRefundDisposition::Processed => {
+                        acm_os_application::RefundDisposition::Processed
+                    }
+                    CustomRewardRefundDisposition::AlreadyProcessed => {
+                        acm_os_application::RefundDisposition::AlreadyProcessed
+                    }
+                    CustomRewardRefundDisposition::AlreadyRefunded => {
+                        acm_os_application::RefundDisposition::AlreadyRefunded
+                    }
+                },
+                refund_id: result.refund.refund_id,
+                redemption_id: result.refund.redemption_id,
+                refunded_at_utc: result.refund.refunded_at_utc,
+            })
+            .map_err(map_refund_error)
     }
 }
 
