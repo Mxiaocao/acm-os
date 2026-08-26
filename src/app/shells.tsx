@@ -883,6 +883,7 @@ function CustomRewardManagement({ account, onTransactionResolved }: { account: R
   const archiveTriggerRef = useRef<HTMLButtonElement>(null);
   const archiveDialogRef = useRef<HTMLDivElement>(null);
   const archiveConfirmRef = useRef<HTMLButtonElement>(null);
+  const mutationPendingRef = useRef(false);
   const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -895,32 +896,46 @@ function CustomRewardManagement({ account, onTransactionResolved }: { account: R
   const [archiveTarget, setArchiveTarget] = useState<CustomRewardDto | null>(null);
   const [pending, setPending] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [invalidFields, setInvalidFields] = useState({ name: false, coinCost: false });
   const load = useCallback(async () => { setLoading(true); setError(false); try { setRewards(await listCustomRewards()); } catch { setError(true); } finally { setLoading(false); } }, []);
-  useEffect(() => { void load(); }, [load]);  useEffect(() => {
+  useEffect(() => { void load(); }, [load]);
+  const closeArchive = useCallback(() => {
+    if (mutationPendingRef.current) return;
+    setArchiveTarget(null);
+    queueMicrotask(() => archiveTriggerRef.current?.focus());
+  }, []);
+  useEffect(() => {
     if (!archiveTarget) return;
     archiveConfirmRef.current?.focus();
+    const dialog = archiveDialogRef.current;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !pending) { event.preventDefault(); setArchiveTarget(null); queueMicrotask(() => archiveTriggerRef.current?.focus()); }
+      if (event.key === "Escape") { event.preventDefault(); closeArchive(); return; }
+      if (event.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [archiveTarget, pending]);
+  }, [archiveTarget, closeArchive]);
   const parseCost = (value: string) => { if (!/^\d+$/.test(value)) return null; const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; };
-  const validate = (nextName: string, nextCost: string) => { const cost = parseCost(nextCost); if (!nextName.trim() || cost === null) { setMutationError("Enter a name and a positive safe whole-number coin cost."); return null; } return { name: nextName.trim(), coinCost: cost }; };
-  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (pending) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); } finally { setPending(false); } };
-  const edit = (reward: CustomRewardDto) => { setEditingId(reward.customRewardId); setEditName(reward.name); setEditCoinCost(String(reward.coinCost)); setMutationError(null); };
-  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (pending) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); await load(); } catch { setMutationError("This reward changed elsewhere and is no longer editable. The list was refreshed."); await load(); } finally { setPending(false); } };
-  const archive = async () => { if (!archiveTarget || pending) return; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); await load(); } finally { setPending(false); } };
+  const validate = (nextName: string, nextCost: string) => { const invalid = { name: !nextName.trim(), coinCost: parseCost(nextCost) === null }; setInvalidFields(invalid); if (invalid.name || invalid.coinCost) { setMutationError("Enter a name and a positive safe whole-number coin cost."); return null; } return { name: nextName.trim(), coinCost: Number(nextCost) }; };
+  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; mutationPendingRef.current = true; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const edit = (reward: CustomRewardDto) => { setEditingId(reward.customRewardId); setEditName(reward.name); setEditCoinCost(String(reward.coinCost)); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); };
+  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; mutationPendingRef.current = true; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError("This reward changed elsewhere and is no longer editable. The list was refreshed."); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const archive = async () => { if (!archiveTarget || mutationPendingRef.current) return; mutationPendingRef.current = true; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
   const visible = rewards.filter((reward) => showArchived || reward.status === "active");
   return <section aria-labelledby="custom-rewards-heading" className="content-panel">
     <div className="statement-heading-row"><h2 id="custom-rewards-heading">Custom Rewards</h2><label><input checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} type="checkbox" /> Show archived</label></div>
-    {mutationError ? <p aria-live="assertive" className="error-message" role="alert">{mutationError}</p> : null}
-    <form className="action-row" noValidate onSubmit={create}><label>Name<input aria-label="Custom reward name" onInput={(event) => setName(event.currentTarget.value)} value={name} /></label><label>Coin cost<input aria-label="Custom reward coin cost" inputMode="numeric" onInput={(event) => setCoinCost(event.currentTarget.value)} value={coinCost} /></label><button className="primary-action" disabled={pending} type="submit">Create reward</button></form>
+    {mutationError ? <p aria-live="assertive" className="error-message" id="custom-reward-error" role="alert">{mutationError}</p> : null}
+    <form className="action-row" noValidate onSubmit={create}><label>Name<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label="Custom reward name" onInput={(event) => { setName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={name} /></label><label>Coin cost<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label="Custom reward coin cost" inputMode="numeric" onInput={(event) => { setCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={coinCost} /></label><button className="primary-action" disabled={pending} type="submit">Create reward</button></form>
     {loading ? <p aria-live="polite">Loading custom rewards...</p> : null}
     {error ? <div role="alert"><p>Custom Rewards could not be loaded.</p><button className="secondary-action" onClick={() => void load()} type="button">Retry</button></div> : null}
     {!loading && !error && visible.length === 0 ? <p>{showArchived ? "No custom rewards yet." : "No active custom rewards yet."}</p> : null}
-    {!loading && !error && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{reward.coinCost} Coin</span><span>{reward.status === "archived" ? "Archived" : "Active"}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">Edit</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">Archive</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>Name<input aria-label="Edit custom reward name" onInput={(event) => setEditName(event.currentTarget.value)} value={editName} /></label><label>Coin cost<input aria-label="Edit custom reward coin cost" onInput={(event) => setEditCoinCost(event.currentTarget.value)} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">Save changes</button><button className="secondary-action" disabled={pending} onClick={() => setEditingId(null)} type="button">Cancel</button></form> : null}</li>)}</ul> : null}
-    {archiveTarget ? <div className="modal-backdrop"><div aria-describedby="archive-reward-description" aria-labelledby="archive-reward-title" aria-modal="true" ref={archiveDialogRef} role="alertdialog"><h2 id="archive-reward-title">Archive {archiveTarget.name}?</h2><p id="archive-reward-description">Archiving is irreversible in Reward V1. This reward remains readable but cannot be edited, redeemed, or restored.</p><div className="button-row"><button className="danger-action" disabled={pending} onClick={() => void archive()} ref={archiveConfirmRef} type="button">{pending ? "Archiving..." : "Archive reward"}</button><button className="secondary-action" disabled={pending} onClick={() => setArchiveTarget(null)} type="button">Cancel</button></div></div></div> : null}
+    {!loading && !error && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{reward.coinCost} Coin</span><span>{reward.status === "archived" ? "Archived" : "Active"}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">Edit</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">Archive</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>Name<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label="Edit custom reward name" onInput={(event) => { setEditName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={editName} /></label><label>Coin cost<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label="Edit custom reward coin cost" onInput={(event) => { setEditCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">Save changes</button><button className="secondary-action" disabled={pending} onClick={() => { setEditingId(null); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); }} type="button">Cancel</button></form> : null}</li>)}</ul> : null}
+    {archiveTarget ? <div className="modal-backdrop"><div aria-describedby="archive-reward-description" aria-labelledby="archive-reward-title" aria-modal="true" ref={archiveDialogRef} role="alertdialog"><h2 id="archive-reward-title">Archive {archiveTarget.name}?</h2><p id="archive-reward-description">Archiving is irreversible in Reward V1. This reward remains readable but cannot be edited, redeemed, or restored.</p><div className="button-row"><button className="danger-action" disabled={pending} onClick={() => void archive()} ref={archiveConfirmRef} type="button">{pending ? "Archiving..." : "Archive reward"}</button><button className="secondary-action" disabled={pending} onClick={closeArchive} type="button">Cancel</button></div></div></div> : null}
     <RewardTransactions account={account} onTransactionResolved={onTransactionResolved} />
   </section>;
 }
@@ -932,9 +947,16 @@ function rewardErrorCode(error: unknown): string {
 
 function transactionMessage(error: unknown, kind: "redeem" | "refund"): string {
   const code = rewardErrorCode(error);
+  if (code === "reward_inactive") return "Reward Mode is not active. Cancel this action and reload Reward.";
+  if (code === "custom_reward_not_found") return "This Custom Reward no longer exists. Cancel this action and reload Reward.";
+  if (code === "custom_reward_archived") return "This Custom Reward is archived and can no longer be redeemed. Cancel this action and reload Reward.";
+  if (kind === "refund" && code === "redemption_not_found") return "This redemption no longer exists. Cancel this action and reload Reward.";
+  if (kind === "refund" && code === "already_refunded") return "This redemption has already been refunded. Cancel this action and reload Reward.";
   if (kind === "redeem" && code === "insufficient_coin") return "You do not have enough Coin for this reward.";
   if (kind === "redeem" && code === "redemption_intent_conflict") return "This redemption intent conflicts with an existing redemption. Cancel and start again.";
   if (kind === "refund" && code === "refund_intent_conflict") return "This refund intent conflicts with an existing refund. Cancel and start again.";
+  if (code === "reward_integrity_violation") return "Reward data could not be verified. Cancel this action and reload Reward.";
+  if (code === "reward_persistence_unavailable" || code === "reward_database_failure") return "Reward storage is unavailable. Retry the same intent later or cancel.";
   return kind === "redeem" ? "Redemption could not be completed. Retry the same intent or cancel." : "Refund could not be completed. Retry the same intent or cancel.";
 }
 

@@ -254,8 +254,106 @@ test("Custom Reward validation rejects blank names and invalid coin costs before
       await act(async () => findButton(view.document, "Create reward").click()); await settle();
       assert.equal(calls.length, 0);
       assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /positive safe whole-number/i);
+      const invalidInput = value === "" ? name : cost;
+      assert.equal(invalidInput.getAttribute("aria-invalid"), "true");
+      assert.equal(invalidInput.getAttribute("aria-describedby"), "custom-reward-error");
     }
+
+    await act(async () => { setInput(name, "Existing name"); setInput(cost, String(Number.MAX_SAFE_INTEGER)); });
+    await act(async () => findButton(view.document, "Create reward").click()); await settle();
+    assert.deepEqual(calls[0][1].input, { name: "Existing name", coinCost: Number.MAX_SAFE_INTEGER });
   } finally { await view.cleanup(); }
+});
+
+test("Custom Reward mutations reject rapid duplicate submits while pending", { concurrency: false }, async () => {
+  let rewards = [{ customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" }];
+  const calls = [];
+  let resolveCreate;
+  let resolveUpdate;
+  let resolveArchive;
+  const createPending = new Promise((resolve) => { resolveCreate = resolve; });
+  const updatePending = new Promise((resolve) => { resolveUpdate = resolve; });
+  const archivePending = new Promise((resolve) => { resolveArchive = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+    if (command === "list_custom_rewards") return rewards;
+    if (command === "reward_redemption_history") return [];
+    if (command === "create_custom_reward") { calls.push(command); return createPending; }
+    if (command === "update_custom_reward") { calls.push(command); return updatePending; }
+    if (command === "archive_custom_reward") { calls.push(command); return archivePending; }
+    return baseIpc(command, args);
+  });
+  try {
+    await act(async () => {
+      setInput(view.document.querySelector('input[aria-label="Custom reward name"]'), "Coffee");
+      setInput(view.document.querySelector('input[aria-label="Custom reward coin cost"]'), "7");
+    });
+    const create = findButton(view.document, "Create reward");
+    act(() => { create.click(); create.click(); });
+    assert.equal(calls.filter((command) => command === "create_custom_reward").length, 1);
+    rewards = [...rewards, { customRewardId: "r2", name: "Coffee", coinCost: 7, status: "active" }];
+    await act(async () => resolveCreate(rewards[1])); await settle();
+
+    await act(async () => findButton(view.document, "Edit").click());
+    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward name"]'), "Tea"));
+    const save = findButton(view.document, "Save changes");
+    act(() => { save.click(); save.click(); });
+    assert.equal(calls.filter((command) => command === "update_custom_reward").length, 1);
+    rewards = rewards.map((reward) => reward.customRewardId === "r1" ? { ...reward, name: "Tea" } : reward);
+    await act(async () => resolveUpdate(rewards[0])); await settle();
+
+    await act(async () => findButton(view.document, "Archive").click());
+    const archive = findButton(view.document, "Archive reward");
+    act(() => { archive.click(); archive.click(); });
+    assert.equal(calls.filter((command) => command === "archive_custom_reward").length, 1);
+    rewards = rewards.map((reward) => reward.customRewardId === "r1" ? { ...reward, status: "archived" } : reward);
+    await act(async () => resolveArchive(rewards[0])); await settle();
+  } finally { await view.cleanup(); }
+});
+
+test("archive dialog traps focus and restores the originating action on cancel", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
+  const view = await renderApp((command) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+    if (command === "list_custom_rewards") return [reward];
+    if (command === "reward_redemption_history") return [];
+    return baseIpc(command);
+  });
+  try {
+    const trigger = findButton(view.document, "Archive");
+    await act(async () => trigger.click());
+    assert.equal(view.document.activeElement?.textContent, "Archive reward");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true })));
+    assert.equal(view.document.activeElement?.textContent, "Cancel");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
+    assert.equal(view.document.activeElement?.textContent, "Archive reward");
+    await act(async () => findButton(view.document, "Cancel").click()); await settle();
+    assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+    assert.equal(view.document.activeElement, trigger);
+  } finally { await view.cleanup(); }
+});
+
+test("Reward read failures preserve unrelated successful account, reward, and history data", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
+  const history = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee history", coinCostPaid: 4, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: "refund-1", refundedAtUtc: "2026-08-25T01:00:00Z" };
+  for (const failedRead of ["reward_account_summary", "list_custom_rewards", "reward_redemption_history"]) {
+    const view = await renderApp((command) => {
+      if (command === "reward_activation_state") return { active: true };
+      if (command === failedRead) throw new Error("offline");
+      if (command === "reward_account_summary") return { level: 3, xp: 30, coin: 20 };
+      if (command === "list_custom_rewards") return [reward];
+      if (command === "reward_redemption_history") return [history];
+      return baseIpc(command);
+    });
+    try {
+      if (failedRead !== "reward_account_summary") assert.match(view.document.body.textContent, /Level\s*3[\s\S]*XP\s*30[\s\S]*Coin\s*20/);
+      if (failedRead !== "list_custom_rewards") assert.match(view.document.body.textContent, /Coffee/);
+      if (failedRead !== "reward_redemption_history") assert.match(view.document.body.textContent, /Coffee history[\s\S]*4 Coin paid/);
+      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /could not be loaded/i);
+    } finally { await view.cleanup(); }
+  }
 });
 
 test("R9E redeem uses one UUIDv7 intent, confirmation, and refresh", { concurrency: false }, async () => {
@@ -430,6 +528,36 @@ test("R9E transaction dialog Escape restores the originating action", { concurre
     assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
     assert.equal(view.document.activeElement, redeem);
   } finally { await view.cleanup(); }
+});
+
+test("Reward transaction errors distinguish terminal stale state from retryable storage failures", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
+  const history = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee", coinCostPaid: 5, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null };
+  for (const [kind, code, message] of [
+    ["redeem", "reward_inactive", /Reward Mode is not active.*reload Reward/i],
+    ["redeem", "custom_reward_not_found", /no longer exists.*reload Reward/i],
+    ["redeem", "custom_reward_archived", /archived.*can no longer be redeemed/i],
+    ["redeem", "reward_integrity_violation", /could not be verified.*reload Reward/i],
+    ["redeem", "reward_database_failure", /storage is unavailable.*Retry the same intent later/i],
+    ["refund", "redemption_not_found", /redemption no longer exists.*reload Reward/i],
+    ["refund", "already_refunded", /already been refunded.*reload Reward/i],
+    ["refund", "refund_intent_conflict", /refund intent conflicts.*start again/i],
+  ]) {
+    const view = await renderApp((command) => {
+      if (command === "reward_activation_state") return { active: true };
+      if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+      if (command === "list_custom_rewards") return [reward];
+      if (command === "reward_redemption_history") return [history];
+      if (command === (kind === "redeem" ? "redeem_custom_reward" : "refund_custom_reward")) throw code;
+      return baseIpc(command);
+    });
+    try {
+      await act(async () => findButton(view.document, kind === "redeem" ? "Redeem" : "Refund").click());
+      await act(async () => findButton(view.document, kind === "redeem" ? "Redeem reward" : "Refund reward").click()); await settle();
+      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", message);
+      assert.ok(findButton(view.document, "Cancel"));
+    } finally { await view.cleanup(); }
+  }
 });
 
 function baseIpc(command) {

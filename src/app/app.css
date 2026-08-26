@@ -249,6 +249,8 @@ ul.detail-list li {
   border-top: 1px solid var(--line);
 }
 
+ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
+
 .normal-shell { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
 
 .app-sidebar {
@@ -706,7 +708,7 @@ ul.detail-list li {
 .mastery-evidence label { display: flex; align-items: flex-start; gap: 9px; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgb(24 18 19 / 55%); }
 .modal-backdrop > div { width: min(560px, 100%); padding: 26px; border-radius: var(--radius-md); background: var(--surface); box-shadow: 0 24px 70px rgb(0 0 0 / 28%); }
-.modal-backdrop > div > h2 { margin-bottom: 12px; }
+.modal-backdrop > div > h2 { margin-bottom: 12px; overflow-wrap: anywhere; }
 .modal-backdrop > div > p { color: var(--ink-muted); }
 
 .content-panel > :first-child,
