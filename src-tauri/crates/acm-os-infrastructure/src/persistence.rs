@@ -29969,7 +29969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r11b_a1_core_reward_lifecycle_persists_across_restart() {
+    async fn r11b_core_reward_lifecycle_persists_across_restart() {
         let directory = TempDir::new().expect("R11B-A1 lifecycle database");
         let archived = {
             let runtime = start_database(directory.path()).await;
@@ -30422,6 +30422,203 @@ mod tests {
                 .expect("historical redemption")
                 .coin_cost_paid,
             500
+        );
+    }
+
+    #[tokio::test]
+    async fn r11b_redemption_refund_lifecycle_is_durable_and_historical() {
+        let directory = TempDir::new().expect("R11B-A2 lifecycle database");
+        let reward_id;
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let refund_id = uuid::Uuid::now_v7().to_string();
+        {
+            let runtime = r2c2_runtime_with_sources(&directory).await;
+            runtime.activate_reward().await.expect("activate Reward");
+            runtime
+                .process_reward(
+                    &RewardSource::ProblemCompletionOccurrence {
+                        occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                    },
+                    &reward_decision(0, 100),
+                )
+                .await
+                .expect("fund Coin");
+            assert_eq!(
+                runtime.load_reward_account().await.expect("funded account"),
+                RewardAccount {
+                    xp_balance: 0,
+                    coin_balance: 100,
+                }
+            );
+
+            let reward = runtime
+                .create_custom_reward("  Reward dinner  ", 40)
+                .await
+                .expect("create custom Reward");
+            reward_id = reward.custom_reward_id.clone();
+            let first = runtime
+                .redeem_custom_reward(&redemption_id, &reward_id)
+                .await
+                .expect("redeem Reward");
+            assert_eq!(
+                first.disposition,
+                CustomRewardRedemptionDisposition::Processed
+            );
+            assert_eq!(first.redemption.coin_cost_paid, 40);
+            assert_eq!(
+                runtime
+                    .load_reward_account()
+                    .await
+                    .expect("debited account"),
+                RewardAccount {
+                    xp_balance: 0,
+                    coin_balance: 60,
+                }
+            );
+            let retry = runtime
+                .redeem_custom_reward(&redemption_id, &reward_id)
+                .await
+                .expect("redeem retry");
+            assert_eq!(
+                retry.disposition,
+                CustomRewardRedemptionDisposition::AlreadyProcessed
+            );
+            assert_eq!(retry.redemption, first.redemption);
+            assert_eq!(
+                runtime
+                    .list_custom_reward_redemption_history()
+                    .await
+                    .expect("redemption history")
+                    .into_iter()
+                    .filter(|entry| entry.redemption_id == redemption_id)
+                    .collect::<Vec<_>>()
+                    .len(),
+                1
+            );
+
+            let edited = runtime
+                .update_custom_reward(&reward_id, "Reward dinner", 70)
+                .await
+                .expect("reprice Reward");
+            assert_eq!(edited.coin_cost, 70);
+            assert_eq!(
+                runtime
+                    .load_custom_reward_redemption(&redemption_id)
+                    .await
+                    .expect("historical redemption")
+                    .coin_cost_paid,
+                40
+            );
+        }
+
+        let runtime = start_database(directory.path()).await;
+        assert!(runtime.reward_is_active().await.expect("reopened state"));
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("reopened account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 60,
+            }
+        );
+        let history_before_refund = runtime
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("reopened redemption history");
+        let redeemed = history_before_refund
+            .iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("reopened redemption")
+            .clone();
+        assert_eq!(redeemed.coin_cost_paid, 40);
+        assert_eq!(redeemed.refund_id, None);
+        assert_eq!(
+            runtime
+                .load_custom_reward(&reward_id)
+                .await
+                .expect("reopened Reward")
+                .coin_cost,
+            70
+        );
+
+        let first_refund = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund Reward");
+        assert_eq!(
+            first_refund.disposition,
+            CustomRewardRefundDisposition::Processed
+        );
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("refunded account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 100,
+            }
+        );
+        let refund_retry = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund retry");
+        assert_eq!(
+            refund_retry.disposition,
+            CustomRewardRefundDisposition::AlreadyProcessed
+        );
+        assert_eq!(refund_retry.refund, first_refund.refund);
+        let refunded_history = runtime
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("refunded history")
+            .into_iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("refunded redemption");
+        assert_eq!(refunded_history.coin_cost_paid, 40);
+        assert_eq!(
+            refunded_history.refund_id.as_deref(),
+            Some(refund_id.as_str())
+        );
+        assert!(refunded_history.refunded_at_utc.is_some());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM custom_reward_refund_ledger_origins",
+            )
+            .fetch_one(runtime._pool.as_ref().expect("refund pool"))
+            .await
+            .expect("refund authority count"),
+            1
+        );
+
+        drop(runtime);
+        let reopened = start_database(directory.path()).await;
+        assert!(reopened.reward_is_active().await.expect("final state"));
+        assert_eq!(
+            reopened.load_reward_account().await.expect("final account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 100,
+            }
+        );
+        let final_history = reopened
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("final history");
+        let final_entry = final_history
+            .iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("final redemption authority");
+        assert_eq!(final_entry.coin_cost_paid, 40);
+        assert_eq!(final_entry.refund_id.as_deref(), Some(refund_id.as_str()));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM custom_reward_refunds")
+                .fetch_one(reopened._pool.as_ref().expect("final pool"))
+                .await
+                .expect("final refund count"),
+            1
         );
     }
 
