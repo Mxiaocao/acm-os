@@ -65,6 +65,177 @@ const DATABASE_RESTORE_INTENT_FILENAME: &str = "restore-intent.json";
 const MAX_EXACT_REWARD_AMOUNT: i64 = 9_007_199_254_740_991;
 const MAX_PENDING_REWARD_SOURCES: usize = 256;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatabaseUnavailableDiagnostic {
+    phase: &'static str,
+    category: &'static str,
+    io_kind: Option<std::io::ErrorKind>,
+    raw_os_error: Option<i32>,
+    database_kind: Option<&'static str>,
+    database_code: Option<String>,
+    join_cancelled: Option<bool>,
+    join_panic: Option<bool>,
+}
+
+impl DatabaseUnavailableDiagnostic {
+    fn new(phase: &'static str, category: &'static str) -> Self {
+        Self {
+            phase,
+            category,
+            io_kind: None,
+            raw_os_error: None,
+            database_kind: None,
+            database_code: None,
+            join_cancelled: None,
+            join_panic: None,
+        }
+    }
+}
+
+fn classify_database_unavailable_io(
+    phase: &'static str,
+    error: &std::io::Error,
+) -> DatabaseUnavailableDiagnostic {
+    DatabaseUnavailableDiagnostic {
+        io_kind: Some(error.kind()),
+        raw_os_error: error.raw_os_error(),
+        ..DatabaseUnavailableDiagnostic::new(phase, "io")
+    }
+}
+
+fn classify_database_unavailable_join(
+    phase: &'static str,
+    error: &tokio::task::JoinError,
+) -> DatabaseUnavailableDiagnostic {
+    DatabaseUnavailableDiagnostic {
+        join_cancelled: Some(error.is_cancelled()),
+        join_panic: Some(error.is_panic()),
+        ..DatabaseUnavailableDiagnostic::new(phase, "join")
+    }
+}
+
+fn database_error_kind_label(kind: sqlx::error::ErrorKind) -> &'static str {
+    match kind {
+        sqlx::error::ErrorKind::UniqueViolation => "unique_violation",
+        sqlx::error::ErrorKind::ForeignKeyViolation => "foreign_key_violation",
+        sqlx::error::ErrorKind::NotNullViolation => "not_null_violation",
+        sqlx::error::ErrorKind::CheckViolation => "check_violation",
+        sqlx::error::ErrorKind::ExclusionViolation => "exclusion_violation",
+        sqlx::error::ErrorKind::Other => "other",
+        _ => "other",
+    }
+}
+
+fn bounded_database_error_code(code: &str) -> String {
+    code.chars()
+        .take(32)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn classify_database_unavailable_sqlx(
+    phase: &'static str,
+    error: &sqlx::Error,
+) -> DatabaseUnavailableDiagnostic {
+    match error {
+        sqlx::Error::Io(error) => classify_database_unavailable_io(phase, error),
+        sqlx::Error::Database(error) => DatabaseUnavailableDiagnostic {
+            database_kind: Some(database_error_kind_label(error.kind())),
+            database_code: error
+                .code()
+                .map(|code| bounded_database_error_code(code.as_ref())),
+            ..DatabaseUnavailableDiagnostic::new(phase, "database")
+        },
+        sqlx::Error::Configuration(_) => DatabaseUnavailableDiagnostic::new(phase, "configuration"),
+        sqlx::Error::Protocol(_) => DatabaseUnavailableDiagnostic::new(phase, "protocol"),
+        sqlx::Error::PoolTimedOut => DatabaseUnavailableDiagnostic::new(phase, "pool_timed_out"),
+        sqlx::Error::PoolClosed => DatabaseUnavailableDiagnostic::new(phase, "pool_closed"),
+        sqlx::Error::WorkerCrashed => DatabaseUnavailableDiagnostic::new(phase, "worker_crashed"),
+        _ => DatabaseUnavailableDiagnostic::new(phase, "other"),
+    }
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "none",
+    }
+}
+
+fn emit_database_unavailable_diagnostic_to<W: Write>(
+    writer: &mut W,
+    diagnostic: &DatabaseUnavailableDiagnostic,
+) {
+    let io_kind = diagnostic
+        .io_kind
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let raw_os_error = diagnostic
+        .raw_os_error
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    let _ = writeln!(
+        writer,
+        "event=database_startup_failure phase={} category={} io_kind={} raw_os_error={} database_kind={} database_code={} join_cancelled={} join_panic={}",
+        diagnostic.phase,
+        diagnostic.category,
+        io_kind,
+        raw_os_error,
+        diagnostic.database_kind.unwrap_or("none"),
+        diagnostic.database_code.as_deref().unwrap_or("none"),
+        optional_bool_label(diagnostic.join_cancelled),
+        optional_bool_label(diagnostic.join_panic),
+    );
+}
+
+fn emit_database_unavailable_diagnostic(diagnostic: &DatabaseUnavailableDiagnostic) {
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    emit_database_unavailable_diagnostic_to(&mut stderr, diagnostic);
+}
+
+fn database_unavailable_from_diagnostic(
+    diagnostic: DatabaseUnavailableDiagnostic,
+) -> StartupRecoveryReason {
+    emit_database_unavailable_diagnostic(&diagnostic);
+    StartupRecoveryReason::DatabaseUnavailable
+}
+
+fn database_unavailable_from_io(
+    phase: &'static str,
+    error: &std::io::Error,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_io(phase, error))
+}
+
+fn database_unavailable_from_sqlx(
+    phase: &'static str,
+    error: &sqlx::Error,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_sqlx(phase, error))
+}
+
+fn database_unavailable_from_join(
+    phase: &'static str,
+    error: &tokio::task::JoinError,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_join(phase, error))
+}
+
+fn database_unavailable_for_phase(
+    phase: &'static str,
+    category: &'static str,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(DatabaseUnavailableDiagnostic::new(phase, category))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RewardActivationRelation {
     PreActivation,
@@ -10393,7 +10564,7 @@ async fn try_start_database(
     apply_pending_restore_intent(app_private_data, &database_path).await?;
     let database_exists = database_path
         .try_exists()
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+        .map_err(|error| database_unavailable_from_io("database_try_exists", &error))?;
     let supported_schema_version = supported_schema_version();
 
     let (existing_schema_version, legacy_m5_schema) = if database_exists {
@@ -10468,14 +10639,12 @@ impl DatabaseRuntime {
         local_date: acm_os_domain::LocalDate,
     ) -> Result<Option<PathBuf>, StartupRecoveryReason> {
         let _guard = self.daily_backup_lock.lock().await;
-        let pool = self
-            ._pool
-            .as_ref()
-            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
-        let root = self
-            .app_private_data
-            .as_ref()
-            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
+        let pool = self._pool.as_ref().ok_or_else(|| {
+            database_unavailable_for_phase("daily_backup_pool_missing", "runtime_state")
+        })?;
+        let root = self.app_private_data.as_ref().ok_or_else(|| {
+            database_unavailable_for_phase("daily_backup_app_data_missing", "runtime_state")
+        })?;
         let directory = root.join("backups/daily");
         let filename_prefix = format!("daily-{}-", local_date.to_iso_string());
         if published_backup_with_prefix_exists(&directory, &filename_prefix)? {
@@ -11735,26 +11904,29 @@ async fn acquire_startup_lock(
             .read(true)
             .write(true)
             .open(lock_path)
-            .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+            .map_err(|error| database_unavailable_from_io("startup_lock_open", &error))?;
         let deadline = Instant::now() + timeout;
 
         loop {
             match lock.try_lock() {
                 Ok(()) => return Ok(lock),
                 Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(_)) => {
-                    return Err(StartupRecoveryReason::DatabaseUnavailable);
+                Err(TryLockError::Error(error)) => {
+                    return Err(database_unavailable_from_io("startup_lock_try", &error));
                 }
             }
 
             if Instant::now() >= deadline {
-                return Err(StartupRecoveryReason::DatabaseUnavailable);
+                return Err(database_unavailable_for_phase(
+                    "startup_lock_timeout",
+                    "timeout",
+                ));
             }
             thread::sleep(STARTUP_LOCK_RETRY_INTERVAL);
         }
     })
     .await
-    .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?
+    .map_err(|error| database_unavailable_from_join("startup_lock_worker_join", &error))?
 }
 
 fn supported_schema_version() -> i64 {
@@ -11776,7 +11948,7 @@ async fn connect_read_only(path: &Path) -> Result<SqlitePool, StartupRecoveryRea
         .max_connections(1)
         .connect_with(options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_read_only_open", &error))
 }
 
 async fn connect_read_write(path: &Path) -> Result<SqlitePool, StartupRecoveryReason> {
@@ -11792,7 +11964,7 @@ async fn connect_read_write(path: &Path) -> Result<SqlitePool, StartupRecoveryRe
         .max_connections(1)
         .connect_with(options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_read_write_open", &error))
 }
 
 async fn connect_special_migration(path: &Path) -> Result<SqliteConnection, StartupRecoveryReason> {
@@ -11806,7 +11978,7 @@ async fn connect_special_migration(path: &Path) -> Result<SqliteConnection, Star
 
     SqliteConnection::connect_with(&options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_special_migration_open", &error))
 }
 
 async fn run_migrations(
@@ -11836,10 +12008,9 @@ async fn run_migrations(
         .run_to(SPECIAL_FK_OFF_MIGRATION_VERSION, &mut special_connection)
         .await
         .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
-    special_connection
-        .close()
-        .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+    special_connection.close().await.map_err(|error| {
+        database_unavailable_from_sqlx("database_special_migration_close", &error)
+    })?;
 
     let normal_pool = connect_read_write(database_path).await?;
     migrator
@@ -29113,6 +29284,118 @@ mod tests {
                 reason: StartupRecoveryReason::IntegrityCheckFailed,
             }
         );
+    }
+
+    #[test]
+    fn database_unavailable_diagnostic_writer_ignores_write_failures() {
+        struct FailingWriter;
+
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("expected test failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let diagnostic = DatabaseUnavailableDiagnostic::new("startup_lock_timeout", "timeout");
+        emit_database_unavailable_diagnostic_to(&mut FailingWriter, &diagnostic);
+    }
+
+    #[test]
+    fn database_unavailable_diagnostic_writer_preserves_bounded_event_shape() {
+        let diagnostic = DatabaseUnavailableDiagnostic {
+            database_kind: Some("other"),
+            database_code: Some(bounded_database_error_code("SQLITE_BUSY/secret")),
+            ..DatabaseUnavailableDiagnostic::new("database_read_only_open", "database")
+        };
+        let mut output = Vec::new();
+
+        emit_database_unavailable_diagnostic_to(&mut output, &diagnostic);
+
+        assert_eq!(
+            String::from_utf8(output).expect("diagnostic must be UTF-8"),
+            "event=database_startup_failure phase=database_read_only_open category=database io_kind=none raw_os_error=none database_kind=other database_code=SQLITE_BUSY_secret join_cancelled=none join_panic=none\n"
+        );
+    }
+
+    #[test]
+    fn database_unavailable_io_diagnostic_retains_kind_and_raw_os_error() {
+        let permission_error =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not emitted");
+        let permission_diagnostic =
+            classify_database_unavailable_io("startup_lock_open", &permission_error);
+        assert_eq!(permission_diagnostic.phase, "startup_lock_open");
+        assert_eq!(
+            permission_diagnostic.io_kind,
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(permission_diagnostic.raw_os_error, None);
+
+        let raw_error = std::io::Error::from_raw_os_error(32);
+        let raw_diagnostic = classify_database_unavailable_io("startup_lock_open", &raw_error);
+        assert_eq!(raw_diagnostic.io_kind, Some(raw_error.kind()));
+        assert_eq!(raw_diagnostic.raw_os_error, Some(32));
+        assert_eq!(
+            database_unavailable_from_io("startup_lock_open", &raw_error),
+            StartupRecoveryReason::DatabaseUnavailable
+        );
+    }
+
+    #[test]
+    fn database_unavailable_sqlx_io_diagnostic_retains_io_evidence() {
+        let expected_kind = std::io::Error::from_raw_os_error(32).kind();
+        let error = sqlx::Error::Io(std::io::Error::from_raw_os_error(32));
+        let diagnostic = classify_database_unavailable_sqlx("database_read_only_open", &error);
+
+        assert_eq!(diagnostic.phase, "database_read_only_open");
+        assert_eq!(diagnostic.category, "io");
+        assert_eq!(diagnostic.io_kind, Some(expected_kind));
+        assert_eq!(diagnostic.raw_os_error, Some(32));
+        assert_eq!(diagnostic.database_kind, None);
+        assert_eq!(diagnostic.database_code, None);
+    }
+
+    #[tokio::test]
+    async fn database_unavailable_join_diagnostic_is_bounded_and_non_panicking() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let error = task
+            .await
+            .expect_err("aborted task must return a JoinError");
+        let diagnostic = classify_database_unavailable_join("startup_lock_worker_join", &error);
+
+        assert_eq!(diagnostic.phase, "startup_lock_worker_join");
+        assert_eq!(diagnostic.category, "join");
+        assert_eq!(diagnostic.join_cancelled, Some(true));
+        assert_eq!(diagnostic.join_panic, Some(false));
+        assert_eq!(diagnostic.io_kind, None);
+        assert_eq!(diagnostic.raw_os_error, None);
+    }
+
+    #[tokio::test]
+    async fn database_unavailable_join_diagnostic_reports_panicking_task() {
+        let task = tokio::spawn(async { std::panic::resume_unwind(Box::new(())) });
+        let error = task
+            .await
+            .expect_err("panicking task must return a JoinError");
+        let diagnostic = classify_database_unavailable_join("startup_lock_worker_join", &error);
+
+        assert_eq!(diagnostic.phase, "startup_lock_worker_join");
+        assert_eq!(diagnostic.category, "join");
+        assert_eq!(diagnostic.join_cancelled, Some(false));
+        assert_eq!(diagnostic.join_panic, Some(true));
+    }
+
+    #[test]
+    fn database_error_code_is_bounded_and_token_safe() {
+        assert_eq!(
+            bounded_database_error_code("SQLITE_BUSY/secret"),
+            "SQLITE_BUSY_secret"
+        );
+        assert_eq!(bounded_database_error_code(&"x".repeat(64)).len(), 32);
     }
 
     #[tokio::test]
