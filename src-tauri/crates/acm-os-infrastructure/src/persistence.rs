@@ -15522,22 +15522,22 @@ mod tests {
         confirm_knowledge_markdown_deleted, confirm_knowledge_understanding, create_personal_note,
         delete_personal_note, import_codeforces_contest, knowledge_relocation_candidates,
         list_knowledge_candidates, load_knowledge_detail, load_or_generate_today_snapshot,
-        preview_today_extra_suggestions, preview_today_replan, process_problem_solved_reward,
-        query_workspace_configuration, rebind_knowledge_node, rebuild_knowledge_index,
-        rebuild_knowledge_relations, register_knowledge_candidate, reorder_today_snapshot,
-        resolve_knowledge_identity_conflict, reveal_review_help, review_focus, review_help_drawer,
-        review_history, search_knowledge_index, set_knowledge_candidate_disposition,
-        start_or_resume_review, transition_problem_lifecycle, update_problem_mastery_evidence,
-        void_review, weekly_acm_budget_for_date, ContestImportDraft, ContestImportPort,
-        ContestImportSource, ContestImportSourceError, ContestImportStatus,
-        ContestProblemSlotDraft, ContestReadPort, PersonalNoteError, PersonalNotePatchError,
-        PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType, ProblemLifecyclePort,
-        ProblemSolvedQualificationInput, ProblemSolvedRewardPort, ProblemSolvedRewardRequest,
-        ReviewCompletionInput, ReviewFailureReason, StartupGateStatus, StartupRecoveryReason,
-        StatementAssetDraft, StatementSnapshotDraft, SubmissionFact, TodaySnapshotPort,
-        WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule, WorkspaceConfigurationDraft,
-        WorkspaceConfigurationError, WorkspaceConfigurationStatus, WorkspacePathField,
-        INITIAL_PROBLEM_MARKDOWN,
+        load_reward_account, preview_today_extra_suggestions, preview_today_replan,
+        process_problem_solved_reward, query_workspace_configuration, rebind_knowledge_node,
+        rebuild_knowledge_index, rebuild_knowledge_relations, register_knowledge_candidate,
+        reorder_today_snapshot, resolve_knowledge_identity_conflict, reveal_review_help,
+        review_focus, review_help_drawer, review_history, search_knowledge_index,
+        set_knowledge_candidate_disposition, start_or_resume_review, transition_problem_lifecycle,
+        update_problem_mastery_evidence, void_review, weekly_acm_budget_for_date,
+        ContestImportDraft, ContestImportPort, ContestImportSource, ContestImportSourceError,
+        ContestImportStatus, ContestProblemSlotDraft, ContestReadPort, PersonalNoteError,
+        PersonalNotePatchError, PersonalNoteReadPort, PersonalNoteReadState, ProblemIdentityType,
+        ProblemLifecyclePort, ProblemSolvedQualificationInput, ProblemSolvedRewardPort,
+        ProblemSolvedRewardRequest, ReviewCompletionInput, ReviewFailureReason, StartupGateStatus,
+        StartupRecoveryReason, StatementAssetDraft, StatementSnapshotDraft, SubmissionFact,
+        TodaySnapshotPort, WeeklyAcmBudgetPort, WeeklyAcmBudgetSchedule,
+        WorkspaceConfigurationDraft, WorkspaceConfigurationError, WorkspaceConfigurationStatus,
+        WorkspacePathField, INITIAL_PROBLEM_MARKDOWN,
     };
     use sqlx::migrate::{Migration, MigrationType, Migrator};
     use sqlx::{Executor, SqlSafeStr};
@@ -29965,6 +29965,113 @@ mod tests {
         assert_eq!(
             reopened.load_custom_reward(&first.custom_reward_id).await,
             Ok(archived)
+        );
+    }
+
+    #[tokio::test]
+    async fn r11b_a1_core_reward_lifecycle_persists_across_restart() {
+        let directory = TempDir::new().expect("R11B-A1 lifecycle database");
+        let archived = {
+            let runtime = start_database(directory.path()).await;
+            assert!(!acm_os_application::is_reward_active(&runtime)
+                .await
+                .expect("fresh Reward state"));
+            assert_eq!(
+                load_reward_account(&runtime)
+                    .await
+                    .expect("fresh Reward account"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+
+            acm_os_application::activate_reward(&runtime)
+                .await
+                .expect("activate Reward");
+            assert!(acm_os_application::is_reward_active(&runtime)
+                .await
+                .expect("active Reward state"));
+            assert_eq!(
+                load_reward_account(&runtime)
+                    .await
+                    .expect("activated Reward account"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+
+            let created =
+                acm_os_application::create_custom_reward(&runtime, "  Reading time  ", 25)
+                    .await
+                    .expect("create custom Reward");
+            assert_eq!(created.name, "Reading time");
+            assert_eq!(created.coin_cost, 25);
+            assert_eq!(
+                created.status,
+                acm_os_application::CustomRewardStatus::Active
+            );
+
+            let edited = acm_os_application::update_custom_reward(
+                &runtime,
+                &created.custom_reward_id,
+                "  Reading hour  ",
+                40,
+            )
+            .await
+            .expect("edit custom Reward");
+            assert_eq!(edited.name, "Reading hour");
+            assert_eq!(edited.coin_cost, 40);
+            assert_eq!(
+                acm_os_application::list_custom_rewards(&runtime)
+                    .await
+                    .expect("list edited Reward"),
+                vec![edited]
+            );
+
+            let archived =
+                acm_os_application::archive_custom_reward(&runtime, &created.custom_reward_id)
+                    .await
+                    .expect("archive custom Reward");
+            assert_eq!(
+                archived.status,
+                acm_os_application::CustomRewardStatus::Archived
+            );
+            assert_eq!(
+                load_reward_account(&runtime)
+                    .await
+                    .expect("account after definition lifecycle"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+            archived
+        };
+
+        let reopened = start_database(directory.path()).await;
+        assert!(acm_os_application::is_reward_active(&reopened)
+            .await
+            .expect("reopened Reward state"));
+        assert_eq!(
+            load_reward_account(&reopened)
+                .await
+                .expect("reopened Reward account"),
+            acm_os_application::RewardAccountSummary {
+                xp_balance: 0,
+                coin_balance: 0,
+                level: 1,
+            }
+        );
+        assert_eq!(
+            acm_os_application::list_custom_rewards(&reopened)
+                .await
+                .expect("reopened custom Rewards"),
+            vec![archived]
         );
     }
 
