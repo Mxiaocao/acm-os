@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test:shells": "node --test scripts/startup-shells.test.mjs",
     "test:dom-shells": "node --test scripts/dom-shells.test.mjs",
+    "test:reward-page": "node --test scripts/reward-page.test.mjs",
     "test:accessibility": "node --test scripts/accessibility-css.test.mjs",
     "test:visual-consistency": "node --test scripts/visual-consistency.test.mjs",
     "benchmark:performance": "node --experimental-strip-types scripts/performance-benchmark.ts",
@@ -21,7 +22,8 @@
     "@tauri-apps/api": "^2",
     "katex": "^0.18.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

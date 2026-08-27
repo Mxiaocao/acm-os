@@ -59,6 +59,8 @@ test("semantic detail lists keep definition grids separate from full-width item 
   assert.match(css, /\.detail-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(150px,\s*0\.35fr\)\s+minmax\(0,\s*1fr\);/);
   assert.match(css, /ul\.detail-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/);
   assert.match(css, /ul\.detail-list li\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;/);
+  assert.match(css, /ul\.detail-list li > div\s*\{\s*min-width:\s*0;\s*overflow-wrap:\s*anywhere;/);
+  assert.match(css, /\.modal-backdrop > div > h2\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
 });
 
 test("sanitized Codeforces statements retain readable metadata and section hierarchy", async () => {

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getAppShellStatus, type AppShellStatusDto } from "../ipc/app-shell";
 import { getFoundationStatus, type FoundationStatus } from "../ipc/foundation";
 import type { WorkspaceStatusDto } from "../ipc/workspace";
-import { parseAppRoute } from "./routing";
+import { parseAppRoute, type NormalPage } from "./routing";
 import { installChineseUiTranslation } from "./translation";
 import {
   LoadingShell,
@@ -142,12 +142,13 @@ function routeAnnouncement(
   return route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found";
 }
 
-function normalPageLabel(page: "today" | "contests" | "problems" | "knowledge" | "settings"): string {
+function normalPageLabel(page: NormalPage): string {
   const labels = {
     today: "Today",
     contests: "Contests",
     problems: "我的题库",
     knowledge: "Knowledge",
+    reward: "Reward",
     settings: "Settings",
   };
   return labels[page];

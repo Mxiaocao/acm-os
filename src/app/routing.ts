@@ -1,4 +1,4 @@
-export type NormalPage = "today" | "contests" | "problems" | "knowledge" | "settings";
+export type NormalPage = "today" | "contests" | "problems" | "knowledge" | "reward" | "settings";
 
 export type AppRoute =
   | { kind: "normal"; page: NormalPage }
@@ -13,6 +13,7 @@ const NORMAL_ROUTES: Readonly<Record<string, NormalPage>> = {
   "/contests": "contests",
   "/problems": "problems",
   "/knowledge": "knowledge",
+  "/reward": "reward",
   "/settings": "settings",
 };
 

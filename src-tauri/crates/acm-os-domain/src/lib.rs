@@ -99,6 +99,7 @@ pub enum ReviewCycleDirective {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProblemLifecycleDecision {
+    pub action: ProblemLifecycleAction,
     pub previous_status: LearningStatus,
     pub next_status: LearningStatus,
     pub review_cycle: ReviewCycleDirective,
@@ -163,6 +164,7 @@ impl ProblemLifecycleEngine {
         };
 
         Ok(ProblemLifecycleDecision {
+            action,
             previous_status: status,
             next_status,
             review_cycle,
@@ -245,6 +247,267 @@ impl ReviewSchedulingEngine {
         marked_understood_on: LocalDate,
     ) -> Result<LocalDate, InvalidLocalDate> {
         marked_understood_on.checked_add_days(Self::FIRST_COLD_START_DAYS)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedSemanticKind {
+    LearningCompletion,
+    ContestPersonalSolve,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedQualification {
+    Qualifying,
+    NonQualifying,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedEvaluationReason {
+    ExplicitlyAcceptedDigested,
+    MechanicalReentry,
+    InsufficientDigestion,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedEvaluationState {
+    Qualifying,
+    NonQualifying,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemSolvedPolicyOutcome {
+    NeedsQualification,
+    PreActivationZero,
+    NonQualifyingZero,
+    AttemptQualifiedPositive,
+    AlreadyRewardedZero,
+    OutOfScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProblemSolvedRewardDecision {
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: &'static str,
+    pub policy_key: &'static str,
+    pub policy_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProblemSolvedPolicyContext {
+    pub semantic_kind: ProblemSolvedSemanticKind,
+    pub activation_relation: ProblemSolvedActivationRelation,
+    pub evaluation: Option<ProblemSolvedEvaluationState>,
+    pub positive_claim_exists: bool,
+}
+
+pub struct ProblemSolvedPolicy;
+
+impl ProblemSolvedPolicy {
+    pub const POLICY_KEY: &'static str = "problem_solved_v1";
+    pub const POLICY_VERSION: i64 = 1;
+    pub const POSITIVE_XP: i64 = 100;
+    pub const POSITIVE_COIN: i64 = 100;
+
+    pub fn decide(context: ProblemSolvedPolicyContext) -> ProblemSolvedPolicyOutcome {
+        use ProblemSolvedActivationRelation::PreActivation;
+        use ProblemSolvedEvaluationState::{NonQualifying, Qualifying};
+        use ProblemSolvedPolicyOutcome::*;
+        if context.semantic_kind != ProblemSolvedSemanticKind::LearningCompletion {
+            return OutOfScope;
+        }
+        if context.activation_relation == PreActivation {
+            return PreActivationZero;
+        }
+        match context.evaluation {
+            None => NeedsQualification,
+            Some(NonQualifying) => NonQualifyingZero,
+            Some(Qualifying) if context.positive_claim_exists => AlreadyRewardedZero,
+            Some(Qualifying) => AttemptQualifiedPositive,
+        }
+    }
+
+    pub const fn reward_decision(
+        outcome: ProblemSolvedPolicyOutcome,
+    ) -> Option<ProblemSolvedRewardDecision> {
+        use ProblemSolvedPolicyOutcome::*;
+        let (xp_amount, coin_amount, decision_reason) = match outcome {
+            PreActivationZero => (0, 0, "pre_activation"),
+            NonQualifyingZero => (0, 0, "non_qualifying"),
+            AttemptQualifiedPositive => {
+                (Self::POSITIVE_XP, Self::POSITIVE_COIN, "qualified_positive")
+            }
+            AlreadyRewardedZero => (0, 0, "already_rewarded"),
+            NeedsQualification | OutOfScope => return None,
+        };
+        Some(ProblemSolvedRewardDecision {
+            xp_amount,
+            coin_amount,
+            decision_reason,
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        })
+    }
+
+    pub const fn evaluation_state(
+        qualification: ProblemSolvedQualification,
+    ) -> ProblemSolvedEvaluationState {
+        match qualification {
+            ProblemSolvedQualification::Qualifying => ProblemSolvedEvaluationState::Qualifying,
+            ProblemSolvedQualification::NonQualifying => {
+                ProblemSolvedEvaluationState::NonQualifying
+            }
+        }
+    }
+
+    pub const fn reason_is_valid(
+        qualification: ProblemSolvedQualification,
+        reason: ProblemSolvedEvaluationReason,
+    ) -> bool {
+        matches!(
+            (qualification, reason),
+            (
+                ProblemSolvedQualification::Qualifying,
+                ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::MechanicalReentry
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::InsufficientDigestion
+            ) | (
+                ProblemSolvedQualification::NonQualifying,
+                ProblemSolvedEvaluationReason::Other
+            )
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRewardActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRewardPolicyContext {
+    pub attempt_type: ReviewAttemptType,
+    pub judgement: ReviewJudgement,
+    pub ordinal: Option<u64>,
+    pub activation_relation: ReviewRewardActivationRelation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewRewardDecision {
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: &'static str,
+    pub policy_key: &'static str,
+    pub policy_version: i64,
+}
+
+pub struct ReviewRewardPolicy;
+
+impl ReviewRewardPolicy {
+    pub const POLICY_KEY: &'static str = "review_reward_v1";
+    pub const POLICY_VERSION: i64 = 1;
+
+    pub fn decide(context: ReviewRewardPolicyContext) -> Option<ReviewRewardDecision> {
+        let valid_ordinal_shape = match context.attempt_type {
+            ReviewAttemptType::EarlyCheck => context.ordinal.is_none(),
+            ReviewAttemptType::FirstColdStart | ReviewAttemptType::LongTermReview => {
+                context.ordinal.is_some_and(|ordinal| ordinal > 0)
+            }
+        };
+        if !valid_ordinal_shape {
+            return None;
+        }
+        use ReviewRewardActivationRelation::PreActivation;
+        if context.activation_relation == PreActivation {
+            return Some(Self::zero("pre_activation"));
+        }
+        if context.attempt_type == ReviewAttemptType::EarlyCheck {
+            return Some(Self::zero("early_check"));
+        }
+        if context.judgement != ReviewJudgement::Mastered {
+            return Some(Self::zero("not_mastered"));
+        }
+        let ordinal = context.ordinal?;
+        let amount = match ordinal {
+            1 => 20,
+            2 => 30,
+            3 => 40,
+            _ => 50,
+        };
+        Some(ReviewRewardDecision {
+            xp_amount: amount,
+            coin_amount: amount,
+            decision_reason: "scheduled_mastered",
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        })
+    }
+
+    const fn zero(reason: &'static str) -> ReviewRewardDecision {
+        ReviewRewardDecision {
+            xp_amount: 0,
+            coin_amount: 0,
+            decision_reason: reason,
+            policy_key: Self::POLICY_KEY,
+            policy_version: Self::POLICY_VERSION,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RewardLevel(u64);
+
+impl RewardLevel {
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardLevelError {
+    NegativeXp,
+}
+
+pub struct RewardLevelPolicy;
+
+impl RewardLevelPolicy {
+    pub fn derive(xp: i64) -> Result<RewardLevel, RewardLevelError> {
+        if xp < 0 {
+            return Err(RewardLevelError::NegativeXp);
+        }
+        let xp = xp as u128;
+        let mut lower = 1_u64;
+        let mut upper = xp as u64 + 2;
+
+        while upper - lower > 1 {
+            let candidate = lower + (upper - lower) / 2;
+            if Self::threshold_is_reached(candidate, xp) {
+                lower = candidate;
+            } else {
+                upper = candidate;
+            }
+        }
+        Ok(RewardLevel(lower))
+    }
+
+    fn threshold_is_reached(level: u64, xp: u128) -> bool {
+        let lower_factor = u128::from(level - 1);
+        let upper_factor = u128::from(level) + 2;
+        lower_factor <= (xp / 25) / upper_factor
     }
 }
 
@@ -1163,6 +1426,203 @@ mod tests {
     }
 
     #[test]
+    fn r4c1_review_reward_policy_maps_frozen_cases() {
+        use ReviewAttemptType::{EarlyCheck, FirstColdStart, LongTermReview};
+        use ReviewJudgement::{Fail, Mastered, Partial};
+
+        let decision = |attempt_type, judgement, ordinal, pre_activation| {
+            ReviewRewardPolicy::decide(ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation: if pre_activation {
+                    ReviewRewardActivationRelation::PreActivation
+                } else {
+                    ReviewRewardActivationRelation::PostActivation
+                },
+            })
+            .expect("authoritative review facts")
+        };
+        let assert_zero = |decision: ReviewRewardDecision, reason: &str| {
+            assert_eq!(decision.xp_amount, 0);
+            assert_eq!(decision.coin_amount, 0);
+            assert_eq!(decision.decision_reason, reason);
+            assert_eq!(decision.policy_key, "review_reward_v1");
+            assert_eq!(decision.policy_version, 1);
+        };
+
+        assert_zero(
+            decision(FirstColdStart, Mastered, Some(1), true),
+            "pre_activation",
+        );
+        assert_zero(decision(EarlyCheck, Mastered, None, false), "early_check");
+        assert_zero(decision(EarlyCheck, Fail, None, false), "early_check");
+        assert_zero(
+            decision(FirstColdStart, Fail, Some(1), false),
+            "not_mastered",
+        );
+        assert_zero(
+            decision(LongTermReview, Partial, Some(100), false),
+            "not_mastered",
+        );
+
+        let invalid = |attempt_type, judgement, ordinal, pre_activation| {
+            ReviewRewardPolicy::decide(ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation: if pre_activation {
+                    ReviewRewardActivationRelation::PreActivation
+                } else {
+                    ReviewRewardActivationRelation::PostActivation
+                },
+            })
+        };
+        assert_eq!(invalid(FirstColdStart, Mastered, None, false), None);
+        assert_eq!(invalid(FirstColdStart, Fail, None, false), None);
+        assert_eq!(invalid(LongTermReview, Partial, None, false), None);
+        assert_eq!(invalid(FirstColdStart, Mastered, Some(0), false), None);
+        assert_eq!(invalid(LongTermReview, Fail, Some(0), false), None);
+        assert_eq!(invalid(EarlyCheck, Mastered, Some(1), false), None);
+        assert_eq!(invalid(EarlyCheck, Fail, Some(100), false), None);
+        assert_eq!(invalid(FirstColdStart, Mastered, None, true), None);
+        assert_eq!(invalid(EarlyCheck, Mastered, Some(1), true), None);
+
+        for (ordinal, amount) in [(1, 20), (2, 30), (3, 40), (4, 50), (10, 50), (100, 50)] {
+            let decision = decision(LongTermReview, Mastered, Some(ordinal), false);
+            assert_eq!((decision.xp_amount, decision.coin_amount), (amount, amount));
+            assert_eq!(decision.decision_reason, "scheduled_mastered");
+            assert_eq!(decision.policy_key, "review_reward_v1");
+            assert_eq!(decision.policy_version, 1);
+        }
+
+        assert_eq!(
+            decision(FirstColdStart, Mastered, Some(3), false),
+            decision(LongTermReview, Mastered, Some(3), false)
+        );
+        let input = decision(LongTermReview, Mastered, Some(7), false);
+        assert_eq!(input, decision(LongTermReview, Mastered, Some(7), false));
+    }
+
+    fn r5d_threshold(level: u64) -> i128 {
+        assert!(level >= 1);
+        25_i128 * i128::from(level - 1) * (i128::from(level) + 2)
+    }
+
+    #[test]
+    fn r5c_xp_to_level_maps_frozen_boundaries() {
+        for (xp, expected_level) in [
+            (0, 1),
+            (1, 1),
+            (99, 1),
+            (100, 2),
+            (101, 2),
+            (249, 2),
+            (250, 3),
+            (449, 3),
+            (450, 4),
+            (699, 4),
+            (700, 5),
+            (999, 5),
+            (1_000, 6),
+            (1_350, 7),
+            (1_750, 8),
+            (2_200, 9),
+            (2_700, 10),
+        ] {
+            assert_eq!(
+                RewardLevelPolicy::derive(xp).map(RewardLevel::number),
+                Ok(expected_level),
+                "unexpected level for {xp} XP"
+            );
+        }
+    }
+
+    #[test]
+    fn r5c_xp_to_level_rejects_negative_input() {
+        assert_eq!(
+            RewardLevelPolicy::derive(-1),
+            Err(RewardLevelError::NegativeXp)
+        );
+        assert_eq!(
+            RewardLevelPolicy::derive(i64::MIN),
+            Err(RewardLevelError::NegativeXp)
+        );
+    }
+
+    #[test]
+    fn r5c_xp_to_level_handles_i64_max_without_overflow() {
+        let xp = i64::MAX;
+        let level = RewardLevelPolicy::derive(xp)
+            .expect("non-negative XP")
+            .number();
+        let threshold =
+            |candidate: u64| 25_u128 * u128::from(candidate - 1) * (u128::from(candidate) + 2);
+
+        assert!(level >= 1);
+        assert!(threshold(level) <= xp as u128);
+        assert!(threshold(level + 1) > xp as u128);
+    }
+
+    #[test]
+    fn r5d_i64_max_matches_exact_independent_oracle() {
+        let level = RewardLevelPolicy::derive(i64::MAX)
+            .expect("non-negative XP")
+            .number();
+
+        assert_eq!(level, 607_400_099);
+        assert_eq!(r5d_threshold(level), 9_223_372_021_815_247_450);
+        assert_eq!(r5d_threshold(level + 1), 9_223_372_052_185_252_450);
+        assert!(r5d_threshold(level) <= i128::from(i64::MAX));
+        assert!(r5d_threshold(level + 1) > i128::from(i64::MAX));
+    }
+
+    #[test]
+    fn r5d_representative_thresholds_are_inclusive() {
+        for level in [2_u64, 3, 10, 100, 1_000, 10_000, 1_000_000] {
+            let threshold = i64::try_from(r5d_threshold(level)).expect("threshold fits i64");
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold - 1).map(RewardLevel::number),
+                Ok(level - 1)
+            );
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold).map(RewardLevel::number),
+                Ok(level)
+            );
+        }
+    }
+
+    #[test]
+    fn r5d_dense_first_thousand_level_boundaries_are_exact() {
+        for level in 2_u64..=1_000 {
+            let threshold = i64::try_from(r5d_threshold(level)).expect("threshold fits i64");
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold - 1).map(RewardLevel::number),
+                Ok(level - 1),
+                "just below Level {level}"
+            );
+            assert_eq!(
+                RewardLevelPolicy::derive(threshold).map(RewardLevel::number),
+                Ok(level),
+                "at Level {level} threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn r5d_derivation_is_monotonic_over_early_xp_range() {
+        let mut previous = RewardLevelPolicy::derive(0).expect("zero XP").number();
+        for xp in 1_i64..=10_000 {
+            let current = RewardLevelPolicy::derive(xp)
+                .expect("non-negative XP")
+                .number();
+            assert!(current >= previous, "Level decreased at {xp} XP");
+            assert!(current - previous <= 1, "Level jumped at {xp} XP");
+            previous = current;
+        }
+    }
+
+    #[test]
     fn problem_lifecycle_follows_the_frozen_upsolve_path() {
         let joined = ProblemLifecycleEngine::decide(
             LearningStatus::Unstarted,
@@ -1184,6 +1644,7 @@ mod tests {
             ProblemLifecycleAction::MarkUnderstood,
         )
         .expect("mark understood");
+        assert_eq!(understood.action, ProblemLifecycleAction::MarkUnderstood);
         assert_eq!(understood.next_status, LearningStatus::WaitingColdStart);
         assert_eq!(
             understood.review_cycle,
@@ -2398,6 +2859,54 @@ mod tests {
             Err(TodayPlannerError::LaneMismatch {
                 problem_id: "wrong-lane".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn problem_solved_policy_matrix_and_fixed_decisions() {
+        use ProblemSolvedActivationRelation::{PostActivation, PreActivation};
+        use ProblemSolvedEvaluationState::{NonQualifying, Qualifying};
+        use ProblemSolvedPolicyOutcome::*;
+        let base = |relation, evaluation, claim| {
+            ProblemSolvedPolicy::decide(ProblemSolvedPolicyContext {
+                semantic_kind: ProblemSolvedSemanticKind::LearningCompletion,
+                activation_relation: relation,
+                evaluation,
+                positive_claim_exists: claim,
+            })
+        };
+        assert_eq!(base(PreActivation, None, false), PreActivationZero);
+        assert_eq!(base(PostActivation, None, false), NeedsQualification);
+        assert_eq!(
+            base(PostActivation, Some(NonQualifying), false),
+            NonQualifyingZero
+        );
+        assert_eq!(
+            base(PostActivation, Some(Qualifying), false),
+            AttemptQualifiedPositive
+        );
+        assert_eq!(
+            base(PostActivation, Some(Qualifying), true),
+            AlreadyRewardedZero
+        );
+        assert_eq!(
+            ProblemSolvedPolicy::reward_decision(AttemptQualifiedPositive),
+            Some(ProblemSolvedRewardDecision {
+                xp_amount: 100,
+                coin_amount: 100,
+                decision_reason: "qualified_positive",
+                policy_key: "problem_solved_v1",
+                policy_version: 1,
+            })
+        );
+        assert_eq!(
+            ProblemSolvedPolicy::decide(ProblemSolvedPolicyContext {
+                semantic_kind: ProblemSolvedSemanticKind::ContestPersonalSolve,
+                activation_relation: PostActivation,
+                evaluation: Some(Qualifying),
+                positive_claim_exists: false,
+            }),
+            OutOfScope
         );
     }
 }

@@ -1,3 +1,5 @@
+const MAX_EXACT_REWARD_AMOUNT: i64 = 9_007_199_254_740_991;
+const MAX_PENDING_REWARD_SOURCES: usize = 256;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
@@ -2208,6 +2210,17 @@ impl ProblemLifecyclePort for DatabaseRuntime {
         if update.rows_affected() != 1 {
             return Err(ProblemLifecycleError::InvalidTransition);
         }
+        if decision.action == acm_os_domain::ProblemLifecycleAction::MarkUnderstood {
+            sqlx::query(
+                "INSERT INTO problem_completion_occurrences \
+                 (id, problem_id, semantic_kind) VALUES (?1, ?2, 'learning_completion')",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(problem_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ProblemLifecycleError::PersistenceUnavailable)?;
+        }
         transaction
             .commit()
             .await
@@ -3887,6 +3900,7 @@ struct ReviewHistoryRow {
     started_early: i64,
     judgement_rule_version: i64,
     started_at_utc: String,
+    stable_scheduled_review_ordinal: Option<i64>,
     attempt_status: String,
     judgement: Option<String>,
     completed_at_utc: Option<String>,
@@ -4027,12 +4041,14 @@ async fn load_review_history_item_from_pool(
     let row: Option<ReviewHistoryRow> = sqlx::query_as(
         "SELECT ra.id, ra.problem_id, ra.attempt_type, \
                 ra.scheduled_due_local_date, ra.started_early, ra.judgement_rule_version, \
-                ra.started_at_utc, ra.attempt_status, ra.judgement, ra.completed_at_utc, \
+                ra.started_at_utc, srof.ordinal AS stable_scheduled_review_ordinal, \
+                ra.attempt_status, ra.judgement, ra.completed_at_utc, \
                 ra.completed_local_date, ra.final_ac, ra.first_submission_result, \
                 ra.final_result, ra.total_submissions, ra.idea_independent, \
                 ra.implementation_independent, ra.debug_independence, ra.external_help, \
                 ra.evidence_codes_json, rve.reason AS void_reason, rve.voided_at_utc \
          FROM review_attempts ra \
+         LEFT JOIN scheduled_review_ordinal_facts srof ON srof.review_attempt_id = ra.id \
          LEFT JOIN review_void_events rve ON rve.review_attempt_id = ra.id \
          WHERE ra.id = ?1",
     )
@@ -4085,6 +4101,25 @@ async fn load_review_history_item_from_pool(
         "void" => ReviewAttemptStatus::Void,
         _ => return Err(ReviewAttemptError::IntegrityViolation),
     };
+    let stable_scheduled_review_ordinal = row
+        .stable_scheduled_review_ordinal
+        .map(|ordinal| {
+            u64::try_from(ordinal)
+                .ok()
+                .filter(|ordinal| *ordinal > 0)
+                .ok_or(ReviewAttemptError::IntegrityViolation)
+        })
+        .transpose()?;
+    if stable_scheduled_review_ordinal.is_some()
+        && (status != ReviewAttemptStatus::Completed
+            || !matches!(
+                attempt.attempt_type,
+                acm_os_domain::ReviewAttemptType::FirstColdStart
+                    | acm_os_domain::ReviewAttemptType::LongTermReview
+            ))
+    {
+        return Err(ReviewAttemptError::IntegrityViolation);
+    }
     let judgement = row.judgement.as_deref().map(parse_judgement).transpose()?;
     let evidence_codes: Vec<String> = match row.evidence_codes_json {
         Some(value) => {
@@ -4171,6 +4206,7 @@ async fn load_review_history_item_from_pool(
             .map_err(|_| ReviewAttemptError::IntegrityViolation)?,
         void_reason: row.void_reason,
         voided_at_utc: row.voided_at_utc,
+        stable_scheduled_review_ordinal,
     })
 }
 
@@ -4198,6 +4234,7 @@ fn legacy_review_history_item(
         completed_local_date: item.completed_local_date,
         void_reason: item.void_reason,
         voided_at_utc: item.voided_at_utc,
+        stable_scheduled_review_ordinal: item.stable_scheduled_review_ordinal,
     }
 }
 
@@ -4691,6 +4728,48 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .collect::<Vec<_>>();
         let evidence_json = serde_json::to_string(&evidence_codes)
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        let scheduled_ordinal = match context.attempt.attempt_type {
+            acm_os_domain::ReviewAttemptType::FirstColdStart
+            | acm_os_domain::ReviewAttemptType::LongTermReview => {
+                let problem_id: i64 = sqlx::query_scalar(
+                    "SELECT problem_id FROM review_attempts WHERE id = ?1 AND attempt_status = 'in_progress'",
+                )
+                .bind(&context.attempt.attempt_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO scheduled_review_ordinal_states \
+                     (problem_id, historical_baseline, last_allocated) VALUES (?1, 0, 0)",
+                )
+                .bind(problem_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                let ordinal: i64 = sqlx::query_scalar(
+                    "UPDATE scheduled_review_ordinal_states \
+                     SET last_allocated = last_allocated + 1 \
+                     WHERE problem_id = ?1 \
+                     RETURNING last_allocated",
+                )
+                .bind(problem_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                sqlx::query(
+                    "INSERT INTO scheduled_review_ordinal_facts \
+                     (review_attempt_id, problem_id, ordinal) VALUES (?1, ?2, ?3)",
+                )
+                .bind(&context.attempt.attempt_id)
+                .bind(problem_id)
+                .bind(ordinal)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+                Some(ordinal)
+            }
+            acm_os_domain::ReviewAttemptType::EarlyCheck => None,
+        };
         let completed_at_utc: String = sqlx::query_scalar(
             "UPDATE review_attempts SET attempt_status = 'completed', judgement = ?2, \
                     completed_local_date = ?3, final_ac = ?4, first_submission_result = ?5, \
@@ -4715,6 +4794,20 @@ impl ReviewAttemptPort for DatabaseRuntime {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        if let Some(ordinal) = scheduled_ordinal {
+            let fact_exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM scheduled_review_ordinal_facts \
+                 WHERE review_attempt_id = ?1 AND ordinal = ?2",
+            )
+            .bind(&context.attempt.attempt_id)
+            .bind(ordinal)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+            if fact_exists != 1 {
+                return Err(ReviewAttemptError::IntegrityViolation);
+            }
+        }
         match scheduling.cycle {
             acm_os_domain::ReviewCycleCompletion::Keep => {}
             acm_os_domain::ReviewCycleCompletion::Advance {
@@ -4771,6 +4864,11 @@ impl ReviewAttemptPort for DatabaseRuntime {
             .commit()
             .await
             .map_err(|_| ReviewAttemptError::PersistenceUnavailable)?;
+        // Review completion is durable before the immediate Reward attempt. Any
+        // failure remains recoverable through pending Review source processing.
+        let _ = self
+            .process_review_reward(&context.attempt.attempt_id)
+            .await;
         let problem_id = context
             .attempt
             .problem_id
@@ -9464,7 +9562,7 @@ async fn try_start_database(
     apply_pending_restore_intent(app_private_data, &database_path).await?;
     let database_exists = database_path
         .try_exists()
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+        .map_err(|error| database_unavailable_from_io("database_try_exists", &error))?;
     let supported_schema_version = supported_schema_version();
 
     let (existing_schema_version, legacy_m5_schema) = if database_exists {
@@ -9539,14 +9637,12 @@ impl DatabaseRuntime {
         local_date: acm_os_domain::LocalDate,
     ) -> Result<Option<PathBuf>, StartupRecoveryReason> {
         let _guard = self.daily_backup_lock.lock().await;
-        let pool = self
-            ._pool
-            .as_ref()
-            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
-        let root = self
-            .app_private_data
-            .as_ref()
-            .ok_or(StartupRecoveryReason::DatabaseUnavailable)?;
+        let pool = self._pool.as_ref().ok_or_else(|| {
+            database_unavailable_for_phase("daily_backup_pool_missing", "runtime_state")
+        })?;
+        let root = self.app_private_data.as_ref().ok_or_else(|| {
+            database_unavailable_for_phase("daily_backup_app_data_missing", "runtime_state")
+        })?;
         let directory = root.join("backups/daily");
         let filename_prefix = format!("daily-{}-", local_date.to_iso_string());
         if published_backup_with_prefix_exists(&directory, &filename_prefix)? {
@@ -10536,26 +10632,29 @@ async fn acquire_startup_lock(
             .read(true)
             .write(true)
             .open(lock_path)
-            .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+            .map_err(|error| database_unavailable_from_io("startup_lock_open", &error))?;
         let deadline = Instant::now() + timeout;
 
         loop {
             match lock.try_lock() {
                 Ok(()) => return Ok(lock),
                 Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(_)) => {
-                    return Err(StartupRecoveryReason::DatabaseUnavailable);
+                Err(TryLockError::Error(error)) => {
+                    return Err(database_unavailable_from_io("startup_lock_try", &error));
                 }
             }
 
             if Instant::now() >= deadline {
-                return Err(StartupRecoveryReason::DatabaseUnavailable);
+                return Err(database_unavailable_for_phase(
+                    "startup_lock_timeout",
+                    "timeout",
+                ));
             }
             thread::sleep(STARTUP_LOCK_RETRY_INTERVAL);
         }
     })
     .await
-    .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?
+    .map_err(|error| database_unavailable_from_join("startup_lock_worker_join", &error))?
 }
 
 fn supported_schema_version() -> i64 {
@@ -10577,7 +10676,7 @@ async fn connect_read_only(path: &Path) -> Result<SqlitePool, StartupRecoveryRea
         .max_connections(1)
         .connect_with(options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_read_only_open", &error))
 }
 
 async fn connect_read_write(path: &Path) -> Result<SqlitePool, StartupRecoveryReason> {
@@ -10593,7 +10692,7 @@ async fn connect_read_write(path: &Path) -> Result<SqlitePool, StartupRecoveryRe
         .max_connections(1)
         .connect_with(options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_read_write_open", &error))
 }
 
 async fn connect_special_migration(path: &Path) -> Result<SqliteConnection, StartupRecoveryReason> {
@@ -10607,7 +10706,7 @@ async fn connect_special_migration(path: &Path) -> Result<SqliteConnection, Star
 
     SqliteConnection::connect_with(&options)
         .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)
+        .map_err(|error| database_unavailable_from_sqlx("database_special_migration_open", &error))
 }
 
 async fn run_migrations(
@@ -10637,10 +10736,9 @@ async fn run_migrations(
         .run_to(SPECIAL_FK_OFF_MIGRATION_VERSION, &mut special_connection)
         .await
         .map_err(|_| StartupRecoveryReason::MigrationFailed)?;
-    special_connection
-        .close()
-        .await
-        .map_err(|_| StartupRecoveryReason::DatabaseUnavailable)?;
+    special_connection.close().await.map_err(|error| {
+        database_unavailable_from_sqlx("database_special_migration_close", &error)
+    })?;
 
     let normal_pool = connect_read_write(database_path).await?;
     migrator
@@ -10735,6 +10833,12 @@ async fn validate_schema_contract(
             | 25
             | 26
             | 27
+            | 28
+            | 29
+            | 30
+            | 31
+            | 32
+            | 33
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -10869,6 +10973,24 @@ async fn validate_schema_contract(
     }
     if schema_version >= 26 {
         validate_external_identity_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 28 {
+        validate_problem_completion_occurrence_contract(pool).await?;
+    }
+    if schema_version >= 29 {
+        validate_scheduled_review_ordinal_contract(pool).await?;
+    }
+    if schema_version >= 30 {
+        validate_reward_durable_core_contract(pool, schema_version).await?;
+    }
+    if schema_version >= 31 {
+        validate_problem_solved_reward_contract(pool).await?;
+    }
+    if schema_version >= 32 {
+        validate_custom_reward_contract(pool).await?;
+    }
+    if schema_version >= 33 {
+        validate_custom_reward_redemption_contract(pool).await?;
     }
     Ok(())
 }
@@ -11205,6 +11327,416 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
             "problem_external_identities_one_key_per_problem_contest".to_owned(),
             "problem_external_identities".to_owned(),
         ));
+        expected_objects.sort();
+    }
+    if schema_version >= 28 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "problem_completion_occurrences_by_problem".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+                "problem_completion_occurrences".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 29 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "review_attempts_id_problem_unique".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "completed_scheduled_review_no_delete".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "completed_scheduled_review_no_update".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_completion_requires_ordinal".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_attempt_identity_immutable".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_attempt_must_complete".to_owned(),
+                "review_attempts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_baseline_immutable".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_fact_insert_guard".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_facts_no_delete".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_facts_no_update".to_owned(),
+                "scheduled_review_ordinal_facts".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_last_monotonic".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "scheduled_review_ordinal_states_no_delete".to_owned(),
+                "scheduled_review_ordinal_states".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 30 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "reward_events_by_problem".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_events_by_recorded_at".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_ledger_entries_by_resource".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_activation_state".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_events".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_grants".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_ledger_entries".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_review_event_sources".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_activation_state_no_delete".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_activation_state_transition_guard".to_owned(),
+                "reward_activation_state".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_events_no_delete".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_events_no_update".to_owned(),
+                "reward_events".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_insert_guard".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_no_delete".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_no_update".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_insert_guard".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_no_delete".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_no_update".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_ledger_entries_no_delete".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_ledger_entries_no_update".to_owned(),
+                "reward_ledger_entries".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_exclusive".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_insert_guard".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_no_delete".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_sources_no_update".to_owned(),
+                "reward_problem_completion_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_exclusive".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_insert_guard".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_no_delete".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_review_sources_no_update".to_owned(),
+                "reward_review_event_sources".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 31 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "reward_problem_completion_evaluations_by_problem".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "index".to_owned(),
+                "reward_problem_solved_positive_claims_by_event".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_insert_guard".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_no_delete".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_completion_evaluations_no_update".to_owned(),
+                "reward_problem_completion_evaluations".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_insert_guard".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_no_delete".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_problem_solved_positive_claims_no_update".to_owned(),
+                "reward_problem_solved_positive_claims".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_problem_solved_insert_guard".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grants_problem_solved_positive_claim".to_owned(),
+                "reward_grants".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 32 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "custom_rewards_by_status_updated".to_owned(),
+                "custom_rewards".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_rewards".to_owned(),
+                "custom_rewards".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 33 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "custom_reward_redemptions_by_reward".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_refunds".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemptions_no_update".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemptions_no_delete".to_owned(),
+                "custom_reward_redemptions".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refunds_no_update".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refunds_no_delete".to_owned(),
+                "custom_reward_refunds".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_insert_guard".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_no_update".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_redemption_origins_no_delete".to_owned(),
+                "custom_reward_redemption_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_insert_guard".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_no_update".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "custom_reward_refund_origins_no_delete".to_owned(),
+                "custom_reward_refund_ledger_origins".to_owned(),
+            ),
+            (
+                "trigger".to_owned(),
+                "reward_grant_ledger_origins_exactly_one_insert_guard".to_owned(),
+                "reward_grant_ledger_origins".to_owned(),
+            ),
+        ]);
         expected_objects.sort();
     }
     expected_objects
@@ -12175,6 +12707,35 @@ async fn validate_table_columns(
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
+        "problem_completion_occurrences" => "PRAGMA table_xinfo('problem_completion_occurrences')",
+        "scheduled_review_ordinal_states" => {
+            "PRAGMA table_xinfo('scheduled_review_ordinal_states')"
+        }
+        "scheduled_review_ordinal_facts" => "PRAGMA table_xinfo('scheduled_review_ordinal_facts')",
+        "reward_activation_state" => "PRAGMA table_xinfo('reward_activation_state')",
+        "reward_events" => "PRAGMA table_xinfo('reward_events')",
+        "reward_problem_completion_event_sources" => {
+            "PRAGMA table_xinfo('reward_problem_completion_event_sources')"
+        }
+        "reward_review_event_sources" => "PRAGMA table_xinfo('reward_review_event_sources')",
+        "reward_grants" => "PRAGMA table_xinfo('reward_grants')",
+        "reward_ledger_entries" => "PRAGMA table_xinfo('reward_ledger_entries')",
+        "reward_grant_ledger_origins" => "PRAGMA table_xinfo('reward_grant_ledger_origins')",
+        "reward_problem_completion_evaluations" => {
+            "PRAGMA table_xinfo('reward_problem_completion_evaluations')"
+        }
+        "reward_problem_solved_positive_claims" => {
+            "PRAGMA table_xinfo('reward_problem_solved_positive_claims')"
+        }
+        "custom_rewards" => "PRAGMA table_xinfo('custom_rewards')",
+        "custom_reward_redemptions" => "PRAGMA table_xinfo('custom_reward_redemptions')",
+        "custom_reward_refunds" => "PRAGMA table_xinfo('custom_reward_refunds')",
+        "custom_reward_redemption_ledger_origins" => {
+            "PRAGMA table_xinfo('custom_reward_redemption_ledger_origins')"
+        }
+        "custom_reward_refund_ledger_origins" => {
+            "PRAGMA table_xinfo('custom_reward_refund_ledger_origins')"
+        }
         _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
     };
     let actual: Vec<SqliteColumnContract> = sqlx::query_as(sql)
@@ -12722,7 +13283,7 @@ mod tests {
 
     #[test]
     fn production_migrator_embeds_the_special_version() {
-        assert_eq!(supported_schema_version(), 27);
+        assert_eq!(supported_schema_version(), 33);
         assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
@@ -12930,11 +13491,11 @@ mod tests {
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            27
+            33
         );
-        validate_schema_contract(&runtime_pool, 27)
+        validate_schema_contract(&runtime_pool, 33)
             .await
-            .expect("schema 27 contract");
+            .expect("schema 33 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -12950,7 +13511,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -14892,7 +15453,7 @@ mod tests {
             let cycle_id = uuid::Uuid::now_v7().to_string();
             sqlx::query("INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES (?1, ?2, 1, 'active', 0, 1, '2026-08-02')")
                 .bind(&cycle_id).bind(problem_id).execute(pool).await.expect("cycle");
-            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-02', 0, 1, '2026-08-02T00:00:00.000Z', ?4, 'mastered', '2026-08-02', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
+            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'early_check', 'completed', '2026-08-02', 1, 1, '2026-08-02T00:00:00.000Z', ?4, 'mastered', '2026-08-02', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
                 .bind(uuid::Uuid::now_v7().to_string()).bind(problem_id).bind(&cycle_id)
                 .bind(format!("2026-08-02T00:00:0{position}.000Z")).execute(pool).await.expect("mastered review");
             let suggestion = acm_os_application::load_knowledge_reevaluation_suggestion(
@@ -14913,7 +15474,7 @@ mod tests {
                 .fetch_one(pool)
                 .await
                 .expect("first cycle");
-        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'first_cold_start', 'completed', '2026-08-03', 0, 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z', 'mastered', '2026-08-03', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
+        sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES (?1, ?2, ?3, 'early_check', 'completed', '2026-08-03', 1, 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z', 'mastered', '2026-08-03', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]')")
             .bind(uuid::Uuid::now_v7().to_string()).bind(first_id).bind(first_cycle).execute(pool).await.expect("duplicate mastered review");
         assert_eq!(
             acm_os_application::load_knowledge_reevaluation_suggestion(
@@ -15781,7 +16342,30 @@ mod tests {
             .expect("disable foreign keys for schema 25 fixture");
         let mut transaction = pool.begin().await.expect("schema 25 transaction");
         sqlx::raw_sql(
-            "CREATE TABLE _contests_schema_25 (\
+            "DROP TRIGGER completed_scheduled_review_no_delete;\
+             DROP TRIGGER completed_scheduled_review_no_update;\
+             DROP TRIGGER scheduled_review_completion_requires_ordinal;\
+             DROP TRIGGER scheduled_review_ordinal_attempt_identity_immutable;\
+             DROP TRIGGER scheduled_review_ordinal_attempt_must_complete;\
+             DROP INDEX review_attempts_id_problem_unique;\
+             DROP TABLE custom_reward_refund_ledger_origins;\
+             DROP TABLE custom_reward_redemption_ledger_origins;\
+             DROP TABLE custom_reward_refunds;\
+             DROP TABLE custom_reward_redemptions;\
+             DROP TABLE custom_rewards;\
+             DROP TABLE reward_problem_solved_positive_claims;\
+             DROP TABLE reward_problem_completion_evaluations;\
+             DROP TABLE reward_grant_ledger_origins;\
+             DROP TABLE reward_ledger_entries;\
+             DROP TABLE reward_grants;\
+             DROP TABLE reward_problem_completion_event_sources;\
+             DROP TABLE reward_review_event_sources;\
+             DROP TABLE reward_events;\
+             DROP TABLE reward_activation_state;\
+             DROP TABLE scheduled_review_ordinal_facts;\
+             DROP TABLE scheduled_review_ordinal_states;\
+             DROP TABLE problem_completion_occurrences;\
+             CREATE TABLE _contests_schema_25 (\
                  id INTEGER PRIMARY KEY,\
                  platform TEXT NOT NULL CHECK (platform = 'codeforces'),\
                  external_contest_key INTEGER NOT NULL CHECK (external_contest_key > 0),\
@@ -15822,7 +16406,7 @@ mod tests {
              ALTER TABLE _contests_schema_25 RENAME TO contests;\
              DROP TABLE problems;\
              ALTER TABLE _problems_schema_25 RENAME TO problems;\
-             DELETE FROM _sqlx_migrations WHERE version IN (26, 27);\
+             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 33;\
              UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
         )
         .execute(&mut *transaction)
@@ -16016,23 +16600,23 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 27);
+        assert_eq!(ledger_count, 33);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 27);
-        validate_schema_contract(pool, 27)
+        assert_eq!(schema_generation, 33);
+        validate_schema_contract(pool, 33)
             .await
-            .expect("generation 27 schema contract");
+            .expect("generation 33 schema contract");
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -16153,7 +16737,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
         let ids_after: (i64, i64, String, String) = sqlx::query_as(
@@ -16215,7 +16799,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("highest successful migration"),
-            27
+            33
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -16247,13 +16831,13 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
-        validate_schema_contract(pool, 27)
+        validate_schema_contract(pool, 33)
             .await
-            .expect("schema 27 contract after migration");
+            .expect("schema 33 contract after migration");
         drop(upgraded);
         assert_eq!(
             start_database(directory.path()).await.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -16550,7 +17134,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -16682,12 +17266,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 27)
+        validate_schema_contract(pool, 33)
             .await
-            .expect("schema 27 contract");
+            .expect("schema 33 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
         let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), \
@@ -17510,7 +18094,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -17545,7 +18129,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-27-"));
+            .starts_with("schema-10-to-33-"));
     }
 
     #[tokio::test]
@@ -22745,7 +23329,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -22815,7 +23399,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -22848,7 +23432,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -22893,7 +23477,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -23058,7 +23642,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
     }
 
@@ -23246,40 +23830,31 @@ mod tests {
         let backup = acm_os_application::create_manual_backup(&runtime)
             .await
             .expect("manual backup");
+        fs::remove_file(&backup.path)
+            .expect("replace generated current backup with historical candidate");
         let older_pool = connect_read_write(Path::new(&backup.path))
             .await
             .expect("older candidate database");
-        rewrite_as_schema_25(&older_pool).await;
-        sqlx::raw_sql(
-            "DROP INDEX contest_placements_by_path;\
-             DROP INDEX contest_placements_unique_identity;\
-             DROP TABLE contest_placements;\
-             DROP TABLE contest_series;\
-             DROP TABLE contest_families;\
-             DROP TABLE knowledge_file_bindings;\
-             CREATE TABLE knowledge_file_bindings (\
-                 knowledge_node_id TEXT PRIMARY KEY REFERENCES knowledge_nodes(id) ON DELETE RESTRICT,\
-                 vault_relative_path TEXT NOT NULL UNIQUE CHECK (length(vault_relative_path) > 0),\
-                 windows_file_key TEXT,\
-                 content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),\
-                 location_state TEXT NOT NULL CHECK (\
-                     location_state IN ('ready', 'location_anomaly', 'confirmed_deleted')\
-                 ),\
-                 updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
-             );\
-             UPDATE app_metadata SET schema_generation = 22 WHERE singleton = 1;\
-             DELETE FROM _sqlx_migrations WHERE version IN (23, 24, 25, 26, 27);",
-        )
-        .execute(&older_pool)
-        .await
-        .expect("recreate schema 22 candidate");
+        MIGRATOR
+            .run_to(22, &older_pool)
+            .await
+            .expect("apply historical migrations through schema 22");
+        assert_eq!(
+            inspect_schema_version(&older_pool)
+                .await
+                .expect("schema 22 version"),
+            22
+        );
+        validate_schema_contract(&older_pool, 22)
+            .await
+            .expect("schema 22 contract");
         older_pool.close().await;
 
         let preview = acm_os_application::preview_system_restore_candidate(&runtime, backup.path)
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 27);
+        assert_eq!(preview.supported_schema_version, 33);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -23761,7 +24336,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -23853,7 +24428,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-27-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-33-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -23978,7 +24553,7 @@ mod tests {
                 "CREATE TABLE app_metadata (\
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                     schema_generation INTEGER NOT NULL CHECK (schema_generation > 0) \
-                        CHECK (schema_generation < 28), \
+                        CHECK (schema_generation < 34), \
                     created_at_utc TEXT NOT NULL \
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
                 )",
@@ -24113,7 +24688,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -24147,7 +24722,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -24964,7 +25539,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 27 }
+            &StartupGateStatus::Ready { schema_version: 33 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -25380,5 +25955,4629 @@ mod tests {
             acm_os_domain::TodayCandidateReason::DueLongTermReview
         );
         assert_eq!(today.entries[0].status, TodayEntryStatus::NotStarted);
+    }
+    fn reward_decision(xp: i64, coin: i64) -> RewardDecision {
+        RewardDecision {
+            xp_amount: xp,
+            coin_amount: coin,
+            decision_reason: "test structural decision".to_owned(),
+            policy_key: "test-policy".to_owned(),
+            policy_version: 1,
+        }
+    }
+
+    async fn r2c2_runtime_with_sources(directory: &TempDir) -> DatabaseRuntime {
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::Ready { schema_version: 33 }
+        );
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        sqlx::raw_sql(
+            "INSERT INTO problems (id, title, source_url, identity_type) VALUES (1, 'P1', 'https://example.test/p1', 'personal');
+             INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) VALUES (1, 'long_term_review', '2026-08-24T00:00:00.000Z');
+             INSERT INTO review_cycles (id, problem_id, cycle_number, cycle_status, stage, schedule_rule_version, next_due_local_date) VALUES ('00000000-0000-0000-0000-000000000301', 1, 1, 'active', 1, 1, '2026-08-24');
+             INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, started_at_utc, completed_at_utc, judgement, completed_local_date, final_ac, first_submission_result, final_result, total_submissions, idea_independent, implementation_independent, debug_independence, external_help, evidence_codes_json) VALUES ('00000000-0000-0000-0000-000000000302', 1, '00000000-0000-0000-0000-000000000301', 'early_check', 'completed', '2026-08-24', 1, 1, '2026-08-24T12:00:00.000Z', '2026-08-24T12:34:56.502Z', 'mastered', '2026-08-24', 1, 'accepted', 'accepted', 1, 1, 1, 'not_needed', 'none', '[]');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000311', 1, 'contest_personal_solve', '2026-08-24T12:34:56.501Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000312', 1, 'contest_personal_solve', '2026-08-24T12:34:56.503Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000313', 1, 'contest_personal_solve', '2026-08-24T12:34:56.499Z');
+             INSERT INTO problem_completion_occurrences (id, problem_id, semantic_kind, recorded_at_utc) VALUES ('00000000-0000-0000-0000-000000000314', 1, 'contest_personal_solve', '2026-02-30T12:34:56.500Z');
+             UPDATE reward_activation_state SET activation_status = 'active', activated_at_utc = '2026-08-24T12:34:56.500Z' WHERE singleton = 1;",
+        )
+        .execute(pool)
+        .await
+        .expect("R2C2 sources");
+        runtime
+    }
+
+    async fn scheduled_ordinal_snapshot(pool: &SqlitePool) -> (i64, i64, i64, Vec<i64>) {
+        let state = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT historical_baseline, last_allocated
+             FROM scheduled_review_ordinal_states",
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("ordinal state")
+        .unwrap_or((0, 0));
+        let facts: Vec<i64> = sqlx::query_scalar(
+            "SELECT ordinal FROM scheduled_review_ordinal_facts ORDER BY ordinal",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("ordinal facts");
+        (state.0, state.1, facts.len() as i64, facts)
+    }
+
+    #[tokio::test]
+    async fn mark_understood_emits_one_durable_learning_completion_occurrence() {
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+
+        let initial = runtime
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
+            .await
+            .expect("initial lifecycle");
+        assert_eq!(
+            initial.learning_status,
+            acm_os_domain::LearningStatus::Unstarted
+        );
+        assert!(initial.active_review_cycle.is_none());
+
+        let pending = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            today,
+        )
+        .await
+        .expect("join upsolve");
+        assert_eq!(
+            pending.learning_status,
+            acm_os_domain::LearningStatus::UpsolvePending
+        );
+
+        transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            today,
+        )
+        .await
+        .expect("start learning");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("non-completion lifecycle does not emit"),
+            0
+        );
+        let waiting = transition_problem_lifecycle(
+            &runtime,
+            &problem,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+            today,
+        )
+        .await
+        .expect("mark understood");
+        assert_eq!(
+            waiting.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
+        let cycle = waiting.active_review_cycle.expect("active first cycle");
+        assert_eq!(cycle.cycle_number, 1);
+        assert_eq!(cycle.stage, 0);
+        assert_eq!(cycle.schedule_rule_version, 1);
+        assert_eq!(cycle.next_due_local_date.to_iso_string(), "2026-08-14");
+
+        let pool = runtime._pool.as_ref().expect("ready pool");
+        let canonical_problem_id: i64 = sqlx::query_scalar(
+            "SELECT problem_id FROM problem_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = '1979' \
+               AND external_problem_key = 'A'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("canonical problem id");
+        let occurrence: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("learning completion occurrence");
+        assert_eq!(occurrence.1, canonical_problem_id);
+        assert_eq!(occurrence.2, "learning_completion");
+        let occurrence_id = uuid::Uuid::parse_str(&occurrence.0).expect("occurrence UUID");
+        assert_eq!(occurrence_id.get_version_num(), 7);
+        chrono::DateTime::parse_from_rfc3339(&occurrence.3).expect("recorded UTC timestamp");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(pool)
+                .await
+                .expect("occurrence count"),
+            1
+        );
+
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let restored = restarted
+            .load_problem_lifecycle(&generic_problem_identity(&problem))
+            .await
+            .expect("restored lifecycle");
+        assert_eq!(
+            restored.learning_status,
+            acm_os_domain::LearningStatus::WaitingColdStart
+        );
+        assert_eq!(
+            restored
+                .active_review_cycle
+                .expect("restored active cycle")
+                .next_due_local_date
+                .to_iso_string(),
+            "2026-08-14"
+        );
+        let restored_occurrence: (String, i64, String, String) = sqlx::query_as(
+            "SELECT id, problem_id, semantic_kind, recorded_at_utc \
+             FROM problem_completion_occurrences",
+        )
+        .fetch_one(restarted._pool.as_ref().expect("restarted pool"))
+        .await
+        .expect("restored occurrence");
+        assert_eq!(restored_occurrence, occurrence);
+    }
+
+    #[tokio::test]
+    async fn immediate_mark_understood_retry_does_not_duplicate_occurrence() {
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-08-11").expect("local date");
+        for action in [
+            acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+        ] {
+            transition_problem_lifecycle(&runtime, &problem, action, today)
+                .await
+                .expect("first authority path");
+        }
+        assert_eq!(
+            transition_problem_lifecycle(
+                &runtime,
+                &problem,
+                acm_os_domain::ProblemLifecycleAction::MarkUnderstood,
+                today,
+            )
+            .await,
+            Err(ProblemLifecycleError::InvalidTransition)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_completion_occurrences")
+                .fetch_one(runtime._pool.as_ref().expect("ready pool"))
+                .await
+                .expect("occurrence count after retry"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn s4e_mastered_partial_and_fail_each_allocate_one_ordinal() {
+        for (label, input, expected) in [
+            (
+                "mastered",
+                mastered_input(),
+                acm_os_domain::ReviewJudgement::Mastered,
+            ),
+            (
+                "partial",
+                {
+                    let mut input = mastered_input();
+                    input.external_help = acm_os_domain::ExternalHelpLevel::SolvingHint;
+                    input.failure_reasons = vec![ReviewFailureReason::KeyPropertyBlocked];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Partial,
+            ),
+            (
+                "fail",
+                {
+                    let mut input = mastered_input();
+                    input.final_ac = false;
+                    input.first_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.final_submission.result = acm_os_domain::SubmissionResult::WrongAnswer;
+                    input.total_submissions = 1;
+                    input.failure_reasons = vec![ReviewFailureReason::ImplementationError];
+                    input
+                },
+                acm_os_domain::ReviewJudgement::Fail,
+            ),
+        ] {
+            let (_directory, runtime, _vault, _problems, _problem, attempt) =
+                review_ready_fixture().await;
+            let completed = complete_review(
+                &runtime,
+                &attempt.attempt_id,
+                input,
+                acm_os_domain::LocalDate::parse_iso("2026-08-14").expect("completion"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} completion failed: {error:?}"));
+            assert_eq!(completed.judgement, expected, "{label}");
+            assert_eq!(
+                scheduled_ordinal_snapshot(runtime._pool.as_ref().expect("pool")).await,
+                (0, 1, 1, vec![1]),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r11b_core_reward_lifecycle_persists_across_restart() {
+        let directory = TempDir::new().expect("R11B-A1 lifecycle database");
+        let archived = {
+            let runtime = start_database(directory.path()).await;
+            assert!(!acm_os_application::is_reward_active(&runtime)
+                .await
+                .expect("fresh Reward state"));
+            assert_eq!(
+                acm_os_application::load_reward_account(&runtime)
+                    .await
+                    .expect("fresh Reward account"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+
+            acm_os_application::activate_reward(&runtime)
+                .await
+                .expect("activate Reward");
+            assert!(acm_os_application::is_reward_active(&runtime)
+                .await
+                .expect("active Reward state"));
+            assert_eq!(
+                acm_os_application::load_reward_account(&runtime)
+                    .await
+                    .expect("activated Reward account"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+
+            let created =
+                acm_os_application::create_custom_reward(&runtime, "  Reading time  ", 25)
+                    .await
+                    .expect("create custom Reward");
+            assert_eq!(created.name, "Reading time");
+            assert_eq!(created.coin_cost, 25);
+            assert_eq!(
+                created.status,
+                acm_os_application::CustomRewardStatus::Active
+            );
+
+            let edited = acm_os_application::update_custom_reward(
+                &runtime,
+                &created.custom_reward_id,
+                "  Reading hour  ",
+                40,
+            )
+            .await
+            .expect("edit custom Reward");
+            assert_eq!(edited.name, "Reading hour");
+            assert_eq!(edited.coin_cost, 40);
+            assert_eq!(
+                acm_os_application::list_custom_rewards(&runtime)
+                    .await
+                    .expect("list edited Reward"),
+                vec![edited]
+            );
+
+            let archived =
+                acm_os_application::archive_custom_reward(&runtime, &created.custom_reward_id)
+                    .await
+                    .expect("archive custom Reward");
+            assert_eq!(
+                archived.status,
+                acm_os_application::CustomRewardStatus::Archived
+            );
+            assert_eq!(
+                acm_os_application::load_reward_account(&runtime)
+                    .await
+                    .expect("account after definition lifecycle"),
+                acm_os_application::RewardAccountSummary {
+                    xp_balance: 0,
+                    coin_balance: 0,
+                    level: 1,
+                }
+            );
+            archived
+        };
+
+        let reopened = start_database(directory.path()).await;
+        assert!(acm_os_application::is_reward_active(&reopened)
+            .await
+            .expect("reopened Reward state"));
+        assert_eq!(
+            acm_os_application::load_reward_account(&reopened)
+                .await
+                .expect("reopened Reward account"),
+            acm_os_application::RewardAccountSummary {
+                xp_balance: 0,
+                coin_balance: 0,
+                level: 1,
+            }
+        );
+        assert_eq!(
+            acm_os_application::list_custom_rewards(&reopened)
+                .await
+                .expect("reopened custom Rewards"),
+            vec![archived]
+        );
+    }
+
+    #[tokio::test]
+    async fn r11b_redemption_refund_lifecycle_is_durable_and_historical() {
+        let directory = TempDir::new().expect("R11B-A2 lifecycle database");
+        let reward_id;
+        let redemption_id = uuid::Uuid::now_v7().to_string();
+        let refund_id = uuid::Uuid::now_v7().to_string();
+        {
+            let runtime = r2c2_runtime_with_sources(&directory).await;
+            runtime.activate_reward().await.expect("activate Reward");
+            runtime
+                .process_reward(
+                    &RewardSource::ProblemCompletionOccurrence {
+                        occurrence_id: "00000000-0000-0000-0000-000000000311".to_owned(),
+                    },
+                    &reward_decision(0, 100),
+                )
+                .await
+                .expect("fund Coin");
+            assert_eq!(
+                runtime.load_reward_account().await.expect("funded account"),
+                RewardAccount {
+                    xp_balance: 0,
+                    coin_balance: 100,
+                }
+            );
+
+            let reward = runtime
+                .create_custom_reward("  Reward dinner  ", 40)
+                .await
+                .expect("create custom Reward");
+            reward_id = reward.custom_reward_id.clone();
+            let first = runtime
+                .redeem_custom_reward(&redemption_id, &reward_id)
+                .await
+                .expect("redeem Reward");
+            assert_eq!(
+                first.disposition,
+                CustomRewardRedemptionDisposition::Processed
+            );
+            assert_eq!(first.redemption.coin_cost_paid, 40);
+            assert_eq!(
+                runtime
+                    .load_reward_account()
+                    .await
+                    .expect("debited account"),
+                RewardAccount {
+                    xp_balance: 0,
+                    coin_balance: 60,
+                }
+            );
+            let retry = runtime
+                .redeem_custom_reward(&redemption_id, &reward_id)
+                .await
+                .expect("redeem retry");
+            assert_eq!(
+                retry.disposition,
+                CustomRewardRedemptionDisposition::AlreadyProcessed
+            );
+            assert_eq!(retry.redemption, first.redemption);
+            assert_eq!(
+                runtime
+                    .list_custom_reward_redemption_history()
+                    .await
+                    .expect("redemption history")
+                    .into_iter()
+                    .filter(|entry| entry.redemption_id == redemption_id)
+                    .collect::<Vec<_>>()
+                    .len(),
+                1
+            );
+
+            let edited = runtime
+                .update_custom_reward(&reward_id, "Reward dinner", 70)
+                .await
+                .expect("reprice Reward");
+            assert_eq!(edited.coin_cost, 70);
+            assert_eq!(
+                runtime
+                    .load_custom_reward_redemption(&redemption_id)
+                    .await
+                    .expect("historical redemption")
+                    .coin_cost_paid,
+                40
+            );
+        }
+
+        let runtime = start_database(directory.path()).await;
+        assert!(runtime.reward_is_active().await.expect("reopened state"));
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("reopened account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 60,
+            }
+        );
+        let history_before_refund = runtime
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("reopened redemption history");
+        let redeemed = history_before_refund
+            .iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("reopened redemption")
+            .clone();
+        assert_eq!(redeemed.coin_cost_paid, 40);
+        assert_eq!(redeemed.refund_id, None);
+        assert_eq!(
+            runtime
+                .load_custom_reward(&reward_id)
+                .await
+                .expect("reopened Reward")
+                .coin_cost,
+            70
+        );
+
+        let first_refund = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund Reward");
+        assert_eq!(
+            first_refund.disposition,
+            CustomRewardRefundDisposition::Processed
+        );
+        assert_eq!(
+            runtime
+                .load_reward_account()
+                .await
+                .expect("refunded account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 100,
+            }
+        );
+        let refund_retry = runtime
+            .refund_custom_reward(&refund_id, &redemption_id)
+            .await
+            .expect("refund retry");
+        assert_eq!(
+            refund_retry.disposition,
+            CustomRewardRefundDisposition::AlreadyProcessed
+        );
+        assert_eq!(refund_retry.refund, first_refund.refund);
+        let refunded_history = runtime
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("refunded history")
+            .into_iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("refunded redemption");
+        assert_eq!(refunded_history.coin_cost_paid, 40);
+        assert_eq!(
+            refunded_history.refund_id.as_deref(),
+            Some(refund_id.as_str())
+        );
+        assert!(refunded_history.refunded_at_utc.is_some());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM custom_reward_refund_ledger_origins",
+            )
+            .fetch_one(runtime._pool.as_ref().expect("refund pool"))
+            .await
+            .expect("refund authority count"),
+            1
+        );
+
+        drop(runtime);
+        let reopened = start_database(directory.path()).await;
+        assert!(reopened.reward_is_active().await.expect("final state"));
+        assert_eq!(
+            reopened.load_reward_account().await.expect("final account"),
+            RewardAccount {
+                xp_balance: 0,
+                coin_balance: 100,
+            }
+        );
+        let final_history = reopened
+            .list_custom_reward_redemption_history()
+            .await
+            .expect("final history");
+        let final_entry = final_history
+            .iter()
+            .find(|entry| entry.redemption_id == redemption_id)
+            .expect("final redemption authority");
+        assert_eq!(final_entry.coin_cost_paid, 40);
+        assert_eq!(final_entry.refund_id.as_deref(), Some(refund_id.as_str()));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM custom_reward_refunds")
+                .fetch_one(reopened._pool.as_ref().expect("final pool"))
+                .await
+                .expect("final refund count"),
+            1
+        );
+    }
+}
+
+use acm_os_application::{
+    ProblemSolvedEvaluationRecord, ProblemSolvedPositiveClaimRecord,
+    ProblemSolvedQualificationInput, ProblemSolvedRewardDisposition, ProblemSolvedRewardError,
+    ProblemSolvedRewardPort, ProblemSolvedRewardResult, ProblemSolvedSourceContext,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatabaseUnavailableDiagnostic {
+    phase: &'static str,
+    category: &'static str,
+    io_kind: Option<std::io::ErrorKind>,
+    raw_os_error: Option<i32>,
+    database_kind: Option<&'static str>,
+    database_code: Option<String>,
+    join_cancelled: Option<bool>,
+    join_panic: Option<bool>,
+}
+
+impl DatabaseUnavailableDiagnostic {
+    fn new(phase: &'static str, category: &'static str) -> Self {
+        Self {
+            phase,
+            category,
+            io_kind: None,
+            raw_os_error: None,
+            database_kind: None,
+            database_code: None,
+            join_cancelled: None,
+            join_panic: None,
+        }
+    }
+}
+
+fn classify_database_unavailable_io(
+    phase: &'static str,
+    error: &std::io::Error,
+) -> DatabaseUnavailableDiagnostic {
+    DatabaseUnavailableDiagnostic {
+        io_kind: Some(error.kind()),
+        raw_os_error: error.raw_os_error(),
+        ..DatabaseUnavailableDiagnostic::new(phase, "io")
+    }
+}
+
+fn classify_database_unavailable_join(
+    phase: &'static str,
+    error: &tokio::task::JoinError,
+) -> DatabaseUnavailableDiagnostic {
+    DatabaseUnavailableDiagnostic {
+        join_cancelled: Some(error.is_cancelled()),
+        join_panic: Some(error.is_panic()),
+        ..DatabaseUnavailableDiagnostic::new(phase, "join")
+    }
+}
+
+fn database_error_kind_label(kind: sqlx::error::ErrorKind) -> &'static str {
+    match kind {
+        sqlx::error::ErrorKind::UniqueViolation => "unique_violation",
+        sqlx::error::ErrorKind::ForeignKeyViolation => "foreign_key_violation",
+        sqlx::error::ErrorKind::NotNullViolation => "not_null_violation",
+        sqlx::error::ErrorKind::CheckViolation => "check_violation",
+        sqlx::error::ErrorKind::ExclusionViolation => "exclusion_violation",
+        sqlx::error::ErrorKind::Other => "other",
+        _ => "other",
+    }
+}
+
+fn bounded_database_error_code(code: &str) -> String {
+    code.chars()
+        .take(32)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn classify_database_unavailable_sqlx(
+    phase: &'static str,
+    error: &sqlx::Error,
+) -> DatabaseUnavailableDiagnostic {
+    match error {
+        sqlx::Error::Io(error) => classify_database_unavailable_io(phase, error),
+        sqlx::Error::Database(error) => DatabaseUnavailableDiagnostic {
+            database_kind: Some(database_error_kind_label(error.kind())),
+            database_code: error
+                .code()
+                .map(|code| bounded_database_error_code(code.as_ref())),
+            ..DatabaseUnavailableDiagnostic::new(phase, "database")
+        },
+        sqlx::Error::Configuration(_) => DatabaseUnavailableDiagnostic::new(phase, "configuration"),
+        sqlx::Error::Protocol(_) => DatabaseUnavailableDiagnostic::new(phase, "protocol"),
+        sqlx::Error::PoolTimedOut => DatabaseUnavailableDiagnostic::new(phase, "pool_timed_out"),
+        sqlx::Error::PoolClosed => DatabaseUnavailableDiagnostic::new(phase, "pool_closed"),
+        sqlx::Error::WorkerCrashed => DatabaseUnavailableDiagnostic::new(phase, "worker_crashed"),
+        _ => DatabaseUnavailableDiagnostic::new(phase, "other"),
+    }
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "none",
+    }
+}
+
+fn emit_database_unavailable_diagnostic_to<W: Write>(
+    writer: &mut W,
+    diagnostic: &DatabaseUnavailableDiagnostic,
+) {
+    let io_kind = diagnostic
+        .io_kind
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let raw_os_error = diagnostic
+        .raw_os_error
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    let _ = writeln!(
+        writer,
+        "event=database_startup_failure phase={} category={} io_kind={} raw_os_error={} database_kind={} database_code={} join_cancelled={} join_panic={}",
+        diagnostic.phase,
+        diagnostic.category,
+        io_kind,
+        raw_os_error,
+        diagnostic.database_kind.unwrap_or("none"),
+        diagnostic.database_code.as_deref().unwrap_or("none"),
+        optional_bool_label(diagnostic.join_cancelled),
+        optional_bool_label(diagnostic.join_panic),
+    );
+}
+
+fn emit_database_unavailable_diagnostic(diagnostic: &DatabaseUnavailableDiagnostic) {
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    emit_database_unavailable_diagnostic_to(&mut stderr, diagnostic);
+}
+
+fn database_unavailable_from_diagnostic(
+    diagnostic: DatabaseUnavailableDiagnostic,
+) -> StartupRecoveryReason {
+    emit_database_unavailable_diagnostic(&diagnostic);
+    StartupRecoveryReason::DatabaseUnavailable
+}
+
+fn database_unavailable_from_io(
+    phase: &'static str,
+    error: &std::io::Error,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_io(phase, error))
+}
+
+fn database_unavailable_from_sqlx(
+    phase: &'static str,
+    error: &sqlx::Error,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_sqlx(phase, error))
+}
+
+fn database_unavailable_from_join(
+    phase: &'static str,
+    error: &tokio::task::JoinError,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(classify_database_unavailable_join(phase, error))
+}
+
+fn database_unavailable_for_phase(
+    phase: &'static str,
+    category: &'static str,
+) -> StartupRecoveryReason {
+    database_unavailable_from_diagnostic(DatabaseUnavailableDiagnostic::new(phase, category))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewardActivationRelation {
+    PreActivation,
+    PostActivation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RewardSource {
+    ProblemCompletionOccurrence { occurrence_id: String },
+    Review { review_attempt_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewardDecision {
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: String,
+    pub policy_key: String,
+    pub policy_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardProcessingDisposition {
+    Created,
+    AlreadyProcessed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewardProcessingResult {
+    pub disposition: RewardProcessingDisposition,
+    pub reward_event_id: String,
+    pub problem_id: i64,
+    pub source_occurred_at_utc: String,
+    pub activation_relation: String,
+    pub xp_amount: i64,
+    pub coin_amount: i64,
+    pub decision_reason: String,
+    pub policy_key: String,
+    pub policy_version: i64,
+    pub ledger_entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewardActivationState {
+    pub activated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewardAccount {
+    pub xp_balance: i64,
+    pub coin_balance: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardStatus {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomReward {
+    pub custom_reward_id: String,
+    pub name: String,
+    pub coin_cost: i64,
+    pub status: CustomRewardStatus,
+    pub created_at_utc: String,
+    pub updated_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardError {
+    Unavailable,
+    InvalidIdentity,
+    InvalidName,
+    InvalidCoinCost,
+    NotFound,
+    Archived,
+    InvalidStatus,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemption {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRedemptionDisposition {
+    Processed,
+    AlreadyProcessed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemptionResult {
+    pub disposition: CustomRewardRedemptionDisposition,
+    pub redemption: CustomRewardRedemption,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRefund {
+    pub refund_id: String,
+    pub redemption_id: String,
+    pub refunded_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRefundDisposition {
+    Processed,
+    AlreadyProcessed,
+    AlreadyRefunded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRefundResult {
+    pub disposition: CustomRewardRefundDisposition,
+    pub refund: CustomRewardRefund,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRewardRedemptionHistory {
+    pub redemption_id: String,
+    pub custom_reward_id: String,
+    pub reward_name: String,
+    pub coin_cost_paid: i64,
+    pub redeemed_at_utc: String,
+    pub refund_id: Option<String>,
+    pub refunded_at_utc: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardHistoryError {
+    Unavailable,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRefundError {
+    Unavailable,
+    InvalidIdentity,
+    NotFound,
+    RedemptionNotFound,
+    IntentConflict,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomRewardRedemptionError {
+    Unavailable,
+    InvalidIdentity,
+    NotFound,
+    Archived,
+    RewardInactive,
+    InsufficientBalance,
+    IntentConflict,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardProcessingError {
+    Unavailable,
+    SourceNotFound,
+    SourceInvalid,
+    RewardInactive,
+    DecisionInvalid,
+    InvalidLimit,
+    DecisionConflict,
+    PositiveClaimAlreadyTaken,
+    IntegrityViolation,
+    DatabaseFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ProblemSolvedEvaluation {
+    pub problem_completion_occurrence_id: String,
+    pub problem_id: i64,
+    pub qualification: String,
+    pub reason_code: String,
+    pub policy_key: String,
+    pub policy_version: i64,
+    pub evaluated_at_utc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ProblemSolvedPositiveClaim {
+    pub problem_id: i64,
+    pub reward_event_id: String,
+    pub claimed_at_utc: String,
+}
+
+fn parse_reward_utc_millis(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    if value.len() != 24
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || value.as_bytes().get(19) != Some(&b'.')
+        || value.as_bytes().get(23) != Some(&b'Z')
+    {
+        return None;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    if parsed.offset().local_minus_utc() != 0
+        || parsed.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string() != value
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn validate_custom_reward_id(value: &str) -> Result<(), CustomRewardError> {
+    if uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(CustomRewardError::InvalidIdentity)
+    }
+}
+
+fn validate_redemption_id(value: &str) -> Result<(), CustomRewardRedemptionError> {
+    if uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(CustomRewardRedemptionError::InvalidIdentity)
+    }
+}
+
+fn validate_refund_id(value: &str) -> Result<(), CustomRewardRefundError> {
+    if uuid::Uuid::parse_str(value)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(CustomRewardRefundError::InvalidIdentity)
+    }
+}
+
+fn parse_custom_reward_redemption_row(
+    redemption_id: String,
+    custom_reward_id: String,
+    coin_cost_paid: i64,
+    redeemed_at_utc: String,
+) -> Result<CustomRewardRedemption, CustomRewardRedemptionError> {
+    validate_redemption_id(&redemption_id)?;
+    if uuid::Uuid::parse_str(&custom_reward_id)
+        .ok()
+        .filter(|id| id.get_version_num() == 7)
+        .is_none()
+        || !validate_custom_reward_coin_cost(coin_cost_paid).is_ok()
+        || parse_reward_utc_millis(&redeemed_at_utc).is_none()
+    {
+        return Err(CustomRewardRedemptionError::IntegrityViolation);
+    }
+    Ok(CustomRewardRedemption {
+        redemption_id,
+        custom_reward_id,
+        coin_cost_paid,
+        redeemed_at_utc,
+    })
+}
+
+fn parse_custom_reward_refund_row(
+    refund_id: String,
+    redemption_id: String,
+    refunded_at_utc: String,
+) -> Result<CustomRewardRefund, CustomRewardRefundError> {
+    validate_refund_id(&refund_id)?;
+    if validate_redemption_id(&redemption_id).is_err()
+        || parse_reward_utc_millis(&refunded_at_utc).is_none()
+    {
+        return Err(CustomRewardRefundError::IntegrityViolation);
+    }
+    Ok(CustomRewardRefund {
+        refund_id,
+        redemption_id,
+        refunded_at_utc,
+    })
+}
+
+fn canonical_custom_reward_name(value: &str) -> Result<String, CustomRewardError> {
+    let canonical = value.trim();
+    if canonical.is_empty() {
+        Err(CustomRewardError::InvalidName)
+    } else {
+        Ok(canonical.to_owned())
+    }
+}
+
+fn validate_custom_reward_coin_cost(value: i64) -> Result<(), CustomRewardError> {
+    if (1..=MAX_EXACT_REWARD_AMOUNT).contains(&value) {
+        Ok(())
+    } else {
+        Err(CustomRewardError::InvalidCoinCost)
+    }
+}
+
+fn parse_custom_reward_row(
+    custom_reward_id: String,
+    name: String,
+    coin_cost: i64,
+    status: String,
+    created_at_utc: String,
+    updated_at_utc: String,
+) -> Result<CustomReward, CustomRewardError> {
+    validate_custom_reward_id(&custom_reward_id)?;
+    let canonical_name =
+        canonical_custom_reward_name(&name).map_err(|_| CustomRewardError::IntegrityViolation)?;
+    if canonical_name != name {
+        return Err(CustomRewardError::IntegrityViolation);
+    }
+    validate_custom_reward_coin_cost(coin_cost)
+        .map_err(|_| CustomRewardError::IntegrityViolation)?;
+    let status = match status.as_str() {
+        "active" => CustomRewardStatus::Active,
+        "archived" => CustomRewardStatus::Archived,
+        _ => return Err(CustomRewardError::InvalidStatus),
+    };
+    if parse_reward_utc_millis(&created_at_utc).is_none()
+        || parse_reward_utc_millis(&updated_at_utc).is_none()
+    {
+        return Err(CustomRewardError::IntegrityViolation);
+    }
+    Ok(CustomReward {
+        custom_reward_id,
+        name,
+        coin_cost,
+        status,
+        created_at_utc,
+        updated_at_utc,
+    })
+}
+
+fn custom_reward_mutation_time(previous: &str) -> Result<String, CustomRewardError> {
+    let previous =
+        parse_reward_utc_millis(previous).ok_or(CustomRewardError::IntegrityViolation)?;
+    let now = reward_now_utc();
+    let previous_text = previous.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    if now > previous_text {
+        return Ok(now);
+    }
+    Ok(previous
+        .checked_add_signed(chrono::Duration::milliseconds(1))
+        .ok_or(CustomRewardError::IntegrityViolation)?
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string())
+}
+
+fn reward_activation_relation(
+    source_time: chrono::DateTime<chrono::FixedOffset>,
+    activation_time: chrono::DateTime<chrono::FixedOffset>,
+) -> RewardActivationRelation {
+    if source_time <= activation_time {
+        RewardActivationRelation::PreActivation
+    } else {
+        RewardActivationRelation::PostActivation
+    }
+}
+
+impl acm_os_application::RewardPort for DatabaseRuntime {
+    async fn is_reward_active(&self) -> Result<bool, acm_os_application::RewardError> {
+        self.reward_is_active()
+            .await
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn activate_reward(&self) -> Result<(), acm_os_application::RewardError> {
+        DatabaseRuntime::activate_reward(self)
+            .await
+            .map(|_| ())
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn load_reward_account(
+        &self,
+    ) -> Result<acm_os_application::RewardAccountRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::load_reward_account(self)
+            .await
+            .map(|account| acm_os_application::RewardAccountRecord {
+                xp_balance: account.xp_balance,
+                coin_balance: account.coin_balance,
+            })
+            .map_err(map_reward_processing_error)
+    }
+
+    async fn list_custom_rewards(
+        &self,
+    ) -> Result<Vec<acm_os_application::CustomRewardRecord>, acm_os_application::RewardError> {
+        DatabaseRuntime::list_custom_rewards(self)
+            .await
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| acm_os_application::CustomRewardRecord {
+                        custom_reward_id: item.custom_reward_id,
+                        name: item.name,
+                        coin_cost: item.coin_cost,
+                        status: match item.status {
+                            CustomRewardStatus::Active => {
+                                acm_os_application::CustomRewardStatus::Active
+                            }
+                            CustomRewardStatus::Archived => {
+                                acm_os_application::CustomRewardStatus::Archived
+                            }
+                        },
+                    })
+                    .collect()
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn list_redemption_history(
+        &self,
+    ) -> Result<Vec<acm_os_application::RedemptionHistoryRecord>, acm_os_application::RewardError>
+    {
+        DatabaseRuntime::list_custom_reward_redemption_history(self)
+            .await
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| acm_os_application::RedemptionHistoryRecord {
+                        redemption_id: item.redemption_id,
+                        custom_reward_id: item.custom_reward_id,
+                        reward_name: item.reward_name,
+                        coin_cost_paid: item.coin_cost_paid,
+                        redeemed_at_utc: item.redeemed_at_utc,
+                        refund_id: item.refund_id,
+                        refunded_at_utc: item.refunded_at_utc,
+                    })
+                    .collect()
+            })
+            .map_err(|error| match error {
+                CustomRewardHistoryError::Unavailable => {
+                    acm_os_application::RewardError::PersistenceUnavailable
+                }
+                CustomRewardHistoryError::IntegrityViolation => {
+                    acm_os_application::RewardError::IntegrityViolation
+                }
+                CustomRewardHistoryError::DatabaseFailure => {
+                    acm_os_application::RewardError::DatabaseFailure
+                }
+            })
+    }
+
+    async fn create_custom_reward(
+        &self,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::create_custom_reward(self, name, coin_cost)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Active,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn update_custom_reward(
+        &self,
+        custom_reward_id: &str,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::update_custom_reward(self, custom_reward_id, name, coin_cost)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Active,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn archive_custom_reward(
+        &self,
+        custom_reward_id: &str,
+    ) -> Result<acm_os_application::CustomRewardRecord, acm_os_application::RewardError> {
+        DatabaseRuntime::archive_custom_reward(self, custom_reward_id)
+            .await
+            .map(|item| acm_os_application::CustomRewardRecord {
+                custom_reward_id: item.custom_reward_id,
+                name: item.name,
+                coin_cost: item.coin_cost,
+                status: acm_os_application::CustomRewardStatus::Archived,
+            })
+            .map_err(map_custom_reward_error)
+    }
+
+    async fn redeem_custom_reward(
+        &self,
+        redemption_id: &str,
+        custom_reward_id: &str,
+    ) -> Result<acm_os_application::RedemptionResult, acm_os_application::RewardError> {
+        DatabaseRuntime::redeem_custom_reward(self, redemption_id, custom_reward_id)
+            .await
+            .map(|result| acm_os_application::RedemptionResult {
+                disposition: match result.disposition {
+                    CustomRewardRedemptionDisposition::Processed => {
+                        acm_os_application::RedemptionDisposition::Processed
+                    }
+                    CustomRewardRedemptionDisposition::AlreadyProcessed => {
+                        acm_os_application::RedemptionDisposition::AlreadyProcessed
+                    }
+                },
+                redemption_id: result.redemption.redemption_id,
+                custom_reward_id: result.redemption.custom_reward_id,
+                coin_cost_paid: result.redemption.coin_cost_paid,
+                redeemed_at_utc: result.redemption.redeemed_at_utc,
+            })
+            .map_err(map_redemption_error)
+    }
+
+    async fn refund_custom_reward(
+        &self,
+        refund_id: &str,
+        redemption_id: &str,
+    ) -> Result<acm_os_application::RefundResult, acm_os_application::RewardError> {
+        DatabaseRuntime::refund_custom_reward(self, refund_id, redemption_id)
+            .await
+            .map(|result| acm_os_application::RefundResult {
+                disposition: match result.disposition {
+                    CustomRewardRefundDisposition::Processed => {
+                        acm_os_application::RefundDisposition::Processed
+                    }
+                    CustomRewardRefundDisposition::AlreadyProcessed => {
+                        acm_os_application::RefundDisposition::AlreadyProcessed
+                    }
+                    CustomRewardRefundDisposition::AlreadyRefunded => {
+                        acm_os_application::RefundDisposition::AlreadyRefunded
+                    }
+                },
+                refund_id: result.refund.refund_id,
+                redemption_id: result.refund.redemption_id,
+                refunded_at_utc: result.refund.refunded_at_utc,
+            })
+            .map_err(map_refund_error)
+    }
+}
+
+impl ProblemSolvedRewardPort for DatabaseRuntime {
+    async fn load_problem_solved_source(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<ProblemSolvedSourceContext, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let authority = load_reward_activation_authority(&mut transaction)
+            .await
+            .map_err(map_problem_solved_error)?;
+        let activation_at = authority
+            .activated_at_utc
+            .ok_or(ProblemSolvedRewardError::RewardInactive)?;
+        let row: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT problem_id, recorded_at_utc, semantic_kind
+             FROM problem_completion_occurrences WHERE id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let (problem_id, occurred_at_utc, semantic_kind) =
+            row.ok_or(ProblemSolvedRewardError::SourceNotFound)?;
+        let source_time = parse_reward_utc_millis(&occurred_at_utc)
+            .ok_or(ProblemSolvedRewardError::SourceInvalid)?;
+        let activation_time = parse_reward_utc_millis(&activation_at)
+            .ok_or(ProblemSolvedRewardError::IntegrityViolation)?;
+        let semantic_kind = match semantic_kind.as_str() {
+            "learning_completion" => acm_os_domain::ProblemSolvedSemanticKind::LearningCompletion,
+            "contest_personal_solve" => {
+                acm_os_domain::ProblemSolvedSemanticKind::ContestPersonalSolve
+            }
+            _ => acm_os_domain::ProblemSolvedSemanticKind::Other,
+        };
+        let activation_relation = if source_time <= activation_time {
+            acm_os_domain::ProblemSolvedActivationRelation::PreActivation
+        } else {
+            acm_os_domain::ProblemSolvedActivationRelation::PostActivation
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        Ok(ProblemSolvedSourceContext {
+            occurrence_id: occurrence_id.to_owned(),
+            problem_id,
+            semantic_kind,
+            activation_relation,
+            occurred_at_utc,
+        })
+    }
+
+    async fn load_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluationRecord>, ProblemSolvedRewardError> {
+        DatabaseRuntime::load_problem_solved_evaluation(self, occurrence_id)
+            .await
+            .map_err(map_problem_solved_error)?
+            .map(map_problem_solved_evaluation)
+            .transpose()
+    }
+
+    async fn create_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        input: &ProblemSolvedQualificationInput,
+    ) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError> {
+        let qualification = match input.qualification {
+            acm_os_domain::ProblemSolvedQualification::Qualifying => "qualifying",
+            acm_os_domain::ProblemSolvedQualification::NonQualifying => "non_qualifying",
+        };
+        let reason = match input.reason {
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested => {
+                "explicitly_accepted_digested"
+            }
+            acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry => "mechanical_reentry",
+            acm_os_domain::ProblemSolvedEvaluationReason::InsufficientDigestion => {
+                "insufficient_digestion"
+            }
+            acm_os_domain::ProblemSolvedEvaluationReason::Other => "other",
+        };
+        DatabaseRuntime::create_problem_solved_evaluation(
+            self,
+            occurrence_id,
+            problem_id,
+            qualification,
+            reason,
+            &input.evaluated_at_utc,
+        )
+        .await
+        .map_err(map_problem_solved_error)
+        .and_then(map_problem_solved_evaluation)
+    }
+
+    async fn load_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaimRecord>, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let claim = load_valid_positive_claim(pool, problem_id)
+            .await
+            .map_err(map_problem_solved_error)?;
+        Ok(claim.map(|claim| ProblemSolvedPositiveClaimRecord {
+            problem_id: claim.problem_id,
+            reward_event_id: claim.reward_event_id,
+        }))
+    }
+
+    async fn load_processed_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedRewardResult>, ProblemSolvedRewardError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ProblemSolvedRewardError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| ProblemSolvedRewardError::DatabaseFailure)?;
+        let result = load_reward_result(
+            &mut connection,
+            &RewardSource::ProblemCompletionOccurrence {
+                occurrence_id: occurrence_id.to_owned(),
+            },
+        )
+        .await
+        .map_err(map_problem_solved_error)?;
+        Ok(result.map(|result| ProblemSolvedRewardResult {
+            disposition: match result.disposition {
+                RewardProcessingDisposition::Created => ProblemSolvedRewardDisposition::Created,
+                RewardProcessingDisposition::AlreadyProcessed => {
+                    ProblemSolvedRewardDisposition::AlreadyProcessed
+                }
+            },
+            reward_event_id: result.reward_event_id,
+            problem_id: result.problem_id,
+            source_occurred_at_utc: result.source_occurred_at_utc,
+            activation_relation: result.activation_relation,
+            xp_amount: result.xp_amount,
+            coin_amount: result.coin_amount,
+            decision_reason: result.decision_reason,
+            policy_key: result.policy_key,
+            policy_version: result.policy_version,
+            ledger_entry_ids: result.ledger_entry_ids,
+        }))
+    }
+
+    async fn process_problem_solved_reward(
+        &self,
+        occurrence_id: &str,
+        decision: acm_os_domain::ProblemSolvedRewardDecision,
+    ) -> Result<ProblemSolvedRewardResult, ProblemSolvedRewardError> {
+        DatabaseRuntime::process_reward(
+            self,
+            &RewardSource::ProblemCompletionOccurrence {
+                occurrence_id: occurrence_id.to_owned(),
+            },
+            &RewardDecision {
+                xp_amount: decision.xp_amount,
+                coin_amount: decision.coin_amount,
+                decision_reason: decision.decision_reason.to_owned(),
+                policy_key: decision.policy_key.to_owned(),
+                policy_version: decision.policy_version,
+            },
+        )
+        .await
+        .map_err(map_problem_solved_error)
+        .map(|result| ProblemSolvedRewardResult {
+            disposition: match result.disposition {
+                RewardProcessingDisposition::Created => ProblemSolvedRewardDisposition::Created,
+                RewardProcessingDisposition::AlreadyProcessed => {
+                    ProblemSolvedRewardDisposition::AlreadyProcessed
+                }
+            },
+            reward_event_id: result.reward_event_id,
+            problem_id: result.problem_id,
+            source_occurred_at_utc: result.source_occurred_at_utc,
+            activation_relation: result.activation_relation,
+            xp_amount: result.xp_amount,
+            coin_amount: result.coin_amount,
+            decision_reason: result.decision_reason,
+            policy_key: result.policy_key,
+            policy_version: result.policy_version,
+            ledger_entry_ids: result.ledger_entry_ids,
+        })
+    }
+}
+
+fn map_problem_solved_error(error: RewardProcessingError) -> ProblemSolvedRewardError {
+    match error {
+        RewardProcessingError::Unavailable => ProblemSolvedRewardError::Unavailable,
+        RewardProcessingError::SourceNotFound => ProblemSolvedRewardError::SourceNotFound,
+        RewardProcessingError::SourceInvalid => ProblemSolvedRewardError::SourceInvalid,
+        RewardProcessingError::RewardInactive => ProblemSolvedRewardError::RewardInactive,
+        RewardProcessingError::DecisionInvalid => ProblemSolvedRewardError::DecisionInvalid,
+        RewardProcessingError::DecisionConflict => ProblemSolvedRewardError::DecisionConflict,
+        RewardProcessingError::PositiveClaimAlreadyTaken => {
+            ProblemSolvedRewardError::PositiveClaimAlreadyTaken
+        }
+        RewardProcessingError::IntegrityViolation => ProblemSolvedRewardError::IntegrityViolation,
+        RewardProcessingError::DatabaseFailure | RewardProcessingError::InvalidLimit => {
+            ProblemSolvedRewardError::DatabaseFailure
+        }
+    }
+}
+
+fn map_problem_solved_evaluation(
+    evaluation: ProblemSolvedEvaluation,
+) -> Result<ProblemSolvedEvaluationRecord, ProblemSolvedRewardError> {
+    let qualification = match evaluation.qualification.as_str() {
+        "qualifying" => acm_os_domain::ProblemSolvedQualification::Qualifying,
+        "non_qualifying" => acm_os_domain::ProblemSolvedQualification::NonQualifying,
+        _ => return Err(ProblemSolvedRewardError::IntegrityViolation),
+    };
+    let reason = match evaluation.reason_code.as_str() {
+        "explicitly_accepted_digested" => {
+            acm_os_domain::ProblemSolvedEvaluationReason::ExplicitlyAcceptedDigested
+        }
+        "mechanical_reentry" => acm_os_domain::ProblemSolvedEvaluationReason::MechanicalReentry,
+        "insufficient_digestion" => {
+            acm_os_domain::ProblemSolvedEvaluationReason::InsufficientDigestion
+        }
+        "other" => acm_os_domain::ProblemSolvedEvaluationReason::Other,
+        _ => return Err(ProblemSolvedRewardError::IntegrityViolation),
+    };
+    if evaluation.policy_key != "problem_solved_v1"
+        || evaluation.policy_version != 1
+        || !acm_os_domain::ProblemSolvedPolicy::reason_is_valid(qualification, reason)
+    {
+        return Err(ProblemSolvedRewardError::IntegrityViolation);
+    }
+    Ok(ProblemSolvedEvaluationRecord {
+        occurrence_id: evaluation.problem_completion_occurrence_id,
+        problem_id: evaluation.problem_id,
+        qualification,
+        reason,
+        evaluated_at_utc: evaluation.evaluated_at_utc,
+    })
+}
+
+async fn load_valid_positive_claim(
+    pool: &SqlitePool,
+    problem_id: i64,
+) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+    let claim: Option<ProblemSolvedPositiveClaim> = sqlx::query_as(
+        "SELECT problem_id, reward_event_id, claimed_at_utc
+         FROM reward_problem_solved_positive_claims
+         WHERE problem_id = ?1",
+    )
+    .bind(problem_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    let valid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_problem_solved_positive_claims claim
+         JOIN reward_events event
+           ON event.id = claim.reward_event_id AND event.problem_id = claim.problem_id
+         JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+          AND evaluation.problem_id = claim.problem_id
+         JOIN reward_grants grant ON grant.reward_event_id = event.id
+         WHERE claim.problem_id = ?1
+           AND event.activation_relation = 'post_activation'
+           AND occurrence.semantic_kind = 'learning_completion'
+           AND evaluation.qualification = 'qualifying'
+           AND evaluation.reason_code = 'explicitly_accepted_digested'
+           AND evaluation.policy_key = 'problem_solved_v1'
+           AND evaluation.policy_version = 1
+           AND grant.xp_amount = 100 AND grant.coin_amount = 100
+           AND grant.decision_reason = 'qualified_positive'
+           AND grant.policy_key = 'problem_solved_v1'
+           AND grant.policy_version = 1",
+    )
+    .bind(problem_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    if valid == 1 {
+        Ok(Some(claim))
+    } else {
+        Err(RewardProcessingError::IntegrityViolation)
+    }
+}
+
+async fn validate_problem_solved_event_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    event_id: &str,
+    source: &RewardSource,
+    relation: RewardActivationRelation,
+    xp: i64,
+    coin: i64,
+    decision_reason: &str,
+    policy_key: &str,
+    policy_version: i64,
+) -> Result<(), RewardProcessingError> {
+    let RewardSource::ProblemCompletionOccurrence { occurrence_id } = source else {
+        return Ok(());
+    };
+    let occurrence: Option<(i64, String)> = sqlx::query_as(
+        "SELECT problem_id, semantic_kind FROM problem_completion_occurrences WHERE id = ?1",
+    )
+    .bind(occurrence_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some((problem_id, semantic_kind)) = occurrence else {
+        return Err(RewardProcessingError::IntegrityViolation);
+    };
+    if semantic_kind != "learning_completion" {
+        return Ok(());
+    }
+    let evaluation: Option<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT qualification, reason_code, policy_key, policy_version
+         FROM reward_problem_completion_evaluations
+         WHERE problem_completion_occurrence_id = ?1",
+    )
+    .bind(occurrence_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims WHERE problem_id = ?1",
+    )
+    .bind(problem_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let event_claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims WHERE reward_event_id = ?1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+
+    if relation == RewardActivationRelation::PreActivation {
+        if xp != 0
+            || coin != 0
+            || decision_reason != "pre_activation"
+            || policy_key != "problem_solved_v1"
+            || policy_version != 1
+            || event_claim_count != 0
+        {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        return Ok(());
+    }
+
+    let Some((qualification, reason_code, evaluation_policy, evaluation_version)) = evaluation
+    else {
+        return Err(RewardProcessingError::IntegrityViolation);
+    };
+    if evaluation_policy != "problem_solved_v1" || evaluation_version != 1 {
+        return Err(RewardProcessingError::IntegrityViolation);
+    }
+    match qualification.as_str() {
+        "non_qualifying" => {
+            if reason_code == "mechanical_reentry"
+                || reason_code == "insufficient_digestion"
+                || reason_code == "other"
+            {
+                if xp != 0
+                    || coin != 0
+                    || decision_reason != "non_qualifying"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 0
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+        }
+        "qualifying" => {
+            if reason_code != "explicitly_accepted_digested" {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            if xp == 100 && coin == 100 {
+                if decision_reason != "qualified_positive"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 1
+                    || claim_count != 1
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else if xp == 0 && coin == 0 {
+                if decision_reason != "already_rewarded"
+                    || policy_key != "problem_solved_v1"
+                    || policy_version != 1
+                    || event_claim_count != 0
+                    || claim_count != 1
+                {
+                    return Err(RewardProcessingError::IntegrityViolation);
+                }
+            } else {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+        }
+        _ => return Err(RewardProcessingError::IntegrityViolation),
+    }
+    Ok(())
+}
+
+async fn schema_generation_at_least_31(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<bool, RewardProcessingError> {
+    let version: i64 =
+        sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    Ok(version >= 31)
+}
+
+async fn load_reward_activation_authority(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<DurableRewardActivationAuthority, RewardProcessingError> {
+    let row: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT singleton, activation_status, installed_at_utc, activated_at_utc
+         FROM reward_activation_state",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let (singleton, status, installed_at_utc, activated_at_utc) =
+        row.ok_or(RewardProcessingError::IntegrityViolation)?;
+    if singleton != 1 || parse_reward_utc_millis(&installed_at_utc).is_none() {
+        return Err(RewardProcessingError::IntegrityViolation);
+    }
+    match (status.as_str(), activated_at_utc) {
+        ("inactive", None) => Ok(DurableRewardActivationAuthority {
+            activated_at_utc: None,
+        }),
+        ("active", Some(timestamp)) if parse_reward_utc_millis(&timestamp).is_some() => {
+            Ok(DurableRewardActivationAuthority {
+                activated_at_utc: Some(timestamp),
+            })
+        }
+        _ => Err(RewardProcessingError::IntegrityViolation),
+    }
+}
+
+async fn load_reward_result(
+    connection: &mut sqlx::SqliteConnection,
+    source: &RewardSource,
+) -> Result<Option<RewardProcessingResult>, RewardProcessingError> {
+    let event_id: Option<String> = match source {
+        RewardSource::ProblemCompletionOccurrence { occurrence_id } => {
+            sqlx::query_scalar(
+                "SELECT reward_event_id FROM reward_problem_completion_event_sources
+             WHERE problem_completion_occurrence_id = ?1",
+            )
+            .bind(occurrence_id)
+            .fetch_optional(&mut *connection)
+            .await
+        }
+        RewardSource::Review { review_attempt_id } => sqlx::query_scalar(
+            "SELECT reward_event_id FROM reward_review_event_sources WHERE review_attempt_id = ?1",
+        )
+        .bind(review_attempt_id)
+        .fetch_optional(&mut *connection)
+        .await,
+    }
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some(event_id) = event_id else {
+        return Ok(None);
+    };
+    let row: Option<(i64, String, String, i64, i64, String, String, i64)> = sqlx::query_as(
+        "SELECT event.problem_id, event.source_occurred_at_utc, event.activation_relation,
+                grant.xp_amount, grant.coin_amount, grant.decision_reason,
+                grant.policy_key, grant.policy_version
+         FROM reward_events event
+         JOIN reward_grants grant ON grant.reward_event_id = event.id
+         WHERE event.id = ?1",
+    )
+    .bind(&event_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let (problem_id, source_time, relation, xp, coin, reason, policy, version) =
+        row.ok_or(RewardProcessingError::IntegrityViolation)?;
+    let ledger_entry_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT ledger_entry_id FROM reward_grant_ledger_origins
+         WHERE reward_event_id = ?1
+         ORDER BY CASE resource_kind WHEN 'xp' THEN 0 ELSE 1 END",
+    )
+    .bind(&event_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    if ledger_entry_ids.len() != usize::from(xp > 0) + usize::from(coin > 0) {
+        return Err(RewardProcessingError::IntegrityViolation);
+    }
+    Ok(Some(RewardProcessingResult {
+        disposition: RewardProcessingDisposition::AlreadyProcessed,
+        reward_event_id: event_id,
+        problem_id,
+        source_occurred_at_utc: source_time,
+        activation_relation: relation,
+        xp_amount: xp,
+        coin_amount: coin,
+        decision_reason: reason,
+        policy_key: policy,
+        policy_version: version,
+        ledger_entry_ids,
+    }))
+}
+
+fn reward_relation_value(relation: RewardActivationRelation) -> &'static str {
+    match relation {
+        RewardActivationRelation::PreActivation => "pre_activation",
+        RewardActivationRelation::PostActivation => "post_activation",
+    }
+}
+
+fn validate_reward_decision(decision: &RewardDecision) -> Result<(), RewardProcessingError> {
+    if !(0..=MAX_EXACT_REWARD_AMOUNT).contains(&decision.xp_amount)
+        || !(0..=MAX_EXACT_REWARD_AMOUNT).contains(&decision.coin_amount)
+        || !(1..=100).contains(&decision.decision_reason.trim().len())
+        || !(1..=100).contains(&decision.policy_key.trim().len())
+        || decision.policy_version <= 0
+    {
+        return Err(RewardProcessingError::DecisionInvalid);
+    }
+    Ok(())
+}
+
+async fn resolve_reward_source(
+    connection: &mut sqlx::SqliteConnection,
+    source: &RewardSource,
+) -> Result<ResolvedRewardSource, RewardProcessingError> {
+    match source {
+        RewardSource::ProblemCompletionOccurrence { occurrence_id } => {
+            let row: Option<(i64, String)> = sqlx::query_as(
+                "SELECT problem_id, recorded_at_utc
+                 FROM problem_completion_occurrences WHERE id = ?1",
+            )
+            .bind(occurrence_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            let (problem_id, occurred_at_utc) = row.ok_or(RewardProcessingError::SourceNotFound)?;
+            if parse_reward_utc_millis(&occurred_at_utc).is_none() {
+                return Err(RewardProcessingError::SourceInvalid);
+            }
+            Ok(ResolvedRewardSource {
+                problem_id,
+                occurred_at_utc,
+            })
+        }
+        RewardSource::Review { review_attempt_id } => {
+            let row: Option<(
+                i64,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+            )> = sqlx::query_as(
+                "SELECT attempt.problem_id, attempt.attempt_type, attempt.attempt_status,
+                            attempt.judgement, attempt.completed_at_utc, ordinal.ordinal
+                     FROM review_attempts attempt
+                     LEFT JOIN scheduled_review_ordinal_facts ordinal
+                       ON ordinal.review_attempt_id = attempt.id
+                      AND ordinal.problem_id = attempt.problem_id
+                     WHERE attempt.id = ?1",
+            )
+            .bind(review_attempt_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            let (problem_id, attempt_type, status, judgement, completed_at, ordinal) =
+                row.ok_or(RewardProcessingError::SourceNotFound)?;
+            let structurally_valid = status == "completed"
+                && matches!(judgement.as_deref(), Some("mastered" | "partial" | "fail"))
+                && match attempt_type.as_str() {
+                    "early_check" => ordinal.is_none(),
+                    "first_cold_start" | "long_term_review" => ordinal.is_some_and(|n| n > 0),
+                    _ => false,
+                };
+            if !structurally_valid {
+                return Err(RewardProcessingError::SourceInvalid);
+            }
+            let occurred_at_utc = completed_at.ok_or(RewardProcessingError::SourceInvalid)?;
+            if parse_reward_utc_millis(&occurred_at_utc).is_none() {
+                return Err(RewardProcessingError::SourceInvalid);
+            }
+            Ok(ResolvedRewardSource {
+                problem_id,
+                occurred_at_utc,
+            })
+        }
+    }
+}
+
+fn ensure_reward_decision_matches(
+    existing: &RewardProcessingResult,
+    decision: &RewardDecision,
+) -> Result<(), RewardProcessingError> {
+    if existing.xp_amount != decision.xp_amount
+        || existing.coin_amount != decision.coin_amount
+        || existing.decision_reason != decision.decision_reason
+        || existing.policy_key != decision.policy_key
+        || existing.policy_version != decision.policy_version
+    {
+        return Err(RewardProcessingError::DecisionConflict);
+    }
+    Ok(())
+}
+
+async fn validate_reward_event_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    event_id: &str,
+    source: &RewardSource,
+    resolved: &ResolvedRewardSource,
+    relation: RewardActivationRelation,
+    created_ledger_ids: &[String],
+    inject_failure: bool,
+) -> Result<(), RewardProcessingError> {
+    let row: Option<(
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT event.problem_id, event.source_occurred_at_utc, event.activation_relation,
+                (SELECT COUNT(*) FROM reward_problem_completion_event_sources s WHERE s.reward_event_id = event.id)
+                  + (SELECT COUNT(*) FROM reward_review_event_sources s WHERE s.reward_event_id = event.id),
+                (SELECT COUNT(*) FROM reward_grants g WHERE g.reward_event_id = event.id),
+                grant.xp_amount, grant.coin_amount,
+                grant.decision_reason, grant.policy_key, grant.policy_version,
+                COALESCE(SUM(CASE WHEN origin.resource_kind = 'xp' THEN entry.delta ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN origin.resource_kind = 'coin' THEN entry.delta ELSE 0 END), 0)
+         FROM reward_events event
+         LEFT JOIN reward_grants grant ON grant.reward_event_id = event.id
+         LEFT JOIN reward_grant_ledger_origins origin ON origin.reward_event_id = event.id
+         LEFT JOIN reward_ledger_entries entry
+           ON entry.id = origin.ledger_entry_id AND entry.resource_kind = origin.resource_kind
+         WHERE event.id = ?1 GROUP BY event.id",
+    )
+    .bind(event_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let Some((
+        problem,
+        source_time,
+        stored_relation,
+        adapters,
+        grants,
+        xp,
+        coin,
+        decision_reason,
+        policy_key,
+        policy_version,
+        xp_sum,
+        coin_sum,
+    )) = row
+    else {
+        return Err(RewardProcessingError::IntegrityViolation);
+    };
+    let (xp_count, coin_count, orphan_count): (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+           COALESCE(SUM(CASE WHEN origin.resource_kind = 'xp' THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN origin.resource_kind = 'coin' THEN 1 ELSE 0 END), 0),
+           (SELECT COUNT(*) FROM reward_ledger_entries entry
+            WHERE entry.id IN (SELECT ledger_entry_id FROM reward_grant_ledger_origins WHERE reward_event_id = ?1)
+              AND (SELECT COUNT(*) FROM reward_grant_ledger_origins origin WHERE origin.ledger_entry_id = entry.id) != 1)
+         FROM reward_grant_ledger_origins origin WHERE origin.reward_event_id = ?1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let source_matches: i64 = match source {
+        RewardSource::ProblemCompletionOccurrence { occurrence_id } => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM reward_problem_completion_event_sources
+             WHERE reward_event_id = ?1 AND problem_completion_occurrence_id = ?2",
+            )
+            .bind(event_id)
+            .bind(occurrence_id)
+            .fetch_one(&mut *connection)
+            .await
+        }
+        RewardSource::Review { review_attempt_id } => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM reward_review_event_sources
+             WHERE reward_event_id = ?1 AND review_attempt_id = ?2 AND problem_id = ?3",
+            )
+            .bind(event_id)
+            .bind(review_attempt_id)
+            .bind(resolved.problem_id)
+            .fetch_one(&mut *connection)
+            .await
+        }
+    }
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+    let activation_at: Option<String> = sqlx::query_scalar(
+        "SELECT activated_at_utc FROM reward_activation_state
+         WHERE singleton = 1 AND activation_status = 'active'",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RewardProcessingError::DatabaseFailure)?
+    .flatten();
+    let activation_at = activation_at
+        .as_deref()
+        .and_then(parse_reward_utc_millis)
+        .ok_or(RewardProcessingError::IntegrityViolation)?;
+    let source_instant =
+        parse_reward_utc_millis(&source_time).ok_or(RewardProcessingError::IntegrityViolation)?;
+    let validator_relation = reward_activation_relation(source_instant, activation_at);
+    for ledger_id in created_ledger_ids {
+        let origin_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reward_grant_ledger_origins WHERE ledger_entry_id = ?1",
+        )
+        .bind(ledger_id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if origin_count != 1 {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+    }
+    if problem != resolved.problem_id
+        || source_time != resolved.occurred_at_utc
+        || stored_relation != reward_relation_value(relation)
+        || validator_relation != relation
+        || adapters != 1
+        || source_matches != 1
+        || grants != 1
+        || xp_sum != xp
+        || coin_sum != coin
+        || xp_count != i64::from(xp > 0)
+        || coin_count != i64::from(coin > 0)
+        || orphan_count != 0
+        || inject_failure
+    {
+        return Err(RewardProcessingError::IntegrityViolation);
+    }
+    if schema_generation_at_least_31(connection).await? {
+        validate_problem_solved_event_transaction(
+            connection,
+            event_id,
+            source,
+            relation,
+            xp,
+            coin,
+            &decision_reason,
+            &policy_key,
+            policy_version,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn fail_reward_processing_at(
+    actual: Option<RewardFailurePoint>,
+    expected: RewardFailurePoint,
+) -> Result<(), RewardProcessingError> {
+    if actual == Some(expected) {
+        Err(RewardProcessingError::IntegrityViolation)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_reward_processing_error(error: RewardProcessingError) -> acm_os_application::RewardError {
+    match error {
+        RewardProcessingError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        RewardProcessingError::RewardInactive => acm_os_application::RewardError::RewardInactive,
+        RewardProcessingError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        RewardProcessingError::DatabaseFailure => acm_os_application::RewardError::DatabaseFailure,
+        _ => acm_os_application::RewardError::IntegrityViolation,
+    }
+}
+
+fn map_custom_reward_error(error: CustomRewardError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardError::Unavailable => acm_os_application::RewardError::PersistenceUnavailable,
+        CustomRewardError::InvalidIdentity => acm_os_application::RewardError::InvalidIdentity,
+        CustomRewardError::InvalidName | CustomRewardError::InvalidCoinCost => {
+            acm_os_application::RewardError::InvalidInput
+        }
+        CustomRewardError::NotFound => acm_os_application::RewardError::CustomRewardNotFound,
+        CustomRewardError::Archived => acm_os_application::RewardError::CustomRewardArchived,
+        CustomRewardError::InvalidStatus | CustomRewardError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardError::DatabaseFailure => acm_os_application::RewardError::DatabaseFailure,
+    }
+}
+
+fn map_redemption_error(error: CustomRewardRedemptionError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardRedemptionError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        CustomRewardRedemptionError::InvalidIdentity => {
+            acm_os_application::RewardError::InvalidIdentity
+        }
+        CustomRewardRedemptionError::NotFound => {
+            acm_os_application::RewardError::CustomRewardNotFound
+        }
+        CustomRewardRedemptionError::Archived => {
+            acm_os_application::RewardError::CustomRewardArchived
+        }
+        CustomRewardRedemptionError::RewardInactive => {
+            acm_os_application::RewardError::RewardInactive
+        }
+        CustomRewardRedemptionError::InsufficientBalance => {
+            acm_os_application::RewardError::InsufficientCoin
+        }
+        CustomRewardRedemptionError::IntentConflict => {
+            acm_os_application::RewardError::RedemptionIntentConflict
+        }
+        CustomRewardRedemptionError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardRedemptionError::DatabaseFailure => {
+            acm_os_application::RewardError::DatabaseFailure
+        }
+    }
+}
+
+fn map_refund_error(error: CustomRewardRefundError) -> acm_os_application::RewardError {
+    match error {
+        CustomRewardRefundError::Unavailable => {
+            acm_os_application::RewardError::PersistenceUnavailable
+        }
+        CustomRewardRefundError::InvalidIdentity => {
+            acm_os_application::RewardError::InvalidIdentity
+        }
+        CustomRewardRefundError::NotFound => acm_os_application::RewardError::RefundNotFound,
+        CustomRewardRefundError::RedemptionNotFound => {
+            acm_os_application::RewardError::RedemptionNotFound
+        }
+        CustomRewardRefundError::IntentConflict => {
+            acm_os_application::RewardError::RefundIntentConflict
+        }
+        CustomRewardRefundError::IntegrityViolation => {
+            acm_os_application::RewardError::IntegrityViolation
+        }
+        CustomRewardRefundError::DatabaseFailure => {
+            acm_os_application::RewardError::DatabaseFailure
+        }
+    }
+}
+
+async fn validate_problem_completion_occurrence_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "problem_completion_occurrences",
+        &["id", "problem_id", "semantic_kind", "recorded_at_utc"],
+    )
+    .await?;
+    validate_external_identity_fk(
+        pool,
+        "problem_completion_occurrences",
+        "problem_id",
+        "problems",
+    )
+    .await
+}
+
+async fn validate_scheduled_review_ordinal_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "scheduled_review_ordinal_states",
+        &["problem_id", "historical_baseline", "last_allocated"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "scheduled_review_ordinal_facts",
+        &[
+            "review_attempt_id",
+            "problem_id",
+            "ordinal",
+            "recorded_at_utc",
+        ],
+    )
+    .await?;
+    validate_external_identity_fk(
+        pool,
+        "scheduled_review_ordinal_states",
+        "problem_id",
+        "problems",
+    )
+    .await?;
+    let state_fk: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('scheduled_review_ordinal_facts')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if state_fk.len() != 3
+        || !state_fk.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || !state_fk.iter().any(|fk| {
+            fk.2 == "review_attempts"
+                && fk.3 == "review_attempt_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let mut connection = pool
+        .acquire()
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if !scheduled_review_ordinal_data_is_valid(&mut connection)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
+async fn validate_reward_durable_core_contract(
+    pool: &SqlitePool,
+    schema_version: i64,
+) -> Result<(), StartupRecoveryReason> {
+    for (table, columns) in [
+        (
+            "reward_activation_state",
+            &[
+                "singleton",
+                "activation_status",
+                "installed_at_utc",
+                "activated_at_utc",
+            ][..],
+        ),
+        (
+            "reward_events",
+            &[
+                "id",
+                "problem_id",
+                "source_occurred_at_utc",
+                "activation_relation",
+                "recorded_at_utc",
+            ][..],
+        ),
+        (
+            "reward_problem_completion_event_sources",
+            &["reward_event_id", "problem_completion_occurrence_id"][..],
+        ),
+        (
+            "reward_review_event_sources",
+            &["reward_event_id", "review_attempt_id", "problem_id"][..],
+        ),
+        (
+            "reward_grants",
+            &[
+                "reward_event_id",
+                "xp_amount",
+                "coin_amount",
+                "decision_reason",
+                "policy_key",
+                "policy_version",
+                "decided_at_utc",
+            ][..],
+        ),
+        (
+            "reward_ledger_entries",
+            &["id", "resource_kind", "delta", "recorded_at_utc"][..],
+        ),
+        (
+            "reward_grant_ledger_origins",
+            &["ledger_entry_id", "reward_event_id", "resource_kind"][..],
+        ),
+    ] {
+        validate_table_columns(pool, table, columns).await?;
+    }
+
+    let s3_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_completion_event_sources')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if s3_fks.len() != 2
+        || !s3_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "reward_event_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || !s3_fks.iter().any(|fk| {
+            fk.2 == "problem_completion_occurrences"
+                && fk.3 == "problem_completion_occurrence_id"
+                && fk.4 == "id"
+                && fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let s4_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_review_event_sources')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if s4_fks.len() != 4
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "reward_events" && fk.3 == "reward_event_id" && fk.4 == "id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "reward_events" && fk.3 == "problem_id" && fk.4 == "problem_id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "review_attempts" && fk.3 == "review_attempt_id" && fk.4 == "id")
+        || !s4_fks
+            .iter()
+            .any(|fk| fk.2 == "review_attempts" && fk.3 == "problem_id" && fk.4 == "problem_id")
+        || s4_fks
+            .iter()
+            .any(|fk| !fk.6.eq_ignore_ascii_case("RESTRICT"))
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let activation_rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT singleton, activation_status, installed_at_utc, activated_at_utc
+         FROM reward_activation_state",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if activation_rows.len() != 1
+        || activation_rows[0].0 != 1
+        || parse_reward_utc_millis(&activation_rows[0].2).is_none()
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let activation_time = match (
+        activation_rows[0].1.as_str(),
+        activation_rows[0].3.as_deref(),
+    ) {
+        ("inactive", None) => None,
+        ("active", Some(value)) => Some(
+            parse_reward_utc_millis(value).ok_or(StartupRecoveryReason::IntegrityCheckFailed)?,
+        ),
+        _ => return Err(StartupRecoveryReason::IntegrityCheckFailed),
+    };
+
+    let events: Vec<(String, Option<i64>, String, String, String)> = sqlx::query_as(
+        "SELECT id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc
+         FROM reward_events",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if activation_time.is_none() && !events.is_empty() {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    for (id, _, source_time, relation, recorded_at) in &events {
+        if uuid::Uuid::parse_str(id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || parse_reward_utc_millis(recorded_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+        let source_time = parse_reward_utc_millis(source_time)
+            .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+        let expected_relation = reward_activation_relation(
+            source_time,
+            activation_time.ok_or(StartupRecoveryReason::IntegrityCheckFailed)?,
+        );
+        if !matches!(
+            (expected_relation, relation.as_str()),
+            (RewardActivationRelation::PreActivation, "pre_activation")
+                | (RewardActivationRelation::PostActivation, "post_activation")
+        ) {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_event_participation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_events event
+         WHERE (EXISTS (
+                    SELECT 1 FROM reward_problem_completion_event_sources source
+                    WHERE source.reward_event_id = event.id
+                ))
+             + (EXISTS (
+                    SELECT 1 FROM reward_review_event_sources source
+                    WHERE source.reward_event_id = event.id
+                )) != 1
+            OR (SELECT COUNT(*) FROM reward_grants grant
+                WHERE grant.reward_event_id = event.id) != 1",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_event_participation != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_s3_source: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_problem_completion_event_sources source
+         LEFT JOIN reward_events event ON event.id = source.reward_event_id
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         WHERE event.id IS NULL
+            OR occurrence.id IS NULL
+            OR event.problem_id IS NULL
+            OR event.problem_id != occurrence.problem_id
+            OR event.source_occurred_at_utc != occurrence.recorded_at_utc",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_s3_source != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let invalid_s4_source: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_review_event_sources source
+         LEFT JOIN reward_events event ON event.id = source.reward_event_id
+         LEFT JOIN review_attempts attempt
+           ON attempt.id = source.review_attempt_id AND attempt.problem_id = source.problem_id
+         WHERE event.id IS NULL
+            OR attempt.id IS NULL
+            OR event.problem_id != source.problem_id
+            OR event.source_occurred_at_utc != attempt.completed_at_utc
+            OR attempt.attempt_status != 'completed'
+            OR attempt.attempt_type NOT IN ('early_check', 'first_cold_start', 'long_term_review')
+            OR (attempt.attempt_type = 'early_check' AND EXISTS (
+                    SELECT 1 FROM scheduled_review_ordinal_facts fact
+                    WHERE fact.review_attempt_id = attempt.id
+                ))
+            OR (attempt.attempt_type IN ('first_cold_start', 'long_term_review') AND NOT EXISTS (
+                    SELECT 1 FROM scheduled_review_ordinal_facts fact
+                    WHERE fact.review_attempt_id = attempt.id
+                      AND fact.problem_id = attempt.problem_id
+                ))",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_s4_source != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let grants: Vec<(String, i64, i64, String, String, i64, String)> = sqlx::query_as(
+        "SELECT reward_event_id, xp_amount, coin_amount, decision_reason,
+                policy_key, policy_version, decided_at_utc
+         FROM reward_grants",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (_, xp, coin, reason, policy, version, decided_at) in &grants {
+        if !(0..=MAX_EXACT_REWARD_AMOUNT).contains(xp)
+            || !(0..=MAX_EXACT_REWARD_AMOUNT).contains(coin)
+            || reason.trim().is_empty()
+            || policy.trim().is_empty()
+            || *version <= 0
+            || parse_reward_utc_millis(decided_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let entries: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, resource_kind, delta, recorded_at_utc FROM reward_ledger_entries",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (id, resource, delta, recorded_at) in &entries {
+        if uuid::Uuid::parse_str(id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || !matches!(resource.as_str(), "xp" | "coin")
+            || *delta == 0
+            || !(-MAX_EXACT_REWARD_AMOUNT..=MAX_EXACT_REWARD_AMOUNT).contains(delta)
+            || parse_reward_utc_millis(recorded_at).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_ledger_origin_sql = if schema_version >= 33 {
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM (
+                    SELECT ledger_entry_id FROM reward_grant_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                )) != 1"
+    } else {
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM reward_grant_ledger_origins origin
+                WHERE origin.ledger_entry_id = entry.id) != 1"
+    };
+    let invalid_ledger_origin_participation: i64 = sqlx::query_scalar(invalid_ledger_origin_sql)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_ledger_origin_participation != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let mut invalid_reward_links_sql = String::from(
+        "SELECT COUNT(*) FROM (
+             SELECT grant.reward_event_id AS authority_id
+             FROM reward_grants grant
+             LEFT JOIN reward_events event ON event.id = grant.reward_event_id
+             WHERE event.id IS NULL
+             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM reward_grant_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN reward_grants grant ON grant.reward_event_id = origin.reward_event_id
+             WHERE entry.id IS NULL
+                OR grant.reward_event_id IS NULL
+                OR entry.resource_kind != origin.resource_kind
+                OR entry.delta <= 0
+                OR entry.delta != CASE origin.resource_kind
+                    WHEN 'xp' THEN grant.xp_amount
+                    WHEN 'coin' THEN grant.coin_amount
+                    ELSE NULL
+                END
+             UNION ALL
+             SELECT source.problem_completion_occurrence_id
+             FROM reward_problem_completion_event_sources source
+             GROUP BY source.problem_completion_occurrence_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.review_attempt_id
+             FROM reward_review_event_sources source
+             GROUP BY source.review_attempt_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.reward_event_id
+             FROM reward_problem_completion_event_sources source
+             GROUP BY source.reward_event_id
+             HAVING COUNT(*) != 1
+             UNION ALL
+             SELECT source.reward_event_id
+             FROM reward_review_event_sources source
+             GROUP BY source.reward_event_id
+             HAVING COUNT(*) != 1
+         ) invalid",
+    );
+    if schema_version >= 33 {
+        let marker =
+            "             UNION ALL\n             SELECT source.problem_completion_occurrence_id";
+        let r7_links = "             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM custom_reward_redemption_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+             WHERE entry.id IS NULL OR redemption.redemption_id IS NULL
+                OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                OR entry.delta != -redemption.coin_cost_paid
+             UNION ALL
+             SELECT origin.ledger_entry_id
+             FROM custom_reward_refund_ledger_origins origin
+             LEFT JOIN reward_ledger_entries entry ON entry.id = origin.ledger_entry_id
+             LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+             WHERE entry.id IS NULL OR refund.refund_id IS NULL OR redemption.redemption_id IS NULL
+                OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                OR entry.delta != redemption.coin_cost_paid
+";
+        invalid_reward_links_sql =
+            invalid_reward_links_sql.replacen(marker, &(r7_links.to_owned() + marker), 1);
+    }
+    let invalid_reward_links: i64 =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(invalid_reward_links_sql))
+            .fetch_one(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_reward_links != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_grant_effect: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+             SELECT grant.reward_event_id,
+                    grant.xp_amount,
+                    grant.coin_amount,
+                    COALESCE(SUM(CASE WHEN origin.resource_kind = 'xp' THEN entry.delta ELSE 0 END), 0) AS xp_effect,
+                    COALESCE(SUM(CASE WHEN origin.resource_kind = 'coin' THEN entry.delta ELSE 0 END), 0) AS coin_effect,
+                    SUM(CASE WHEN origin.resource_kind = 'xp' THEN 1 ELSE 0 END) AS xp_count,
+                    SUM(CASE WHEN origin.resource_kind = 'coin' THEN 1 ELSE 0 END) AS coin_count
+             FROM reward_grants grant
+             LEFT JOIN reward_grant_ledger_origins origin
+               ON origin.reward_event_id = grant.reward_event_id
+             LEFT JOIN reward_ledger_entries entry
+               ON entry.id = origin.ledger_entry_id
+              AND entry.resource_kind = origin.resource_kind
+             GROUP BY grant.reward_event_id
+         ) effect
+         WHERE effect.xp_effect != effect.xp_amount
+            OR effect.coin_effect != effect.coin_amount
+            OR effect.xp_count != CASE WHEN effect.xp_amount > 0 THEN 1 ELSE 0 END
+            OR effect.coin_count != CASE WHEN effect.coin_amount > 0 THEN 1 ELSE 0 END",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_grant_effect != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let pre_activation_positive_grant: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_grants grant
+         JOIN reward_events event ON event.id = grant.reward_event_id
+         WHERE event.activation_relation = 'pre_activation'
+           AND (grant.xp_amount != 0 OR grant.coin_amount != 0)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if pre_activation_positive_grant != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
+async fn validate_problem_solved_reward_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "reward_problem_completion_evaluations",
+        &[
+            "problem_completion_occurrence_id",
+            "problem_id",
+            "qualification",
+            "reason_code",
+            "policy_key",
+            "policy_version",
+            "evaluated_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "reward_problem_solved_positive_claims",
+        &["problem_id", "reward_event_id", "claimed_at_utc"],
+    )
+    .await?;
+    validate_strong_identity_unique(
+        pool,
+        "reward_problem_solved_positive_claims",
+        &["reward_event_id"],
+    )
+    .await?;
+
+    let evaluation_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_completion_evaluations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if evaluation_fks.len() != 2
+        || evaluation_fks.iter().any(|fk| {
+            fk.2 == "problem_completion_occurrences"
+                && fk.3 == "problem_completion_occurrence_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || evaluation_fks.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let claim_fks: Vec<(i64, i64, String, String, String, String, String, String)> =
+        sqlx::query_as("PRAGMA foreign_key_list('reward_problem_solved_positive_claims')")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if claim_fks.len() != 3
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "problems"
+                && fk.3 == "problem_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "reward_event_id"
+                && fk.4 == "id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+        || claim_fks.iter().any(|fk| {
+            fk.2 == "reward_events"
+                && fk.3 == "problem_id"
+                && fk.4 == "problem_id"
+                && !fk.6.eq_ignore_ascii_case("RESTRICT")
+        })
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+
+    let invalid_evaluations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_completion_evaluations evaluation
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = evaluation.problem_completion_occurrence_id
+         WHERE occurrence.id IS NULL
+            OR occurrence.problem_id != evaluation.problem_id
+            OR occurrence.semantic_kind != 'learning_completion'
+            OR (evaluation.qualification = 'qualifying'
+                AND evaluation.reason_code != 'explicitly_accepted_digested')
+            OR (evaluation.qualification = 'non_qualifying'
+                AND evaluation.reason_code NOT IN ('mechanical_reentry', 'insufficient_digestion', 'other'))
+            OR evaluation.policy_key != 'problem_solved_v1'
+            OR evaluation.policy_version != 1
+            OR length(evaluation.evaluated_at_utc) != 24",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_evaluations != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let evaluation_timestamps: Vec<String> =
+        sqlx::query_scalar("SELECT evaluated_at_utc FROM reward_problem_completion_evaluations")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if evaluation_timestamps
+        .iter()
+        .any(|timestamp| parse_reward_utc_millis(timestamp).is_none())
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let invalid_claims: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_problem_solved_positive_claims claim
+         LEFT JOIN reward_events event
+           ON event.id = claim.reward_event_id AND event.problem_id = claim.problem_id
+         LEFT JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         LEFT JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         LEFT JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+          AND evaluation.problem_id = claim.problem_id
+         LEFT JOIN reward_grants grant ON grant.reward_event_id = event.id
+         WHERE event.id IS NULL
+            OR event.activation_relation != 'post_activation'
+            OR occurrence.semantic_kind != 'learning_completion'
+            OR evaluation.qualification != 'qualifying'
+            OR evaluation.reason_code != 'explicitly_accepted_digested'
+            OR grant.xp_amount != 100 OR grant.coin_amount != 100
+            OR grant.decision_reason != 'qualified_positive'
+            OR grant.policy_key != 'problem_solved_v1'
+            OR grant.policy_version != 1
+            OR length(claim.claimed_at_utc) != 24",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_claims != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let claim_timestamps: Vec<String> =
+        sqlx::query_scalar("SELECT claimed_at_utc FROM reward_problem_solved_positive_claims")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if claim_timestamps
+        .iter()
+        .any(|timestamp| parse_reward_utc_millis(timestamp).is_none())
+    {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let positive_without_claim: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM reward_grants grant
+         JOIN reward_events event ON event.id = grant.reward_event_id
+         JOIN reward_problem_completion_event_sources source
+           ON source.reward_event_id = event.id
+         JOIN problem_completion_occurrences occurrence
+           ON occurrence.id = source.problem_completion_occurrence_id
+         JOIN reward_problem_completion_evaluations evaluation
+           ON evaluation.problem_completion_occurrence_id = occurrence.id
+         WHERE occurrence.semantic_kind = 'learning_completion'
+           AND event.activation_relation = 'post_activation'
+           AND grant.xp_amount = 100 AND grant.coin_amount = 100
+           AND grant.decision_reason = 'qualified_positive'
+           AND evaluation.qualification = 'qualifying'
+           AND NOT EXISTS (
+               SELECT 1 FROM reward_problem_solved_positive_claims claim
+               WHERE claim.reward_event_id = event.id
+           )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if positive_without_claim != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
+async fn validate_custom_reward_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "custom_rewards",
+        &[
+            "custom_reward_id",
+            "name",
+            "coin_cost",
+            "status",
+            "created_at_utc",
+            "updated_at_utc",
+        ],
+    )
+    .await?;
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'custom_rewards'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?
+    .ok_or(StartupRecoveryReason::IntegrityCheckFailed)?;
+    const EXPECTED_CUSTOM_REWARDS_SQL: &str = "CREATE TABLE custom_rewards (custom_reward_id TEXT PRIMARY KEY CHECK (length(custom_reward_id) = 36), name TEXT NOT NULL CHECK (length(trim(name)) > 0), coin_cost INTEGER NOT NULL CHECK (typeof(coin_cost) = 'integer' AND coin_cost >= 1 AND coin_cost <= 9007199254740991), status TEXT NOT NULL CHECK (status IN ('active', 'archived')), created_at_utc TEXT NOT NULL CHECK (length(created_at_utc) = 24), updated_at_utc TEXT NOT NULL CHECK (length(updated_at_utc) = 24))";
+    if normalize_schema_sql(&table_sql) != normalize_schema_sql(EXPECTED_CUSTOM_REWARDS_SQL) {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    let rows: Vec<(String, String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+         FROM custom_rewards",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for row in rows {
+        if parse_custom_reward_row(row.0, row.1, row.2, row.3, row.4, row.5).is_err() {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+    Ok(())
+}
+
+async fn validate_custom_reward_redemption_contract(
+    pool: &SqlitePool,
+) -> Result<(), StartupRecoveryReason> {
+    validate_table_columns(
+        pool,
+        "custom_reward_redemptions",
+        &[
+            "redemption_id",
+            "custom_reward_id",
+            "coin_cost_paid",
+            "redeemed_at_utc",
+        ],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_refunds",
+        &["refund_id", "redemption_id", "refunded_at_utc"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_redemption_ledger_origins",
+        &["ledger_entry_id", "redemption_id", "resource_kind"],
+    )
+    .await?;
+    validate_table_columns(
+        pool,
+        "custom_reward_refund_ledger_origins",
+        &["ledger_entry_id", "refund_id", "resource_kind"],
+    )
+    .await?;
+    validate_strong_identity_unique(pool, "custom_reward_refunds", &["redemption_id"]).await?;
+    validate_strong_identity_unique(
+        pool,
+        "custom_reward_redemption_ledger_origins",
+        &["redemption_id"],
+    )
+    .await?;
+    validate_strong_identity_unique(pool, "custom_reward_refund_ledger_origins", &["refund_id"])
+        .await?;
+
+    let redemptions: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+         FROM custom_reward_redemptions",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for row in redemptions {
+        if parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3).is_err() {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+    let refunds: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT refund_id, redemption_id, refunded_at_utc FROM custom_reward_refunds",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    for (refund_id, redemption_id, refunded_at_utc) in refunds {
+        if uuid::Uuid::parse_str(&refund_id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .is_none()
+            || uuid::Uuid::parse_str(&redemption_id)
+                .ok()
+                .filter(|id| id.get_version_num() == 7)
+                .is_none()
+            || parse_reward_utc_millis(&refunded_at_utc).is_none()
+        {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
+    }
+
+    let invalid_links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reward_ledger_entries entry
+         WHERE (SELECT COUNT(*) FROM (
+             SELECT ledger_entry_id FROM reward_grant_ledger_origins WHERE ledger_entry_id = entry.id
+             UNION ALL SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins WHERE ledger_entry_id = entry.id
+             UNION ALL SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins WHERE ledger_entry_id = entry.id
+         )) != 1
+         OR EXISTS (
+             SELECT 1 FROM custom_reward_redemption_ledger_origins origin
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+             WHERE origin.ledger_entry_id = entry.id
+               AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                    OR entry.resource_kind != 'coin' OR entry.delta != -redemption.coin_cost_paid)
+         )
+         OR EXISTS (
+             SELECT 1 FROM custom_reward_refund_ledger_origins origin
+             LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+             LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+             WHERE origin.ledger_entry_id = entry.id
+               AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                    OR entry.resource_kind != 'coin' OR entry.delta != redemption.coin_cost_paid)
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+    if invalid_links != 0 {
+        return Err(StartupRecoveryReason::IntegrityCheckFailed);
+    }
+    Ok(())
+}
+
+impl DatabaseRuntime {
+    pub async fn reward_is_active(&self) -> Result<bool, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(load_reward_activation_authority(&mut connection)
+            .await?
+            .activated_at_utc
+            .is_some())
+    }
+    pub async fn activate_reward(&self) -> Result<RewardActivationState, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let authority = load_reward_activation_authority(&mut transaction).await?;
+        if authority.activated_at_utc.is_none() {
+            let update = sqlx::query(
+                "UPDATE reward_activation_state
+                 SET activation_status = 'active',
+                     activated_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE singleton = 1
+                   AND activation_status = 'inactive'
+                   AND activated_at_utc IS NULL",
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            if update.rows_affected() != 1 {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+        }
+        let activated_at_utc = load_reward_activation_authority(&mut transaction)
+            .await?
+            .activated_at_utc
+            .ok_or(RewardProcessingError::IntegrityViolation)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(RewardActivationState { activated_at_utc })
+    }
+    pub async fn list_pending_reward_sources(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RewardSource>, RewardProcessingError> {
+        if limit == 0 || limit > MAX_PENDING_REWARD_SOURCES {
+            return Err(RewardProcessingError::InvalidLimit);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if load_reward_activation_authority(&mut transaction)
+            .await?
+            .activated_at_utc
+            .is_none()
+        {
+            return Err(RewardProcessingError::RewardInactive);
+        }
+        if !scheduled_review_ordinal_data_is_valid(&mut transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        // Canonical UTC-millisecond timestamps have one fixed-width UTC representation, so
+        // their TEXT ordering is identical to chronological ordering.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT source_family, source_id, occurred_at_utc FROM (
+                 SELECT 'problem_completion' AS source_family,
+                        occurrence.id AS source_id,
+                        occurrence.recorded_at_utc AS occurred_at_utc
+                 FROM problem_completion_occurrences occurrence
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM reward_problem_completion_event_sources adapter
+                     WHERE adapter.problem_completion_occurrence_id = occurrence.id
+                 )
+                 UNION ALL
+                 SELECT 'review' AS source_family,
+                        attempt.id AS source_id,
+                        attempt.completed_at_utc AS occurred_at_utc
+                 FROM review_attempts attempt
+                 WHERE attempt.attempt_status = 'completed'
+                   AND (
+                       attempt.attempt_type = 'early_check'
+                       OR (
+                           attempt.attempt_type IN ('first_cold_start', 'long_term_review')
+                           AND EXISTS (
+                               SELECT 1 FROM scheduled_review_ordinal_facts ordinal
+                               WHERE ordinal.review_attempt_id = attempt.id
+                                 AND ordinal.problem_id = attempt.problem_id
+                           )
+                       )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM reward_review_event_sources adapter
+                       WHERE adapter.review_attempt_id = attempt.id
+                   )
+             ) pending
+             ORDER BY occurred_at_utc ASC, source_family ASC, source_id ASC
+             LIMIT ?1",
+        )
+        .bind(i64::try_from(limit).map_err(|_| RewardProcessingError::InvalidLimit)?)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let mut sources = Vec::with_capacity(rows.len());
+        for (family, source_id, occurred_at_utc) in rows {
+            let source = match family.as_str() {
+                "problem_completion" => RewardSource::ProblemCompletionOccurrence {
+                    occurrence_id: source_id,
+                },
+                "review" => RewardSource::Review {
+                    review_attempt_id: source_id,
+                },
+                _ => return Err(RewardProcessingError::IntegrityViolation),
+            };
+            let resolved = resolve_reward_source(&mut transaction, &source).await?;
+            if resolved.occurred_at_utc != occurred_at_utc {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            sources.push(source);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(sources)
+    }
+    pub async fn create_custom_reward(
+        &self,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<CustomReward, CustomRewardError> {
+        let name = canonical_custom_reward_name(name)?;
+        validate_custom_reward_coin_cost(coin_cost)?;
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let custom_reward_id = uuid::Uuid::now_v7().to_string();
+        let now = reward_now_utc();
+        sqlx::query(
+            "INSERT INTO custom_rewards
+             (custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc)
+             VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+        )
+        .bind(&custom_reward_id)
+        .bind(&name)
+        .bind(coin_cost)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        Ok(CustomReward {
+            custom_reward_id,
+            name,
+            coin_cost,
+            status: CustomRewardStatus::Active,
+            created_at_utc: now.clone(),
+            updated_at_utc: now,
+        })
+    }
+    pub async fn load_custom_reward(
+        &self,
+        custom_reward_id: &str,
+    ) -> Result<CustomReward, CustomRewardError> {
+        validate_custom_reward_id(custom_reward_id)?;
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let row: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards WHERE custom_reward_id = ?1",
+        )
+        .bind(custom_reward_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let row = row.ok_or(CustomRewardError::NotFound)?;
+        parse_custom_reward_row(row.0, row.1, row.2, row.3, row.4, row.5)
+    }
+    pub async fn list_custom_rewards(&self) -> Result<Vec<CustomReward>, CustomRewardError> {
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let rows: Vec<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards
+             ORDER BY created_at_utc ASC, custom_reward_id ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        rows.into_iter()
+            .map(|row| parse_custom_reward_row(row.0, row.1, row.2, row.3, row.4, row.5))
+            .collect()
+    }
+    pub async fn update_custom_reward(
+        &self,
+        custom_reward_id: &str,
+        name: &str,
+        coin_cost: i64,
+    ) -> Result<CustomReward, CustomRewardError> {
+        validate_custom_reward_id(custom_reward_id)?;
+        let name = canonical_custom_reward_name(name)?;
+        validate_custom_reward_coin_cost(coin_cost)?;
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let existing: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards WHERE custom_reward_id = ?1",
+        )
+        .bind(custom_reward_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let existing = existing.ok_or(CustomRewardError::NotFound)?;
+        let existing = parse_custom_reward_row(
+            existing.0, existing.1, existing.2, existing.3, existing.4, existing.5,
+        )?;
+        if existing.status == CustomRewardStatus::Archived {
+            return Err(CustomRewardError::Archived);
+        }
+        let now = custom_reward_mutation_time(&existing.updated_at_utc)?;
+        let updated = sqlx::query(
+            "UPDATE custom_rewards
+             SET name = ?1, coin_cost = ?2, updated_at_utc = ?3
+             WHERE custom_reward_id = ?4 AND status = 'active'",
+        )
+        .bind(&name)
+        .bind(coin_cost)
+        .bind(&now)
+        .bind(custom_reward_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        if updated.rows_affected() != 1 {
+            return Err(CustomRewardError::IntegrityViolation);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        Ok(CustomReward {
+            custom_reward_id: existing.custom_reward_id,
+            name,
+            coin_cost,
+            status: CustomRewardStatus::Active,
+            created_at_utc: existing.created_at_utc,
+            updated_at_utc: now,
+        })
+    }
+    pub async fn archive_custom_reward(
+        &self,
+        custom_reward_id: &str,
+    ) -> Result<CustomReward, CustomRewardError> {
+        validate_custom_reward_id(custom_reward_id)?;
+        let pool = self._pool.as_ref().ok_or(CustomRewardError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let existing: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards WHERE custom_reward_id = ?1",
+        )
+        .bind(custom_reward_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        let existing = existing.ok_or(CustomRewardError::NotFound)?;
+        let existing = parse_custom_reward_row(
+            existing.0, existing.1, existing.2, existing.3, existing.4, existing.5,
+        )?;
+        if existing.status == CustomRewardStatus::Archived {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| CustomRewardError::DatabaseFailure)?;
+            return Ok(existing);
+        }
+        let now = custom_reward_mutation_time(&existing.updated_at_utc)?;
+        let updated = sqlx::query(
+            "UPDATE custom_rewards
+             SET status = 'archived', updated_at_utc = ?1
+             WHERE custom_reward_id = ?2 AND status = 'active'",
+        )
+        .bind(&now)
+        .bind(custom_reward_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        if updated.rows_affected() != 1 {
+            return Err(CustomRewardError::IntegrityViolation);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| CustomRewardError::DatabaseFailure)?;
+        Ok(CustomReward {
+            status: CustomRewardStatus::Archived,
+            updated_at_utc: now,
+            ..existing
+        })
+    }
+    pub async fn load_reward_account(&self) -> Result<RewardAccount, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Self::load_reward_account_from_connection(&mut connection).await
+    }
+    pub async fn load_custom_reward_redemption(
+        &self,
+        redemption_id: &str,
+    ) -> Result<CustomRewardRedemption, CustomRewardRedemptionError> {
+        validate_redemption_id(redemption_id)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRedemptionError::Unavailable)?;
+        let row: Option<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        let row = row.ok_or(CustomRewardRedemptionError::NotFound)?;
+        parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3)
+    }
+    pub async fn load_custom_reward_refund(
+        &self,
+        refund_id: &str,
+    ) -> Result<CustomRewardRefund, CustomRewardRefundError> {
+        validate_refund_id(refund_id)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRefundError::Unavailable)?;
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE refund_id = ?1",
+        )
+        .bind(refund_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+        let row = row.ok_or(CustomRewardRefundError::NotFound)?;
+        parse_custom_reward_refund_row(row.0, row.1, row.2)
+    }
+    pub async fn list_custom_reward_redemption_history(
+        &self,
+    ) -> Result<Vec<CustomRewardRedemptionHistory>, CustomRewardHistoryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardHistoryError::Unavailable)?;
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT redemption.redemption_id,
+                    redemption.custom_reward_id,
+                    reward.custom_reward_id,
+                    reward.name,
+                    reward.coin_cost,
+                    reward.status,
+                    reward.created_at_utc,
+                    reward.updated_at_utc,
+                    redemption.coin_cost_paid,
+                    redemption.redeemed_at_utc,
+                    refund.refund_id,
+                    refund.refunded_at_utc
+             FROM custom_reward_redemptions redemption
+             JOIN custom_rewards reward
+               ON reward.custom_reward_id = redemption.custom_reward_id
+             LEFT JOIN custom_reward_refunds refund
+               ON refund.redemption_id = redemption.redemption_id
+             ORDER BY redemption.redeemed_at_utc DESC, redemption.redemption_id DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|_| CustomRewardHistoryError::DatabaseFailure)?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    redemption_id,
+                    custom_reward_id,
+                    reward_id,
+                    reward_name,
+                    reward_cost,
+                    reward_status,
+                    reward_created_at,
+                    reward_updated_at,
+                    coin_cost_paid,
+                    redeemed_at_utc,
+                    refund_id,
+                    refunded_at_utc,
+                )| {
+                    let reward = parse_custom_reward_row(
+                        reward_id,
+                        reward_name.clone(),
+                        reward_cost,
+                        reward_status,
+                        reward_created_at,
+                        reward_updated_at,
+                    )
+                    .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                    if reward.custom_reward_id != custom_reward_id {
+                        return Err(CustomRewardHistoryError::IntegrityViolation);
+                    }
+                    let redemption = parse_custom_reward_redemption_row(
+                        redemption_id,
+                        custom_reward_id,
+                        coin_cost_paid,
+                        redeemed_at_utc,
+                    )
+                    .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                    match (refund_id, refunded_at_utc) {
+                        (None, None) => Ok(CustomRewardRedemptionHistory {
+                            redemption_id: redemption.redemption_id,
+                            custom_reward_id: redemption.custom_reward_id,
+                            reward_name: reward.name,
+                            coin_cost_paid: redemption.coin_cost_paid,
+                            redeemed_at_utc: redemption.redeemed_at_utc,
+                            refund_id: None,
+                            refunded_at_utc: None,
+                        }),
+                        (Some(refund_id), Some(refunded_at_utc)) => {
+                            let refund = parse_custom_reward_refund_row(
+                                refund_id,
+                                redemption.redemption_id.clone(),
+                                refunded_at_utc,
+                            )
+                            .map_err(|_| CustomRewardHistoryError::IntegrityViolation)?;
+                            Ok(CustomRewardRedemptionHistory {
+                                redemption_id: redemption.redemption_id,
+                                custom_reward_id: redemption.custom_reward_id,
+                                reward_name: reward.name,
+                                coin_cost_paid: redemption.coin_cost_paid,
+                                redeemed_at_utc: redemption.redeemed_at_utc,
+                                refund_id: Some(refund.refund_id),
+                                refunded_at_utc: Some(refund.refunded_at_utc),
+                            })
+                        }
+                        _ => Err(CustomRewardHistoryError::IntegrityViolation),
+                    }
+                },
+            )
+            .collect()
+    }
+    pub async fn redeem_custom_reward(
+        &self,
+        redemption_id: &str,
+        custom_reward_id: &str,
+    ) -> Result<CustomRewardRedemptionResult, CustomRewardRedemptionError> {
+        validate_redemption_id(redemption_id)?;
+        validate_custom_reward_id(custom_reward_id)
+            .map_err(|_| CustomRewardRedemptionError::InvalidIdentity)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRedemptionError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+
+        // SQLite's deferred BEGIN permits a read race. BEGIN IMMEDIATE takes the writer
+        // reservation before any validation, so two redemption attempts cannot both spend
+        // the same reconstructed balance.
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+
+        let existing: Option<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        if let Some(row) = existing {
+            let redemption = match parse_custom_reward_redemption_row(row.0, row.1, row.2, row.3) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            if redemption.custom_reward_id != custom_reward_id {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRedemptionError::IntentConflict);
+            }
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+            return Ok(CustomRewardRedemptionResult {
+                disposition: CustomRewardRedemptionDisposition::AlreadyProcessed,
+                redemption,
+            });
+        }
+
+        let activation = match load_reward_activation_authority(&mut connection).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(Self::map_redemption_reward_error(error));
+            }
+        };
+        if activation.activated_at_utc.is_none() {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::RewardInactive);
+        }
+
+        let reward_row: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+            "SELECT custom_reward_id, name, coin_cost, status, created_at_utc, updated_at_utc
+             FROM custom_rewards WHERE custom_reward_id = ?1",
+        )
+        .bind(custom_reward_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        let reward_row = match reward_row {
+            Some(row) => row,
+            None => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRedemptionError::NotFound);
+            }
+        };
+        let reward = match parse_custom_reward_row(
+            reward_row.0,
+            reward_row.1,
+            reward_row.2,
+            reward_row.3,
+            reward_row.4,
+            reward_row.5,
+        )
+        .map_err(Self::map_redemption_custom_reward_error)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(error);
+            }
+        };
+        if reward.status == CustomRewardStatus::Archived {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::Archived);
+        }
+
+        let account = match Self::load_reward_account_from_connection(&mut connection).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(Self::map_redemption_reward_error(error));
+            }
+        };
+        if account.coin_balance < reward.coin_cost {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(CustomRewardRedemptionError::InsufficientBalance);
+        }
+
+        let redeemed_at_utc = reward_now_utc();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_redemptions
+             (redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(redemption_id)
+        .bind(custom_reward_id)
+        .bind(reward.coin_cost)
+        .bind(&redeemed_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        let ledger_entry_id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO reward_ledger_entries
+             (id, resource_kind, delta, recorded_at_utc) VALUES (?1, 'coin', ?2, ?3)",
+        )
+        .bind(&ledger_entry_id)
+        .bind(-reward.coin_cost)
+        .bind(&redeemed_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_redemption_ledger_origins
+             (ledger_entry_id, redemption_id, resource_kind)
+             VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&ledger_entry_id)
+        .bind(redemption_id)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_redemption_sql_error(error));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRedemptionError::DatabaseFailure)?;
+        Ok(CustomRewardRedemptionResult {
+            disposition: CustomRewardRedemptionDisposition::Processed,
+            redemption: CustomRewardRedemption {
+                redemption_id: redemption_id.to_owned(),
+                custom_reward_id: custom_reward_id.to_owned(),
+                coin_cost_paid: reward.coin_cost,
+                redeemed_at_utc,
+            },
+        })
+    }
+    pub async fn refund_custom_reward(
+        &self,
+        refund_id: &str,
+        redemption_id: &str,
+    ) -> Result<CustomRewardRefundResult, CustomRewardRefundError> {
+        validate_refund_id(refund_id)?;
+        validate_redemption_id(redemption_id)
+            .map_err(|_| CustomRewardRefundError::InvalidIdentity)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(CustomRewardRefundError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+
+        // Serialize the intent lookup and the one-refund check with the writes. This keeps
+        // concurrent refund attempts deterministic while the frozen UNIQUE constraint remains
+        // the durable final guard.
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+
+        let existing_by_id: Option<(String, String, String)> = match sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE refund_id = ?1",
+        )
+        .bind(refund_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        if let Some(row) = existing_by_id {
+            let existing = match parse_custom_reward_refund_row(row.0, row.1, row.2) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            if existing.redemption_id != redemption_id {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::IntentConflict);
+            }
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+            return Ok(CustomRewardRefundResult {
+                disposition: CustomRewardRefundDisposition::AlreadyProcessed,
+                refund: existing,
+            });
+        }
+
+        let redemption_row: Option<(String, String, i64, String)> = match sqlx::query_as(
+            "SELECT redemption_id, custom_reward_id, coin_cost_paid, redeemed_at_utc
+             FROM custom_reward_redemptions WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        let redemption_row = match redemption_row {
+            Some(row) => row,
+            None => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::RedemptionNotFound);
+            }
+        };
+        let redemption = match parse_custom_reward_redemption_row(
+            redemption_row.0,
+            redemption_row.1,
+            redemption_row.2,
+            redemption_row.3,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(match error {
+                    CustomRewardRedemptionError::InvalidIdentity
+                    | CustomRewardRedemptionError::IntegrityViolation => {
+                        CustomRewardRefundError::IntegrityViolation
+                    }
+                    _ => CustomRewardRefundError::DatabaseFailure,
+                });
+            }
+        };
+
+        let existing_by_redemption: Option<(String, String, String)> = match sqlx::query_as(
+            "SELECT refund_id, redemption_id, refunded_at_utc
+             FROM custom_reward_refunds WHERE redemption_id = ?1",
+        )
+        .bind(redemption_id)
+        .fetch_optional(&mut *connection)
+        .await
+        {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(CustomRewardRefundError::DatabaseFailure);
+            }
+        };
+        if let Some(row) = existing_by_redemption {
+            let existing = match parse_custom_reward_refund_row(row.0, row.1, row.2) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(error);
+                }
+            };
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+            return Ok(CustomRewardRefundResult {
+                disposition: CustomRewardRefundDisposition::AlreadyRefunded,
+                refund: existing,
+            });
+        }
+
+        let refunded_at_utc = reward_now_utc();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_refunds
+             (refund_id, redemption_id, refunded_at_utc) VALUES (?1, ?2, ?3)",
+        )
+        .bind(refund_id)
+        .bind(redemption_id)
+        .bind(&refunded_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        let ledger_entry_id = uuid::Uuid::now_v7().to_string();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO reward_ledger_entries
+             (id, resource_kind, delta, recorded_at_utc) VALUES (?1, 'coin', ?2, ?3)",
+        )
+        .bind(&ledger_entry_id)
+        .bind(redemption.coin_cost_paid)
+        .bind(&refunded_at_utc)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        if let Err(error) = sqlx::query(
+            "INSERT INTO custom_reward_refund_ledger_origins
+             (ledger_entry_id, refund_id, resource_kind) VALUES (?1, ?2, 'coin')",
+        )
+        .bind(&ledger_entry_id)
+        .bind(refund_id)
+        .execute(&mut *connection)
+        .await
+        {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(Self::map_refund_sql_error(error));
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| CustomRewardRefundError::DatabaseFailure)?;
+        Ok(CustomRewardRefundResult {
+            disposition: CustomRewardRefundDisposition::Processed,
+            refund: CustomRewardRefund {
+                refund_id: refund_id.to_owned(),
+                redemption_id: redemption_id.to_owned(),
+                refunded_at_utc,
+            },
+        })
+    }
+    async fn load_reward_account_from_connection(
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<RewardAccount, RewardProcessingError> {
+        let invalid_origin: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reward_ledger_entries entry
+             WHERE EXISTS (
+                 SELECT 1 FROM reward_grant_ledger_origins origin
+                 LEFT JOIN reward_grants grant ON grant.reward_event_id = origin.reward_event_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (grant.reward_event_id IS NULL OR origin.resource_kind != entry.resource_kind
+                        OR entry.delta <= 0
+                        OR entry.delta != CASE origin.resource_kind
+                            WHEN 'xp' THEN grant.xp_amount
+                            WHEN 'coin' THEN grant.coin_amount
+                            ELSE NULL END)
+             )
+             OR EXISTS (
+                 SELECT 1 FROM custom_reward_redemption_ledger_origins origin
+                 LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = origin.redemption_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (redemption.redemption_id IS NULL OR origin.resource_kind != 'coin'
+                        OR entry.resource_kind != 'coin' OR entry.delta != -redemption.coin_cost_paid)
+             )
+             OR EXISTS (
+                 SELECT 1 FROM custom_reward_refund_ledger_origins origin
+                 LEFT JOIN custom_reward_refunds refund ON refund.refund_id = origin.refund_id
+                 LEFT JOIN custom_reward_redemptions redemption ON redemption.redemption_id = refund.redemption_id
+                 WHERE origin.ledger_entry_id = entry.id
+                   AND (refund.refund_id IS NULL OR redemption.redemption_id IS NULL
+                        OR origin.resource_kind != 'coin' OR entry.resource_kind != 'coin'
+                        OR entry.delta != redemption.coin_cost_paid)
+             )",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if invalid_origin != 0 {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        let rows: Vec<(String, String, i64, String, i64)> = sqlx::query_as(
+            "SELECT entry.id, entry.resource_kind, entry.delta, entry.recorded_at_utc,
+                (SELECT COUNT(*) FROM (
+                    SELECT ledger_entry_id FROM reward_grant_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_redemption_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                    UNION ALL
+                    SELECT ledger_entry_id FROM custom_reward_refund_ledger_origins origin
+                    WHERE origin.ledger_entry_id = entry.id
+                ))
+         FROM reward_ledger_entries entry ORDER BY entry.id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let mut account = RewardAccount {
+            xp_balance: 0,
+            coin_balance: 0,
+        };
+        for (id, resource, delta, recorded_at_utc, origin_count) in rows {
+            if uuid::Uuid::parse_str(&id)
+                .ok()
+                .filter(|id| id.get_version_num() == 7)
+                .is_none()
+                || delta == 0
+                || !(-MAX_EXACT_REWARD_AMOUNT..=MAX_EXACT_REWARD_AMOUNT).contains(&delta)
+                || parse_reward_utc_millis(&recorded_at_utc).is_none()
+                || origin_count != 1
+            {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            let balance = match resource.as_str() {
+                "xp" => &mut account.xp_balance,
+                "coin" => &mut account.coin_balance,
+                _ => return Err(RewardProcessingError::IntegrityViolation),
+            };
+            *balance = balance
+                .checked_add(delta)
+                .ok_or(RewardProcessingError::IntegrityViolation)?;
+        }
+        Ok(account)
+    }
+    fn map_redemption_reward_error(error: RewardProcessingError) -> CustomRewardRedemptionError {
+        match error {
+            RewardProcessingError::Unavailable => CustomRewardRedemptionError::Unavailable,
+            RewardProcessingError::RewardInactive => CustomRewardRedemptionError::RewardInactive,
+            RewardProcessingError::IntegrityViolation => {
+                CustomRewardRedemptionError::IntegrityViolation
+            }
+            _ => CustomRewardRedemptionError::DatabaseFailure,
+        }
+    }
+    fn map_redemption_custom_reward_error(error: CustomRewardError) -> CustomRewardRedemptionError {
+        match error {
+            CustomRewardError::NotFound => CustomRewardRedemptionError::NotFound,
+            CustomRewardError::Archived => CustomRewardRedemptionError::Archived,
+            CustomRewardError::IntegrityViolation | CustomRewardError::InvalidStatus => {
+                CustomRewardRedemptionError::IntegrityViolation
+            }
+            CustomRewardError::Unavailable => CustomRewardRedemptionError::Unavailable,
+            _ => CustomRewardRedemptionError::IntegrityViolation,
+        }
+    }
+    fn map_redemption_sql_error(error: sqlx::Error) -> CustomRewardRedemptionError {
+        if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+            CustomRewardRedemptionError::IntentConflict
+        } else if matches!(&error, sqlx::Error::Database(database) if database.is_check_violation() || database.is_foreign_key_violation())
+        {
+            CustomRewardRedemptionError::IntegrityViolation
+        } else {
+            CustomRewardRedemptionError::DatabaseFailure
+        }
+    }
+    fn map_refund_sql_error(error: sqlx::Error) -> CustomRewardRefundError {
+        if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+            CustomRewardRefundError::IntegrityViolation
+        } else if matches!(&error, sqlx::Error::Database(database) if database.is_check_violation() || database.is_foreign_key_violation())
+        {
+            CustomRewardRefundError::IntegrityViolation
+        } else {
+            CustomRewardRefundError::DatabaseFailure
+        }
+    }
+    pub async fn create_reward_problem_completion_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        qualification: &str,
+        reason_code: &str,
+        evaluated_at_utc: &str,
+    ) -> Result<ProblemSolvedEvaluation, RewardProcessingError> {
+        self.create_problem_solved_evaluation(
+            occurrence_id,
+            problem_id,
+            qualification,
+            reason_code,
+            evaluated_at_utc,
+        )
+        .await
+    }
+    pub async fn load_reward_problem_completion_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluation>, RewardProcessingError> {
+        self.load_problem_solved_evaluation(occurrence_id).await
+    }
+    pub async fn load_reward_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+        self.load_problem_solved_positive_claim(problem_id).await
+    }
+    pub async fn process_reward(
+        &self,
+        source: &RewardSource,
+        decision: &RewardDecision,
+    ) -> Result<RewardProcessingResult, RewardProcessingError> {
+        self.process_reward_inner(source, decision, None).await
+    }
+    pub async fn process_review_reward(
+        &self,
+        review_attempt_id: &str,
+    ) -> Result<RewardProcessingResult, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut connection = pool
+            .acquire()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let (attempt_type, judgement, completed_at_utc, ordinal): (
+            String,
+            String,
+            String,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT attempt.attempt_type, attempt.judgement, attempt.completed_at_utc,
+                        (SELECT ordinal FROM scheduled_review_ordinal_facts ordinal_fact
+                         WHERE ordinal_fact.review_attempt_id = attempt.id
+                           AND ordinal_fact.problem_id = attempt.problem_id)
+                 FROM review_attempts attempt
+                 WHERE attempt.id = ?1 AND attempt.attempt_status = 'completed'",
+        )
+        .bind(review_attempt_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        .ok_or(RewardProcessingError::SourceNotFound)?;
+        let activation_at = load_reward_activation_authority(&mut connection)
+            .await?
+            .activated_at_utc
+            .ok_or(RewardProcessingError::RewardInactive)?;
+        let source_time = parse_reward_utc_millis(&completed_at_utc)
+            .ok_or(RewardProcessingError::SourceInvalid)?;
+        let activation_time = parse_reward_utc_millis(&activation_at)
+            .ok_or(RewardProcessingError::IntegrityViolation)?;
+        let activation_relation = if reward_activation_relation(source_time, activation_time)
+            == RewardActivationRelation::PreActivation
+        {
+            acm_os_domain::ReviewRewardActivationRelation::PreActivation
+        } else {
+            acm_os_domain::ReviewRewardActivationRelation::PostActivation
+        };
+        let attempt_type = match attempt_type.as_str() {
+            "early_check" => acm_os_domain::ReviewAttemptType::EarlyCheck,
+            "first_cold_start" => acm_os_domain::ReviewAttemptType::FirstColdStart,
+            "long_term_review" => acm_os_domain::ReviewAttemptType::LongTermReview,
+            _ => return Err(RewardProcessingError::SourceInvalid),
+        };
+        let judgement = match judgement.as_str() {
+            "mastered" => acm_os_domain::ReviewJudgement::Mastered,
+            "partial" => acm_os_domain::ReviewJudgement::Partial,
+            "fail" => acm_os_domain::ReviewJudgement::Fail,
+            _ => return Err(RewardProcessingError::SourceInvalid),
+        };
+        let ordinal = ordinal
+            .map(|value| {
+                u64::try_from(value).map_err(|_| RewardProcessingError::IntegrityViolation)
+            })
+            .transpose()?;
+        let decision =
+            acm_os_domain::ReviewRewardPolicy::decide(acm_os_domain::ReviewRewardPolicyContext {
+                attempt_type,
+                judgement,
+                ordinal,
+                activation_relation,
+            })
+            .ok_or(RewardProcessingError::DecisionInvalid)?;
+        let decision = RewardDecision {
+            xp_amount: decision.xp_amount,
+            coin_amount: decision.coin_amount,
+            decision_reason: decision.decision_reason.to_owned(),
+            policy_key: decision.policy_key.to_owned(),
+            policy_version: decision.policy_version,
+        };
+        drop(connection);
+        self.process_reward(
+            &RewardSource::Review {
+                review_attempt_id: review_attempt_id.to_owned(),
+            },
+            &decision,
+        )
+        .await
+    }
+    pub async fn process_pending_review_rewards(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RewardProcessingResult>, RewardProcessingError> {
+        let sources = self.list_pending_review_sources(limit).await?;
+        let mut results = Vec::new();
+        for source in sources {
+            if let RewardSource::Review { review_attempt_id } = source {
+                if let Ok(result) = self.process_review_reward(&review_attempt_id).await {
+                    results.push(result);
+                }
+            }
+        }
+        Ok(results)
+    }
+    async fn process_reward_inner(
+        &self,
+        source: &RewardSource,
+        decision: &RewardDecision,
+        failure: Option<RewardFailurePoint>,
+    ) -> Result<RewardProcessingResult, RewardProcessingError> {
+        validate_reward_decision(decision)?;
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+
+        let resolved = resolve_reward_source(&mut transaction, source).await?;
+        let (activation_status, activation_at): (String, Option<String>) = sqlx::query_as(
+            "SELECT activation_status, activated_at_utc
+             FROM reward_activation_state WHERE singleton = 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        .ok_or(RewardProcessingError::IntegrityViolation)?;
+        if activation_status != "active" {
+            return Err(RewardProcessingError::RewardInactive);
+        }
+        let activation_at = activation_at.ok_or(RewardProcessingError::IntegrityViolation)?;
+        let source_time = parse_reward_utc_millis(&resolved.occurred_at_utc)
+            .ok_or(RewardProcessingError::SourceInvalid)?;
+        let activation_time = parse_reward_utc_millis(&activation_at)
+            .ok_or(RewardProcessingError::IntegrityViolation)?;
+        let relation = reward_activation_relation(source_time, activation_time);
+        if relation == RewardActivationRelation::PreActivation
+            && (decision.xp_amount != 0 || decision.coin_amount != 0)
+        {
+            return Err(RewardProcessingError::DecisionInvalid);
+        }
+
+        if let Some(existing) = load_reward_result(&mut transaction, source).await? {
+            validate_reward_event_transaction(
+                &mut transaction,
+                &existing.reward_event_id,
+                source,
+                &resolved,
+                relation,
+                &existing.ledger_entry_ids,
+                false,
+            )
+            .await?;
+            ensure_reward_decision_matches(&existing, decision)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            return Ok(existing);
+        }
+
+        let event_id = uuid::Uuid::now_v7().to_string();
+        let now = reward_now_utc();
+        sqlx::query(
+            "INSERT INTO reward_events
+             (id, problem_id, source_occurred_at_utc, activation_relation, recorded_at_utc)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&event_id)
+        .bind(resolved.problem_id)
+        .bind(&resolved.occurred_at_utc)
+        .bind(reward_relation_value(relation))
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        fail_reward_processing_at(failure, RewardFailurePoint::AfterEvent)?;
+
+        let adapter = match source {
+            RewardSource::ProblemCompletionOccurrence { occurrence_id } => {
+                sqlx::query(
+                    "INSERT INTO reward_problem_completion_event_sources
+                 (reward_event_id, problem_completion_occurrence_id) VALUES (?1, ?2)",
+                )
+                .bind(&event_id)
+                .bind(occurrence_id)
+                .execute(&mut *transaction)
+                .await
+            }
+            RewardSource::Review { review_attempt_id } => {
+                sqlx::query(
+                    "INSERT INTO reward_review_event_sources
+                 (reward_event_id, review_attempt_id, problem_id) VALUES (?1, ?2, ?3)",
+                )
+                .bind(&event_id)
+                .bind(review_attempt_id)
+                .bind(resolved.problem_id)
+                .execute(&mut *transaction)
+                .await
+            }
+        };
+        if let Err(error) = adapter {
+            let duplicate =
+                matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation());
+            drop(transaction);
+            if duplicate {
+                let mut connection = pool
+                    .acquire()
+                    .await
+                    .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+                if let Some(existing) = load_reward_result(&mut connection, source).await? {
+                    validate_reward_event_transaction(
+                        &mut connection,
+                        &existing.reward_event_id,
+                        source,
+                        &resolved,
+                        relation,
+                        &existing.ledger_entry_ids,
+                        false,
+                    )
+                    .await?;
+                    ensure_reward_decision_matches(&existing, decision)?;
+                    return Ok(existing);
+                }
+            }
+            return Err(RewardProcessingError::DatabaseFailure);
+        }
+
+        let grant_insert = sqlx::query(
+            "INSERT INTO reward_grants
+             (reward_event_id, xp_amount, coin_amount, decision_reason, policy_key,
+              policy_version, decided_at_utc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&event_id)
+        .bind(decision.xp_amount)
+        .bind(decision.coin_amount)
+        .bind(&decision.decision_reason)
+        .bind(&decision.policy_key)
+        .bind(decision.policy_version)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await;
+        if let Err(error) = grant_insert {
+            let positive_candidate =
+                matches!(source, RewardSource::ProblemCompletionOccurrence { .. })
+                    && decision.xp_amount == 100
+                    && decision.coin_amount == 100
+                    && decision.decision_reason == "qualified_positive"
+                    && decision.policy_key == "problem_solved_v1"
+                    && decision.policy_version == 1;
+            let problem_completion_learning =
+                matches!(source, RewardSource::ProblemCompletionOccurrence { .. })
+                    && decision.decision_reason == "qualified_positive";
+            drop(transaction);
+            if positive_candidate && problem_completion_learning {
+                if let Some(_claim) = load_valid_positive_claim(pool, resolved.problem_id).await? {
+                    return Err(RewardProcessingError::PositiveClaimAlreadyTaken);
+                }
+                return Err(RewardProcessingError::DecisionInvalid);
+            }
+            if problem_completion_learning {
+                return Err(RewardProcessingError::DecisionInvalid);
+            }
+            return Err(
+                if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation() || database.is_check_violation() || database.is_foreign_key_violation())
+                {
+                    RewardProcessingError::DecisionInvalid
+                } else {
+                    RewardProcessingError::DatabaseFailure
+                },
+            );
+        }
+        fail_reward_processing_at(failure, RewardFailurePoint::AfterGrant)?;
+
+        let mut ledger_ids = Vec::new();
+        for (resource, amount) in [("xp", decision.xp_amount), ("coin", decision.coin_amount)] {
+            if amount == 0 {
+                continue;
+            }
+            let ledger_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO reward_ledger_entries
+                 (id, resource_kind, delta, recorded_at_utc) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(&ledger_id)
+            .bind(resource)
+            .bind(amount)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            fail_reward_processing_at(failure, RewardFailurePoint::AfterLedger)?;
+            sqlx::query(
+                "INSERT INTO reward_grant_ledger_origins
+                 (ledger_entry_id, reward_event_id, resource_kind) VALUES (?1, ?2, ?3)",
+            )
+            .bind(&ledger_id)
+            .bind(&event_id)
+            .bind(resource)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            ledger_ids.push(ledger_id);
+        }
+        validate_reward_event_transaction(
+            &mut transaction,
+            &event_id,
+            source,
+            &resolved,
+            relation,
+            &ledger_ids,
+            failure == Some(RewardFailurePoint::ValidatorFailure),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(RewardProcessingResult {
+            disposition: RewardProcessingDisposition::Created,
+            reward_event_id: event_id,
+            problem_id: resolved.problem_id,
+            source_occurred_at_utc: resolved.occurred_at_utc,
+            activation_relation: reward_relation_value(relation).to_owned(),
+            xp_amount: decision.xp_amount,
+            coin_amount: decision.coin_amount,
+            decision_reason: decision.decision_reason.clone(),
+            policy_key: decision.policy_key.clone(),
+            policy_version: decision.policy_version,
+            ledger_entry_ids: ledger_ids,
+        })
+    }
+}
+
+struct ResolvedRewardSource {
+    problem_id: i64,
+    occurred_at_utc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewardFailurePoint {
+    AfterEvent,
+    AfterGrant,
+    AfterLedger,
+    ValidatorFailure,
+}
+
+struct DurableRewardActivationAuthority {
+    activated_at_utc: Option<String>,
+}
+
+fn reward_now_utc() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+async fn scheduled_review_ordinal_data_is_valid(
+    connection: &mut SqliteConnection,
+) -> Result<bool, sqlx::Error> {
+    let completed_scheduled_without_state: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT a.problem_id)
+         FROM review_attempts a
+         WHERE a.attempt_status = 'completed'
+           AND a.attempt_type IN ('first_cold_start', 'long_term_review')
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduled_review_ordinal_facts f
+               WHERE f.review_attempt_id = a.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduled_review_ordinal_states s
+               WHERE s.problem_id = a.problem_id
+           )",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let inconsistent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_review_ordinal_states s
+         WHERE s.historical_baseline < 0
+            OR s.last_allocated < s.historical_baseline
+            OR s.historical_baseline != (
+                SELECT COUNT(*) FROM review_attempts a
+                WHERE a.problem_id = s.problem_id
+                  AND a.attempt_status = 'completed'
+                  AND a.attempt_type IN ('first_cold_start', 'long_term_review')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scheduled_review_ordinal_facts f
+                      WHERE f.review_attempt_id = a.id
+                  )
+            )
+            OR s.last_allocated != s.historical_baseline + (
+                SELECT COUNT(*) FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+            )
+            OR EXISTS (
+                SELECT 1 FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+                  AND f.ordinal <= s.historical_baseline
+            )
+            OR EXISTS (
+                SELECT 1 FROM scheduled_review_ordinal_facts f
+                WHERE f.problem_id = s.problem_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scheduled_review_ordinal_facts prior
+                      WHERE prior.problem_id = f.problem_id
+                        AND prior.ordinal = f.ordinal - 1
+                  )
+                  AND f.ordinal != s.historical_baseline + 1
+            )",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let invalid_fact: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_review_ordinal_facts f
+         LEFT JOIN review_attempts a ON a.id = f.review_attempt_id
+         LEFT JOIN scheduled_review_ordinal_states s ON s.problem_id = f.problem_id
+         WHERE a.id IS NULL
+            OR a.attempt_status != 'completed'
+            OR a.attempt_type NOT IN ('first_cold_start', 'long_term_review')
+            OR a.problem_id != f.problem_id
+            OR s.problem_id IS NULL",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(completed_scheduled_without_state == 0 && inconsistent == 0 && invalid_fact == 0)
+}
+
+impl DatabaseRuntime {
+    async fn list_pending_review_sources(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RewardSource>, RewardProcessingError> {
+        if limit == 0 || limit > MAX_PENDING_REWARD_SOURCES {
+            return Err(RewardProcessingError::InvalidLimit);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if load_reward_activation_authority(&mut transaction)
+            .await?
+            .activated_at_utc
+            .is_none()
+        {
+            return Err(RewardProcessingError::RewardInactive);
+        }
+        if !scheduled_review_ordinal_data_is_valid(&mut transaction)
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?
+        {
+            return Err(RewardProcessingError::IntegrityViolation);
+        }
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT attempt.id, attempt.completed_at_utc
+             FROM review_attempts attempt
+             WHERE attempt.attempt_status = 'completed'
+               AND (
+                   attempt.attempt_type = 'early_check'
+                   OR (
+                       attempt.attempt_type IN ('first_cold_start', 'long_term_review')
+                       AND EXISTS (
+                           SELECT 1 FROM scheduled_review_ordinal_facts ordinal
+                           WHERE ordinal.review_attempt_id = attempt.id
+                             AND ordinal.problem_id = attempt.problem_id
+                       )
+                   )
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM reward_review_event_sources adapter
+                   WHERE adapter.review_attempt_id = attempt.id
+               )
+             ORDER BY attempt.completed_at_utc ASC, attempt.id ASC
+             LIMIT ?1",
+        )
+        .bind(i64::try_from(limit).map_err(|_| RewardProcessingError::InvalidLimit)?)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let mut sources = Vec::with_capacity(rows.len());
+        for (review_attempt_id, occurred_at_utc) in rows {
+            let source = RewardSource::Review { review_attempt_id };
+            let resolved = resolve_reward_source(&mut transaction, &source).await?;
+            if resolved.occurred_at_utc != occurred_at_utc {
+                return Err(RewardProcessingError::IntegrityViolation);
+            }
+            sources.push(source);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(sources)
+    }
+}
+
+impl DatabaseRuntime {
+    pub async fn create_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+        problem_id: i64,
+        qualification: &str,
+        reason_code: &str,
+        evaluated_at_utc: &str,
+    ) -> Result<ProblemSolvedEvaluation, RewardProcessingError> {
+        if parse_reward_utc_millis(evaluated_at_utc).is_none()
+            || !matches!(qualification, "qualifying" | "non_qualifying")
+            || !matches!(
+                (qualification, reason_code),
+                ("qualifying", "explicitly_accepted_digested")
+                    | ("non_qualifying", "mechanical_reentry")
+                    | ("non_qualifying", "insufficient_digestion")
+                    | ("non_qualifying", "other")
+            )
+        {
+            return Err(RewardProcessingError::DecisionInvalid);
+        }
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        let existing: Option<ProblemSolvedEvaluation> = sqlx::query_as(
+            "SELECT problem_completion_occurrence_id, problem_id, qualification,
+                    reason_code, policy_key, policy_version, evaluated_at_utc
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        if let Some(existing) = existing {
+            let identical = existing.problem_id == problem_id
+                && existing.qualification == qualification
+                && existing.reason_code == reason_code
+                && existing.policy_key == "problem_solved_v1"
+                && existing.policy_version == 1
+                && existing.evaluated_at_utc == evaluated_at_utc;
+            if !identical {
+                return Err(RewardProcessingError::DecisionConflict);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+            return Ok(existing);
+        }
+        sqlx::query(
+            "INSERT INTO reward_problem_completion_evaluations
+             (problem_completion_occurrence_id, problem_id, qualification, reason_code,
+              policy_key, policy_version, evaluated_at_utc)
+             VALUES (?1, ?2, ?3, ?4, 'problem_solved_v1', 1, ?5)",
+        )
+        .bind(occurrence_id)
+        .bind(problem_id)
+        .bind(qualification)
+        .bind(reason_code)
+        .bind(evaluated_at_utc)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if matches!(&error, sqlx::Error::Database(database) if database.is_unique_violation()) {
+                RewardProcessingError::DecisionConflict
+            } else {
+                RewardProcessingError::DatabaseFailure
+            }
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RewardProcessingError::DatabaseFailure)?;
+        Ok(ProblemSolvedEvaluation {
+            problem_completion_occurrence_id: occurrence_id.to_owned(),
+            problem_id,
+            qualification: qualification.to_owned(),
+            reason_code: reason_code.to_owned(),
+            policy_key: "problem_solved_v1".to_owned(),
+            policy_version: 1,
+            evaluated_at_utc: evaluated_at_utc.to_owned(),
+        })
+    }
+    pub async fn load_problem_solved_evaluation(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ProblemSolvedEvaluation>, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        sqlx::query_as(
+            "SELECT problem_completion_occurrence_id, problem_id, qualification,
+                    reason_code, policy_key, policy_version, evaluated_at_utc
+             FROM reward_problem_completion_evaluations
+             WHERE problem_completion_occurrence_id = ?1",
+        )
+        .bind(occurrence_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)
+    }
+    pub async fn load_problem_solved_positive_claim(
+        &self,
+        problem_id: i64,
+    ) -> Result<Option<ProblemSolvedPositiveClaim>, RewardProcessingError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(RewardProcessingError::Unavailable)?;
+        sqlx::query_as(
+            "SELECT problem_id, reward_event_id, claimed_at_utc
+             FROM reward_problem_solved_positive_claims
+             WHERE problem_id = ?1",
+        )
+        .bind(problem_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| RewardProcessingError::DatabaseFailure)
     }
 }

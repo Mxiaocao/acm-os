@@ -302,6 +302,7 @@ export interface ReviewCompletionFactsDto {
 
 export interface ReviewHistoryItemDto {
   attempt: ReviewAttemptDto;
+  stableScheduledReviewOrdinal: number | null;
   status: "inProgress" | "completed" | "void";
   judgement: ReviewJudgementDto | null;
   completionFacts: ReviewCompletionFactsDto | null;

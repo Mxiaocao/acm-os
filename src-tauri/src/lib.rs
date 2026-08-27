@@ -28,6 +28,14 @@ pub fn run() {
                     let database = tauri::async_runtime::block_on(
                         acm_os_infrastructure::start_database(&app_private_data),
                     );
+                    if matches!(
+                        database.status(),
+                        acm_os_application::StartupGateStatus::Ready { .. }
+                    ) {
+                        let _ = tauri::async_runtime::block_on(
+                            database.process_pending_review_rewards(256),
+                        );
+                    }
                     database
                 }
                 Err(_) => DatabaseRuntime::recovery(StartupRecoveryReason::AppDataUnavailable),
@@ -48,6 +56,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::foundation_status,
+            ipc::reward_activation_state,
+            ipc::reward_account_summary,
+            ipc::list_custom_rewards,
+            ipc::reward_redemption_history,
+            ipc::activate_reward,
+            ipc::create_custom_reward,
+            ipc::update_custom_reward,
+            ipc::archive_custom_reward,
+            ipc::redeem_custom_reward,
+            ipc::refund_custom_reward,
             ipc::system_health_snapshot,
             ipc::startup_status,
             ipc::app_shell_status,

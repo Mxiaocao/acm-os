@@ -157,6 +157,23 @@ import {
   previewDiagnosticExport,
   type DiagnosticExportPreviewDto,
 } from "../ipc/startup";
+import {
+  activateReward,
+  archiveCustomReward,
+  createCustomReward,
+  createRewardIntentId,
+  getRewardAccountSummary,
+  getRewardActivationState,
+  getRewardRedemptionHistory,
+  listCustomRewards,
+  redeemCustomReward,
+  refundCustomReward,
+  updateCustomReward,
+  type CustomRewardDto,
+  type RedemptionHistoryItemDto,
+  type RedemptionResultDto,
+  type RewardAccountSummaryDto,
+} from "../ipc/reward";
 import type { StartupRecoveryReasonCode } from "../ipc/startup";
 import {
   configureWorkspace,
@@ -387,6 +404,7 @@ export function NormalAppShell({
           <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}>Contests</ShellLink>
           <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}>我的题库</ShellLink>
           <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}>Knowledge</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}>Reward</ShellLink>
         </nav>
         <nav aria-label="Tools" className="tool-nav">
           <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}>Settings</ShellLink>
@@ -758,7 +776,314 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   }
   if (page === "contests") return <ContestLibraryPage navigate={navigate} />;
   if (page === "problems") return <ProblemIndex navigate={navigate} />;
+  if (page === "reward") return <RewardPage />;
   return <KnowledgePage navigate={navigate} />;
+}
+
+type RewardActivationView = "loading" | "inactive" | "active" | "error";
+
+function RewardPage() {
+  const headingRef = useRouteFocus<HTMLHeadingElement>();
+  const activationTriggerRef = useRef<HTMLButtonElement>(null);
+  const activationDialogRef = useRef<HTMLDivElement>(null);
+  const activationConfirmRef = useRef<HTMLButtonElement>(null);
+  const activatingRef = useRef(false);
+  const [activationView, setActivationView] = useState<RewardActivationView>("loading");
+  const [account, setAccount] = useState<RewardAccountSummaryDto | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [accountError, setAccountError] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [activating, setActivating] = useState(false);
+  const [activationError, setActivationError] = useState(false);
+  const [activationSuccess, setActivationSuccess] = useState(false);
+
+  const loadAccount = useCallback(async () => {
+    setAccountLoading(true);
+    setAccountError(false);
+    setAccount(null);
+    try {
+      setAccount(await getRewardAccountSummary());
+    } catch {
+      setAccountError(true);
+    } finally {
+      setAccountLoading(false);
+    }
+  }, []);
+
+  const refreshRewardAccount = useCallback(() => { void loadAccount(); }, [loadAccount]);
+
+  const loadActivation = useCallback(async () => {
+    setActivationView("loading");
+    setAccount(null);
+    setAccountError(false);
+    try {
+      const state = await getRewardActivationState();
+      setActivationView(state.active ? "active" : "inactive");
+      if (state.active) await loadAccount();
+    } catch {
+      setActivationView("error");
+    }
+  }, [loadAccount]);
+
+  useEffect(() => { void loadActivation(); }, [loadActivation]);
+
+  const closeConfirmation = useCallback(() => {
+    if (activatingRef.current) return;
+    setConfirmationOpen(false);
+    setActivationError(false);
+    queueMicrotask(() => activationTriggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!confirmationOpen) return;
+    const dialog = activationDialogRef.current;
+    activationConfirmRef.current?.focus();
+    if (!dialog) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeConfirmation();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [closeConfirmation, confirmationOpen]);
+
+  const confirmActivation = async () => {
+    if (activatingRef.current) return;
+    activatingRef.current = true;
+    setActivating(true);
+    setActivationError(false);
+    setActivationSuccess(false);
+    try {
+      await activateReward();
+      setConfirmationOpen(false);
+      setActivationSuccess(true);
+      await loadActivation();
+    } catch {
+      setActivationError(true);
+    } finally {
+      activatingRef.current = false;
+      setActivating(false);
+    }
+  };
+
+  return <>
+    <PageHeader eyebrow="Account" headingRef={headingRef} title="Reward" />
+    {activationSuccess ? <p aria-live="polite" className="safe-note">Reward Mode enabled.</p> : null}
+    {activationView === "loading" ? <p aria-live="polite">Loading Reward Mode...</p> : null}
+    {activationView === "error" ? (
+      <section className="empty-state" role="alert">
+        <h2>Reward Mode could not be loaded</h2>
+        <p>Your Reward settings and account have not been changed.</p>
+        <button className="secondary-action" onClick={() => void loadActivation()} type="button">Retry</button>
+      </section>
+    ) : null}
+    {activationView === "inactive" ? (
+      <section aria-labelledby="reward-inactive-heading" className="content-panel">
+        <h2 id="reward-inactive-heading">Reward Mode is currently off</h2>
+        <p>Enabling Reward Mode is explicit and cannot be turned off or reset in Reward V1.</p>
+        <p>Historical activity from before activation does not receive positive rewards retroactively.</p>
+        <button className="primary-action" onClick={() => { setActivationError(false); setConfirmationOpen(true); }} ref={activationTriggerRef} type="button">Enable Reward Mode</button>
+      </section>
+    ) : null}
+    {activationView === "active" ? (
+      <>
+        <section aria-labelledby="reward-account-heading" className="content-panel">
+          <h2 id="reward-account-heading">Account</h2>
+          {accountLoading ? <p aria-live="polite">Loading account summary...</p> : null}
+          {accountError ? <div role="alert"><p>Reward account summary could not be loaded.</p><button className="secondary-action" onClick={() => void loadAccount()} type="button">Retry</button></div> : null}
+          {account ? <dl className="detail-list"><dt>Level</dt><dd>{account.level}</dd><dt>XP</dt><dd>{account.xp}</dd><dt>Coin</dt><dd>{account.coin}</dd></dl> : null}
+        </section>
+        <CustomRewardManagement account={account} onTransactionResolved={refreshRewardAccount} />
+      </>
+    ) : null}
+    {confirmationOpen ? (
+      <div className="modal-backdrop">
+        <div aria-describedby="reward-activation-description" aria-labelledby="reward-activation-title" aria-modal="true" ref={activationDialogRef} role="alertdialog">
+          <h2 id="reward-activation-title">Enable Reward Mode?</h2>
+          <p id="reward-activation-description">This is a one-way action in Reward V1. Reward Mode cannot be turned off or reset, and earlier activity will not receive positive rewards retroactively.</p>
+          {activationError ? <p className="error-message" role="alert">Reward Mode was not enabled. Try again.</p> : null}
+          <div className="button-row">
+            <button className="primary-action" disabled={activating} onClick={() => void confirmActivation()} ref={activationConfirmRef} type="button">{activating ? "Enabling..." : "Enable Reward Mode"}</button>
+            <button className="secondary-action" disabled={activating} onClick={closeConfirmation} type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+  </>;
+}
+
+function CustomRewardManagement({ account, onTransactionResolved }: { account: RewardAccountSummaryDto | null; onTransactionResolved: () => void }) {
+  const archiveTriggerRef = useRef<HTMLButtonElement>(null);
+  const archiveDialogRef = useRef<HTMLDivElement>(null);
+  const archiveConfirmRef = useRef<HTMLButtonElement>(null);
+  const mutationPendingRef = useRef(false);
+  const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [name, setName] = useState("");
+  const [coinCost, setCoinCost] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editCoinCost, setEditCoinCost] = useState("");
+  const [archiveTarget, setArchiveTarget] = useState<CustomRewardDto | null>(null);
+  const [pending, setPending] = useState(false);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [invalidFields, setInvalidFields] = useState({ name: false, coinCost: false });
+  const load = useCallback(async () => { setLoading(true); setError(false); try { setRewards(await listCustomRewards()); } catch { setError(true); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  const closeArchive = useCallback(() => {
+    if (mutationPendingRef.current) return;
+    setArchiveTarget(null);
+    queueMicrotask(() => archiveTriggerRef.current?.focus());
+  }, []);
+  useEffect(() => {
+    if (!archiveTarget) return;
+    archiveConfirmRef.current?.focus();
+    const dialog = archiveDialogRef.current;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); closeArchive(); return; }
+      if (event.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [archiveTarget, closeArchive]);
+  const parseCost = (value: string) => { if (!/^\d+$/.test(value)) return null; const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; };
+  const validate = (nextName: string, nextCost: string) => { const invalid = { name: !nextName.trim(), coinCost: parseCost(nextCost) === null }; setInvalidFields(invalid); if (invalid.name || invalid.coinCost) { setMutationError("Enter a name and a positive safe whole-number coin cost."); return null; } return { name: nextName.trim(), coinCost: Number(nextCost) }; };
+  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; mutationPendingRef.current = true; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const edit = (reward: CustomRewardDto) => { setEditingId(reward.customRewardId); setEditName(reward.name); setEditCoinCost(String(reward.coinCost)); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); };
+  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; mutationPendingRef.current = true; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError("This reward changed elsewhere and is no longer editable. The list was refreshed."); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const archive = async () => { if (!archiveTarget || mutationPendingRef.current) return; mutationPendingRef.current = true; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await load(); } catch { setMutationError("Custom Reward change could not be saved. No other rewards were changed."); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const visible = rewards.filter((reward) => showArchived || reward.status === "active");
+  return <section aria-labelledby="custom-rewards-heading" className="content-panel">
+    <div className="statement-heading-row"><h2 id="custom-rewards-heading">Custom Rewards</h2><label><input checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} type="checkbox" /> Show archived</label></div>
+    {mutationError ? <p aria-live="assertive" className="error-message" id="custom-reward-error" role="alert">{mutationError}</p> : null}
+    <form className="action-row" noValidate onSubmit={create}><label>Name<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label="Custom reward name" onInput={(event) => { setName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={name} /></label><label>Coin cost<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label="Custom reward coin cost" inputMode="numeric" onInput={(event) => { setCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={coinCost} /></label><button className="primary-action" disabled={pending} type="submit">Create reward</button></form>
+    {loading ? <p aria-live="polite">Loading custom rewards...</p> : null}
+    {error ? <div role="alert"><p>Custom Rewards could not be loaded.</p><button className="secondary-action" onClick={() => void load()} type="button">Retry</button></div> : null}
+    {!loading && !error && visible.length === 0 ? <p>{showArchived ? "No custom rewards yet." : "No active custom rewards yet."}</p> : null}
+    {!loading && !error && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{reward.coinCost} Coin</span><span>{reward.status === "archived" ? "Archived" : "Active"}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">Edit</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">Archive</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>Name<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label="Edit custom reward name" onInput={(event) => { setEditName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={editName} /></label><label>Coin cost<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label="Edit custom reward coin cost" onInput={(event) => { setEditCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">Save changes</button><button className="secondary-action" disabled={pending} onClick={() => { setEditingId(null); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); }} type="button">Cancel</button></form> : null}</li>)}</ul> : null}
+    {archiveTarget ? <div className="modal-backdrop"><div aria-describedby="archive-reward-description" aria-labelledby="archive-reward-title" aria-modal="true" ref={archiveDialogRef} role="alertdialog"><h2 id="archive-reward-title">Archive {archiveTarget.name}?</h2><p id="archive-reward-description">Archiving is irreversible in Reward V1. This reward remains readable but cannot be edited, redeemed, or restored.</p><div className="button-row"><button className="danger-action" disabled={pending} onClick={() => void archive()} ref={archiveConfirmRef} type="button">{pending ? "Archiving..." : "Archive reward"}</button><button className="secondary-action" disabled={pending} onClick={closeArchive} type="button">Cancel</button></div></div></div> : null}
+    <RewardTransactions account={account} onTransactionResolved={onTransactionResolved} />
+  </section>;
+}
+function rewardErrorCode(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return "unknown";
+}
+
+function transactionMessage(error: unknown, kind: "redeem" | "refund"): string {
+  const code = rewardErrorCode(error);
+  if (code === "reward_inactive") return "Reward Mode is not active. Cancel this action and reload Reward.";
+  if (code === "custom_reward_not_found") return "This Custom Reward no longer exists. Cancel this action and reload Reward.";
+  if (code === "custom_reward_archived") return "This Custom Reward is archived and can no longer be redeemed. Cancel this action and reload Reward.";
+  if (kind === "refund" && code === "redemption_not_found") return "This redemption no longer exists. Cancel this action and reload Reward.";
+  if (kind === "refund" && code === "already_refunded") return "This redemption has already been refunded. Cancel this action and reload Reward.";
+  if (kind === "redeem" && code === "insufficient_coin") return "You do not have enough Coin for this reward.";
+  if (kind === "redeem" && code === "redemption_intent_conflict") return "This redemption intent conflicts with an existing redemption. Cancel and start again.";
+  if (kind === "refund" && code === "refund_intent_conflict") return "This refund intent conflicts with an existing refund. Cancel and start again.";
+  if (code === "reward_integrity_violation") return "Reward data could not be verified. Cancel this action and reload Reward.";
+  if (code === "reward_persistence_unavailable" || code === "reward_database_failure") return "Reward storage is unavailable. Retry the same intent later or cancel.";
+  return kind === "redeem" ? "Redemption could not be completed. Retry the same intent or cancel." : "Refund could not be completed. Retry the same intent or cancel.";
+}
+
+function formatRewardDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function RewardTransactions({ account, onTransactionResolved }: { account: RewardAccountSummaryDto | null; onTransactionResolved: () => void }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const pendingRef = useRef(false);
+  const redeemIntentRef = useRef<{ reward: CustomRewardDto; id: string } | null>(null);
+  const refundIntentRef = useRef<{ item: RedemptionHistoryItemDto; id: string } | null>(null);
+  const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
+  const [history, setHistory] = useState<RedemptionHistoryItemDto[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(false);
+  const [transaction, setTransaction] = useState<"redeem" | "refund" | null>(null);
+  const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const loadRewards = useCallback(async () => { try { setRewards(await listCustomRewards()); } catch { setRewards([]); } }, []);
+  const loadHistory = useCallback(async () => { setHistoryLoading(true); setHistoryError(false); try { setHistory(await getRewardRedemptionHistory()); } catch { setHistoryError(true); } finally { setHistoryLoading(false); } }, []);
+  useEffect(() => { void loadRewards(); void loadHistory(); }, [loadRewards, loadHistory]);
+  const close = useCallback(() => {
+    if (pendingRef.current) return;
+    setTransaction(null); setTransactionError(null); redeemIntentRef.current = null; refundIntentRef.current = null;
+    queueMicrotask(() => triggerRef.current?.focus());
+  }, []);
+  useEffect(() => {
+    if (!transaction) return;
+    confirmRef.current?.focus();
+    const dialog = dialogRef.current;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); close(); return; }
+      if (event.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [close, transaction]);
+  const beginRedeem = (reward: CustomRewardDto, event: MouseEvent<HTMLButtonElement>) => { triggerRef.current = event.currentTarget; redeemIntentRef.current = { reward, id: createRewardIntentId() }; setTransactionError(null); setTransaction("redeem"); };
+  const beginRefund = (item: RedemptionHistoryItemDto, event: MouseEvent<HTMLButtonElement>) => { triggerRef.current = event.currentTarget; refundIntentRef.current = { item, id: createRewardIntentId() }; setTransactionError(null); setTransaction("refund"); };
+  const refresh = async () => { await Promise.all([loadRewards(), loadHistory()]); onTransactionResolved(); };
+  const confirm = async () => {
+    if (!transaction || pendingRef.current) return;
+    pendingRef.current = true; setPending(true); setTransactionError(null);
+    try {
+      if (transaction === "redeem") {
+        const intent = redeemIntentRef.current;
+        if (!intent) return;
+        const result: RedemptionResultDto = await redeemCustomReward({ redemptionId: intent.id, customRewardId: intent.reward.customRewardId });
+        setTransaction(null); redeemIntentRef.current = null; await refresh();
+        setTransactionError(null);
+      } else {
+        const intent = refundIntentRef.current;
+        if (!intent) return;
+        await refundCustomReward({ refundId: intent.id, redemptionId: intent.item.redemptionId });
+        setTransaction(null); refundIntentRef.current = null; await refresh();
+      }
+      queueMicrotask(() => triggerRef.current?.focus());
+    } catch (error) { setTransactionError(transactionMessage(error, transaction)); }
+    finally { pendingRef.current = false; setPending(false); }
+  };
+  const activeRewards = rewards.filter((reward) => reward.status === "active");
+  const activeTransaction = transaction === "redeem" ? redeemIntentRef.current : null;
+  const refundTransaction = transaction === "refund" ? refundIntentRef.current : null;
+  return <>
+    {activeRewards.length > 0 ? <section aria-labelledby="reward-actions-heading" className="content-panel"><h2 id="reward-actions-heading">Redeem Rewards</h2><ul className="detail-list">{activeRewards.map((reward) => { const insufficient = account !== null && account.coin < reward.coinCost; const descriptionId = "reward-insufficient-" + reward.customRewardId; return <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{reward.coinCost} Coin</span>{insufficient ? <small id={descriptionId}>Not enough Coin to redeem.</small> : null}</div><button aria-describedby={insufficient ? descriptionId : undefined} className="primary-action" disabled={insufficient || pending} onClick={(event) => beginRedeem(reward, event)} type="button">Redeem</button></li>; })}</ul></section> : null}
+    <section aria-labelledby="redemption-history-heading" className="content-panel"><h2 id="redemption-history-heading">Redemption History</h2>{historyLoading ? <p aria-live="polite">Loading redemption history...</p> : null}{historyError ? <div role="alert"><p>Redemption history could not be loaded. Account and rewards remain available.</p><button className="secondary-action" onClick={() => void loadHistory()} type="button">Retry history</button></div> : null}{!historyLoading && !historyError && history.length === 0 ? <p>No rewards redeemed yet.</p> : null}{!historyLoading && !historyError && history.length > 0 ? <ul className="detail-list">{history.map((item) => <li key={item.redemptionId}><div><strong>{item.rewardName}</strong><span>{item.coinCostPaid} Coin paid</span><span>Redeemed {formatRewardDate(item.redeemedAtUtc)}</span><span>{item.refundedAtUtc ? "Refunded " + formatRewardDate(item.refundedAtUtc) : "Not refunded"}</span></div>{item.refundId === null ? <button className="secondary-action" onClick={(event) => beginRefund(item, event)} type="button">Refund</button> : <span aria-label="Refunded" className="safe-note">Refunded</span>}</li>)}</ul> : null}</section>
+    {transaction ? <div className="modal-backdrop"><div aria-describedby="reward-transaction-description" aria-labelledby="reward-transaction-title" aria-modal="true" ref={dialogRef} role="alertdialog"><h2 id="reward-transaction-title">{transaction === "redeem" ? "Redeem " + activeTransaction?.reward.name + "?" : "Refund " + refundTransaction?.item.rewardName + "?"}</h2><p id="reward-transaction-description">{transaction === "redeem" ? "Redeeming this reward costs " + activeTransaction?.reward.coinCost + " Coin." : "This refunds the historical " + refundTransaction?.item.coinCostPaid + " Coin paid on " + formatRewardDate(refundTransaction?.item.redeemedAtUtc ?? "") + "."}</p>{transactionError ? <p className="error-message" role="alert">{transactionError}</p> : null}<div className="button-row"><button className="primary-action" disabled={pending} onClick={() => void confirm()} ref={confirmRef} type="button">{pending ? (transaction === "redeem" ? "Redeeming..." : "Refunding...") : (transaction === "redeem" ? "Redeem reward" : "Refund reward")}</button><button className="secondary-action" disabled={pending} onClick={close} type="button">Cancel</button></div></div></div> : null}
+  </>;
 }
 
 function ManualBackupSettings() {
