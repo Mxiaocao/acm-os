@@ -628,7 +628,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
       <header className="review-header">
         <div>
           <p className="eyebrow">M4 · 复习专注</p>
-          <h1>{focus ? focus.title : "Isolated review workspace"}</h1>
+          <h1>{focus ? focus.title : t("review.focusWorkspace")}</h1>
         </div>
         <button className="secondary-action" onClick={() => navigate("/today")} type="button">
           返回今日计划
@@ -644,7 +644,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
           <p>复习结果和学习状态均未改变。</p>
         </section>
       ) : !focus || renderedHtml === null ? (
-        <section aria-busy="true" className="review-stage"><p>Loading isolated statement…</p></section>
+        <section aria-busy="true" className="review-stage"><p>{t("review.loadingStatement")}</p></section>
       ) : (
         <>
           <section aria-labelledby="review-attempt-metadata" className="review-stage">
@@ -653,10 +653,10 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
               {reviewAttemptTypeLabel(focus.attempt.attemptType)} · 计划日期 {focus.attempt.scheduledDueLocalDate}
               {focus.attempt.startedEarly ? " · 已提前开始" : ""}
             </p>
-            <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">Open original OJ</a>
+            <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">{t("review.openOj")}</a>
             {ojOpenError ? <p role="alert">{ojOpenError}</p> : null}
-            <button className="secondary-action" onClick={openHelpDrawer} ref={helpButtonRef} type="button">Open controlled help</button>
-            <p className="safe-note">Old notes, hints, solutions, Contest history, and Review history are not loaded into this Focus view.</p>
+            <button className="secondary-action" onClick={openHelpDrawer} ref={helpButtonRef} type="button">{t("review.openHelp")}</button>
+            <p className="safe-note">旧笔记、提示、题解、比赛历史和复习历史不会加载到此专注视图。</p>
           </section>
           <section className="review-stage statement-view" aria-labelledby="review-statement-heading">
             <div className="statement-heading-row"><h2 id="review-statement-heading">题面快照</h2></div>
@@ -666,11 +666,11 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
             <div>
               <p className="eyebrow">依据事实，而不是自选评分</p>
               <h2>完成本次复习</h2>
-              <p>The system derives Mastered, Partial, or Not passed from these facts and recorded help.</p>
+              <p>系统根据这些事实和已记录的帮助使用情况推导掌握、部分掌握或未通过。</p>
             </div>
             <fieldset>
               <legend>提交事实</legend>
-              <label><input checked={completion.finalAc} onChange={(event) => setCompletion({ ...completion, finalAc: event.target.checked })} type="checkbox" /> Final result was AC</label>
+              <label><input checked={completion.finalAc} onChange={(event) => setCompletion({ ...completion, finalAc: event.target.checked })} type="checkbox" /> 最终结果为 AC</label>
               <label>First submission result<select value={completion.firstSubmissionResult} onChange={(event) => { const result = event.target.value as SubmissionResultDto; setCompletion({ ...completion, firstSubmissionResult: result, firstSubmissionOther: result === "other" ? completion.firstSubmissionOther : null }); }}>{submissionResultOptions()}</select></label>
               {completion.firstSubmissionResult === "other" ? <label>First result detail<input maxLength={120} onChange={(event) => setCompletion({ ...completion, firstSubmissionOther: event.target.value })} required value={completion.firstSubmissionOther ?? ""} /></label> : null}
               <label>Final result<select value={completion.finalResult} onChange={(event) => { const result = event.target.value as SubmissionResultDto; setCompletion({ ...completion, finalResult: result, finalResultOther: result === "other" ? completion.finalResultOther : null }); }}>{submissionResultOptions()}</select></label>
@@ -698,7 +698,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
             .map((revealed) => (
               <section className="review-stage review-help-content" key={revealed.level} aria-labelledby={`revealed-help-${revealed.level}`}>
                 <h2 id={`revealed-help-${revealed.level}`}>Level {revealed.level} · {revealed.title}</h2>
-                <p>Usage recorded at {revealed.revealedAtUtc}.</p>
+                <p>{t("review.usageRecorded")} {revealed.revealedAtUtc}。</p>
                 <pre>{revealed.contentMarkdown}</pre>
               </section>
             ))}
@@ -708,10 +708,10 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
         <aside aria-describedby="review-help-description" aria-labelledby="review-help-title" aria-modal="true" className="review-help-drawer" ref={helpDrawerRef} role="dialog">
           <div className="review-help-drawer__header">
             <div>
-              <p className="eyebrow">Evidence before reveal</p>
-              <h2 id="review-help-title" ref={helpHeadingRef} tabIndex={-1}>Controlled help</h2>
+              <p className="eyebrow">查看前的影响说明</p>
+              <h2 id="review-help-title" ref={helpHeadingRef} tabIndex={-1}>{t("review.helpTitle")}</h2>
             </div>
-            <button className="secondary-action" onClick={closeHelpDrawer} type="button">Close</button>
+            <button className="secondary-action" onClick={closeHelpDrawer} type="button">{t("review.close")}</button>
           </div>
           <p id="review-help-description">Opening this drawer records nothing. A successful Reveal creates an irreversible usage event before content appears.</p>
           {helpError ? <p role="alert">{helpError}</p> : null}
@@ -739,7 +739,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
                   : "Using this problem-solving help means this Attempt can be judged Partial at best."}
               </p>
               <div className="button-row">
-                <button onClick={() => performReveal(pendingHelp, true)} ref={helpConfirmButtonRef} type="button">Confirm and reveal</button>
+                <button onClick={() => performReveal(pendingHelp, true)} ref={helpConfirmButtonRef} type="button">{t("review.confirmReveal")}</button>
                 <button className="secondary-action" onClick={() => { setPendingHelp(null); queueMicrotask(() => helpHeadingRef.current?.focus()); }} type="button">Cancel</button>
               </div>
             </div>
@@ -1175,7 +1175,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
       setAnomalies(index.locationAnomalies);
       setIdentityConflicts(index.identityConflicts ?? []);
     } catch {
-      setError("Knowledge index is temporarily unavailable.");
+      setError(t("knowledge.index"));
     } finally {
       setLoading(false);
     }
@@ -1193,7 +1193,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
       try { setReevaluation(await loadKnowledgeReevaluationSuggestion(node.knowledgeNodeId)); }
       catch { setReevaluation(null); }
     } catch {
-      setError("This Knowledge Markdown could not be read fresh.");
+      setError(t("knowledge.empty"));
     }
   };
 
@@ -1204,9 +1204,9 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
     try {
       const understanding = await confirmKnowledgeUnderstanding(detail.node.knowledgeNodeId, selectedLevel);
       setDetail({ ...detail, understanding });
-      setMessage("Understanding status confirmed by you.");
+      setMessage(t("knowledge.confirmStatus"));
     } catch {
-      setMessage("Understanding status could not be saved.");
+      setMessage(t("errors.unknown"));
     } finally {
       setSaving(false);
     }

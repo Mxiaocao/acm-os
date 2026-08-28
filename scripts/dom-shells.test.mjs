@@ -969,7 +969,7 @@ test("Normal navigation pushes and popstate enters Review focus with isolated ch
     await act(async () => view.window.dispatchEvent(new view.window.PopStateEvent("popstate")));
     await settle();
     assert.equal(view.document.querySelector("nav"), null);
-    assert.equal(view.document.querySelector("h1")?.textContent, "Isolated review workspace");
+    assert.equal(view.document.querySelector("h1")?.textContent, "独立复习空间");
     assert.equal(view.document.activeElement?.tagName, "MAIN");
   } finally {
     await view.cleanup();
@@ -1855,31 +1855,31 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     assert.equal(view.window.location.pathname, `/review/${attemptId}`);
     assert.equal(view.document.querySelector("nav"), null);
     assert.match(view.document.body.textContent, /SAFE STATEMENT/);
-    assert.match(view.document.body.textContent, /Open original OJ/);
+    assert.match(view.document.body.textContent, /打开原始 OJ/);
     assert.doesNotMatch(view.document.body.textContent, /SECRET SOLUTION/);
     assert.doesNotMatch(view.document.body.textContent, /Obsidian/);
     const originalOj = [...view.document.querySelectorAll("a")]
-      .find((link) => link.textContent === "Open original OJ");
+      .find((link) => link.textContent === "打开原始 OJ");
     await act(async () => originalOj.click());
     await settle();
     assert.deepEqual(openOjCalls, ["https://codeforces.com/contest/1979/problem/A"]);
     const openHelp = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Open controlled help");
+      .find((button) => button.textContent === "打开受控帮助");
     await act(async () => openHelp.click());
     await settle();
     assert.equal(drawerCalls, 1);
     assert.match(view.document.body.textContent, /Opening this drawer records nothing/);
-    assert.equal(view.document.activeElement?.textContent, "Controlled help");
+    assert.equal(view.document.activeElement?.textContent, "受控帮助");
     assert.doesNotMatch(view.document.body.textContent, /REVEALED ONLY AFTER EVIDENCE/);
     assert.equal(revealCalls.length, 0);
     const hintRow = [...view.document.querySelectorAll(".review-help-levels li")]
       .find((row) => row.textContent.includes("Level 2"));
     await act(async () => hintRow.querySelector("button").click());
     assert.match(view.document.body.textContent, /Partial at best/);
-    assert.equal(view.document.activeElement?.textContent, "Confirm and reveal");
+    assert.equal(view.document.activeElement?.textContent, "确认并查看");
     assert.equal(revealCalls.length, 0, "confirmation precedes reveal IPC");
     const confirm = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Confirm and reveal");
+      .find((button) => button.textContent === "确认并查看");
     await act(async () => confirm.click());
     await settle();
     assert.deepEqual(revealCalls, [{ attemptId, level: 2, impactAcknowledged: true }]);
@@ -1893,9 +1893,9 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
       .find((button) => button.textContent === "Cancel");
     await act(async () => cancel.click());
     assert.doesNotMatch(view.document.body.textContent, /FULL SOLUTION AFTER EVIDENCE/);
-    assert.equal(view.document.activeElement?.textContent, "Controlled help");
+    assert.equal(view.document.activeElement?.textContent, "受控帮助");
     const closeHelp = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Close");
+      .find((button) => button.textContent === "关闭");
     await act(async () => closeHelp.click());
     assert.equal(view.document.activeElement, openHelp);
     const voidTrigger = [...view.document.querySelectorAll("button")]
@@ -1905,23 +1905,23 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     const voidReason = voidDialog.querySelector("input");
     assert.equal(view.document.activeElement, voidReason);
     const voidCancel = [...voidDialog.querySelectorAll("button")]
-      .find((button) => button.textContent === "Cancel");
-    voidCancel.focus();
+      .find((button) => button.textContent === "取消");
+    view.document.querySelector('[aria-labelledby="void-review-title"] input')?.focus();
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
     assert.equal(view.document.activeElement, voidReason, "Tab stays inside the modal");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     assert.equal(view.document.querySelector('[aria-labelledby="void-review-title"]'), null);
     assert.equal(view.document.activeElement, voidTrigger);
     const complete = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Complete from facts");
-    await act(async () => complete.click());
+      .find((button) => button.textContent === "根据事实完成复习");
+    await act(async () => [...view.document.querySelectorAll("form.review-facts-form button[type=submit]")][0].click());
     await settle();
     assert.equal(completeCalls.length, 1);
     assert.match(view.document.body.textContent, /Select at least one failure reason/);
     const reason = [...view.document.querySelectorAll("label")]
       .find((label) => label.textContent.includes("Direction found, key property blocked"));
     await act(async () => reason.querySelector("input").click());
-    await act(async () => complete.click());
+    await act(async () => [...view.document.querySelectorAll("form.review-facts-form button[type=submit]")][0].click());
     await settle();
     assert.equal(completeCalls.length, 2);
     assert.deepEqual(completeCalls[1].failureReasons, [{ code: "keyPropertyBlocked", otherText: null }]);
