@@ -1,4 +1,5 @@
 import { fallbackMessages, type MessageKey, zhCNMessages } from "./messages";
+export type { MessageKey } from "./messages";
 
 export const DEFAULT_LOCALE = "zh-CN" as const;
 export const FALLBACK_LOCALE = "en" as const;

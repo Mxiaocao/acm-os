@@ -194,6 +194,7 @@ import {
 import type { AppRoute, NormalPage } from "./routing";
 import { displayProblemTitle } from "./translation";
 import { t } from "./i18n";
+import { getErrorPresentation } from "./i18n/errors";
 import { LoadingState } from "./ui/states";
 
 type Navigate = (pathname: string, options?: { replace?: boolean }) => void;
@@ -761,7 +762,7 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   if (page === "settings") {
     return (
       <>
-        <PageHeader eyebrow="Tool" headingRef={headingRef} title="Settings" />
+        <PageHeader eyebrow="工具" headingRef={headingRef} title={t("nav.settings")} />
         <section aria-labelledby="workspace-settings" className="content-panel">
           <h2 id="workspace-settings">工作区</h2>
           <dl className="detail-list detail-list--paths">
@@ -769,7 +770,7 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
              <dt>题目笔记目录</dt><dd>{workspace.problemRootPath}</dd>
              <dt>知识库目录</dt><dd>{workspace.knowledgeRootPath}</dd>
           </dl>
-          <p className="safe-note">Changing the Active Vault requires a future preview-and-confirm flow.</p>
+          <p className="safe-note">修改当前 Vault 需要经过预览和确认流程。</p>
          </section>
          <ManualBackupSettings />
          <WeeklyAcmBudgetSettings />
@@ -1101,7 +1102,7 @@ function ManualBackupSettings() {
   const [inventory, setInventory] = useState<BackupInventoryDto | null>(null);
   const prepare = async () => {
     try { setPreview(await previewManualBackup()); setMessage(null); }
-    catch { setMessage("Backup preview is temporarily unavailable."); }
+    catch (cause) { setMessage(getErrorPresentation(cause, "load")); }
   };
   const backup = async () => {
     setBusy(true);
@@ -1111,19 +1112,19 @@ function ManualBackupSettings() {
       setPreview(null);
       setInventory(await loadBackupInventory());
     } catch {
-      setMessage("Backup could not be created. No partial backup was published.");
+      setMessage(getErrorPresentation(new Error("backup_save_failed"), "save") + " 未发布不完整的备份。");
     } finally { setBusy(false); }
   };
   const inspect = async () => {
     try { setInventory(await loadBackupInventory()); setMessage(null); }
-    catch { setMessage("Backup inventory is temporarily unavailable."); }
+    catch (cause) { setMessage(getErrorPresentation(cause, "load")); }
   };
   return (
     <section aria-labelledby="manual-backup" className="content-panel">
        <h2 id="manual-backup">系统事实备份</h2>
        <p>创建与 SQLite 一致的快照，不会复制或修改 Markdown 文件。</p>
-       <button className="secondary-action" onClick={() => void prepare()} type="button">Preview manual backup</button>
-       <button className="secondary-action" onClick={() => void inspect()} type="button">Inspect backup inventory</button>
+       <button className="secondary-action" onClick={() => void prepare()} type="button">预览手动备份</button>
+       <button className="secondary-action" onClick={() => void inspect()} type="button">查看备份清单</button>
       {preview ? <div role="alertdialog">
         <p>Schema {preview.schemaVersion}; destination <code>{preview.backupDirectory}</code>; filename prefix <code>{preview.filenamePrefix}</code>.</p>
         <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "Creating backup…" : "Create backup"}</button>
