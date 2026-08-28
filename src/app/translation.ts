@@ -226,6 +226,7 @@ function translateText(text: string): string {
 }
 
 function translateTree(root: Node) {
+  if (root.nodeType === 1 && (root as Element).closest("[data-i18n-skip]")) return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   let current: Node | null;
@@ -311,7 +312,6 @@ export function buildChineseQuickView(html: string): string {
   return paragraphs.map((line, index) => `${index === 0 ? "题意：" : ""}${line}`).join("\n\n").slice(0, 1400) + (translated.length > 1400 ? "…" : "");
 }
 
-export function displayProblemTitle(index: string, title: string): string {
-  if (!/[\u0400-\u04ff]/.test(title)) return title;
-  return RUSSIAN_PROBLEM_TITLES[title.trim()] ?? `Problem ${index}`;
+export function displayProblemTitle(_index: string, title: string): string {
+  return title;
 }

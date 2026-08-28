@@ -886,7 +886,7 @@ test("Normal shell exposes its frozen navigation, skip link, and focused route h
       ["今日", "比赛", "我的题库", "知识库", "奖励", "设置"],
     );
     assert.equal(view.document.querySelector(".skip-link")?.getAttribute("href"), "#main-content");
-    assert.equal(view.document.activeElement?.textContent, "Today");
+    assert.equal(view.document.activeElement?.textContent, "今日计划");
   } finally {
     await view.cleanup();
   }
@@ -945,8 +945,8 @@ test("Setup success replaces the URL with Today and focuses its new content", { 
     await act(async () => view.document.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
     await settle();
     assert.equal(view.window.location.pathname, "/today");
-    assert.equal(view.document.querySelector("h1")?.textContent, "Today");
-    assert.equal(view.document.activeElement?.textContent, "Today");
+    assert.equal(view.document.querySelector("h1")?.textContent, "今日计划");
+    assert.equal(view.document.activeElement?.textContent, "今日计划");
   } finally {
     await view.cleanup();
   }
@@ -1049,7 +1049,7 @@ test("Contest facts snapshot preserves contest result beside live learning statu
   } finally { await view.cleanup(); }
 });
 
-test("Contest detail renders cached Russian problem titles in built-in English", { concurrency: false }, async () => {
+test("Contest detail preserves cached external problem titles", { concurrency: false }, async () => {
   const detail = {
     contestId: 2256,
     title: "Codeforces Round 1116 (Div. 2)",
@@ -1080,8 +1080,7 @@ test("Contest detail renders cached Russian problem titles in built-in English",
   }, "/contests/2256");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /C\. Hot Potatoes at the Fairy Warehouse/);
-    assert.doesNotMatch(view.document.body.textContent, /[\u0400-\u04ff]/);
+    assert.match(view.document.body.textContent, /C\. Горячая картошка на складе фей/);
   } finally { await view.cleanup(); }
 });
 
@@ -2212,8 +2211,8 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     throw new Error(`unexpected command ${command}`);
   }, "/today");
   try {
-    assert.match(view.document.body.textContent, /Upsolve/);
-    const down = view.document.querySelector('button[aria-label="Move Upsolve down"]');
+    assert.match(view.document.body.textContent, /补题/);
+    const down = view.document.querySelector('button[aria-label="Move 补题 down"]');
     await act(async () => down.click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "reorder_today")[1].input.orderedEntryIds, ["entry-b", "entry-a"]);
     const firstEntry = view.document.querySelector(".today-entry");
@@ -2249,8 +2248,8 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     const done = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Done for today");
     await act(async () => done.click()); await settle();
     assert.ok(calls.some(([name]) => name === "complete_today_entry"));
-    assert.match(view.document.body.textContent, /Extra suggestions/);
-    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add to Today");
+    assert.match(view.document.body.textContent, /额外建议/);
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "加入今日计划");
     await act(async () => add.click()); await settle();
     assert.ok(calls.some(([name, args]) => name === "accept_today_extra_suggestion" && args.input.problemId === "3"));
     assert.match(view.document.body.textContent, /Manual/);
@@ -2283,14 +2282,14 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
       budget.dispatchEvent(new view.window.Event("change", { bubbles: true }));
     });
     await act(async () => preview.click()); await settle();
-    assert.match(view.document.body.textContent, /Apply this replan/);
-    const apply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Apply replan");
+    assert.match(view.document.body.textContent, /应用这次重新规划/);
+    const apply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "应用重新规划");
     assert.equal(view.document.activeElement, apply, "replan dialog focuses its primary action");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     assert.equal(view.document.querySelector('[role="dialog"]'), null, "Escape closes the replan dialog");
     assert.equal(view.document.activeElement, preview, "closing the replan returns focus to its trigger");
     await act(async () => preview.click()); await settle();
-    const reopenedApply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Apply replan");
+    const reopenedApply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "应用重新规划");
     await act(async () => reopenedApply.click()); await settle();
     assert.ok(calls.some(([name]) => name === "apply_today_replan"));
     assert.ok([...view.document.querySelectorAll(".sr-only")].some((node) => /Today replan applied/.test(node.textContent ?? "")));
@@ -2384,7 +2383,7 @@ test("Today asks for a budget before creating the first daily snapshot", {
     });
     await act(async () => create.click()); await settle();
     assert.deepEqual(loads, [null, 60]);
-    assert.match(view.document.body.textContent, /No tasks fit this budget/);
+    assert.match(view.document.body.textContent, /没有任务适合当前预算/);
   } finally { await view.cleanup(); }
 });
 
@@ -2534,7 +2533,7 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
     });
     await settle();
     assert.equal(wednesday.value, "73");
-    const save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save weekly budget");
+    const save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "淇濆瓨姣忓懆棰勭畻");
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "-1");
       wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
