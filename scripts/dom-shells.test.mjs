@@ -2750,20 +2750,20 @@ test("Settings previews manual backup before creating it", { concurrency: false 
     throw new Error(`unexpected command ${command}`);
   }, "/settings");
   try {
-    const preview = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "Preview manual backup");
+    const preview = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "预览手动备份");
     await act(async () => preview.click()); await settle();
     assert.equal(calls[0], "preview_manual_backup");
     assert.match(view.document.body.textContent, /Schema 23/);
     assert.equal(calls.includes("create_manual_backup"), false);
-    const create = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "Create backup");
+    const create = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "创建备份");
     await act(async () => create.click()); await settle();
     const createIndex = calls.indexOf("create_manual_backup");
     const inventoryIndex = calls.lastIndexOf("backup_inventory");
     assert.ok(createIndex >= 0);
     assert.ok(inventoryIndex > createIndex);
-    assert.match(view.document.body.textContent, /Backup created/);
-    assert.match(view.document.body.textContent, /keep 7 daily and 4 weekly/);
-    assert.match(view.document.body.textContent, /integrity verified/);
+    assert.match(view.document.body.textContent, /备份已创建/);
+    assert.match(view.document.body.textContent, /保留 7 个每日快照和 4 个每周快照/);
+    assert.match(view.document.body.textContent, /完整性已验证/);
     assert.match(view.document.body.textContent, /protected/);
     assert.equal([...view.document.querySelectorAll("button")].some((button) => /delete|prune/i.test(button.textContent)), false);
   } finally { await view.cleanup(); }

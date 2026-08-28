@@ -1108,7 +1108,7 @@ function ManualBackupSettings() {
     setBusy(true);
     try {
       const result = await createManualBackup();
-      setMessage(`Backup created: ${result.path}`);
+      setMessage(`备份已创建：${result.path}`);
       setPreview(null);
       setInventory(await loadBackupInventory());
     } catch {
@@ -1127,14 +1127,14 @@ function ManualBackupSettings() {
        <button className="secondary-action" onClick={() => void inspect()} type="button">查看备份清单</button>
       {preview ? <div role="alertdialog">
         <p>Schema {preview.schemaVersion}; destination <code>{preview.backupDirectory}</code>; filename prefix <code>{preview.filenamePrefix}</code>.</p>
-        <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "Creating backup…" : "Create backup"}</button>
+        <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "正在创建备份…" : "创建备份"}</button>
       </div> : null}
       {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
       {inventory ? <div>
-        <p>Retention preview: keep {inventory.dailyKeep} daily and {inventory.weeklyKeep} weekly snapshots. Manual and migration backups are protected.</p>
+        <p>保留预览：保留 {inventory.dailyKeep} 个每日快照和 {inventory.weeklyKeep} 个每周快照。手动备份和迁移备份受保护。</p>
          {inventory.entries.length === 0 ? <p>没有已发布的备份。</p> : <ul className="backup-inventory">
           {inventory.entries.map((entry) => <li key={entry.path}>
-            <code>{entry.path}</code><span>{entry.category} · {entry.integrityVerified ? "integrity verified" : "integrity failed"} · {entry.retention}</span>
+            <code>{entry.path}</code><span>{entry.category} · {entry.integrityVerified ? "完整性已验证" : "完整性验证失败"} · {entry.retention}</span>
           </li>)}
         </ul>}
       </div> : null}
