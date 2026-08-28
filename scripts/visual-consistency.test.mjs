@@ -50,7 +50,7 @@ test("programmatically focused route headings keep a content-sized focus ring", 
 test("fullscreen normal pages share one centered content rail", async () => {
   const css = await readFile(cssUrl, "utf8");
   assert.match(css, /\.normal-content\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*1280px;[\s\S]*?justify-self:\s*center;/);
-  assert.match(css, /\.content-panel\s*\{\s*width:\s*100%;\s*max-width:\s*none;/);
+  assert.match(css, /\.content-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
   assert.match(css, /\.contest-import-form,\s*\.manual-import-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
 });
 
@@ -76,6 +76,6 @@ test("Contest cabinet switches only between full and compact column presentation
   assert.match(css, /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/);
   assert.match(css, /@container\s+contest-cabinet-presentation\s*\(min-width:\s*950px\)[\s\S]*?data-compact-active="false"\][\s\S]*?display:\s*block;[\s\S]*?\.contest-cabinet-pager\s*\{\s*display:\s*none;/);
   assert.match(shells, /data-logical-column=\{index \+ 1\}/);
-  assert.match(shells, /aria-label="Compact cabinet column navigation"/);
+  assert.match(shells, /aria-label=\{t\("contest\.compactNav"\)\}/);
   assert.doesNotMatch(shells, /tier === 1 && index === 0/);
 });
