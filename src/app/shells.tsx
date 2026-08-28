@@ -193,6 +193,8 @@ import {
 } from "../ipc/workspace";
 import type { AppRoute, NormalPage } from "./routing";
 import { displayProblemTitle } from "./translation";
+import { t } from "./i18n";
+import { LoadingState } from "./ui/states";
 
 type Navigate = (pathname: string, options?: { replace?: boolean }) => void;
 type ConfiguredWorkspace = Extract<WorkspaceStatusDto, { state: "configured" }>;
@@ -210,7 +212,7 @@ export function LoadingShell() {
       <Brand />
       <p className="eyebrow">启动检查</p>
       <h1 ref={headingRef} tabIndex={-1}>正在检查系统事实</h1>
-      <p aria-live="polite">Validating the local database and workspace configuration…</p>
+      <LoadingState message={t("shell.checkingFacts")} />
     </main>
   );
 }
@@ -242,7 +244,7 @@ export function RecoveryShell({
     <main className="gate-shell gate-shell--recovery">
       <Brand />
       <p className="eyebrow">恢复模式</p>
-      <h1 ref={headingRef} tabIndex={-1}>Normal startup is blocked</h1>
+      <h1 ref={headingRef} tabIndex={-1}>{t("shell.normalBlocked")}</h1>
       <p>
         ACM-OS could not prove that System Facts are safe to use. Normal navigation stays hidden
         so the application cannot continue in a partially valid state.
@@ -398,16 +400,16 @@ export function NormalAppShell({
     <div className="normal-shell">
       <aside className="app-sidebar">
         <Brand />
-        <a className="skip-link" href="#main-content">Skip to content</a>
-        <nav aria-label="Primary">
-          <ShellLink active={route.kind === "normal" && route.page === "today"} href="/today" navigate={navigate}>Today</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}>Contests</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}>我的题库</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}>Knowledge</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}>Reward</ShellLink>
+      <a className="skip-link" href="#main-content">{t("shell.skipContent")}</a>
+        <nav aria-label={t("shell.primaryNav")}>
+          <ShellLink active={route.kind === "normal" && route.page === "today"} href="/today" navigate={navigate}>{t("nav.today")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}>{t("nav.contests")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}>{t("nav.problems")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}>{t("nav.knowledge")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}>{t("nav.reward")}</ShellLink>
         </nav>
-        <nav aria-label="Tools" className="tool-nav">
-          <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}>Settings</ShellLink>
+        <nav aria-label={t("shell.toolsNav")} className="tool-nav">
+          <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}>{t("nav.settings")}</ShellLink>
         </nav>
         <p className="system-caption">
           System Facts {foundationCaption(foundation)}

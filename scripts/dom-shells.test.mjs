@@ -883,7 +883,7 @@ test("Normal shell exposes its frozen navigation, skip link, and focused route h
   try {
     assert.deepEqual(
       [...view.document.querySelectorAll("nav a")].map((link) => link.textContent),
-      ["Today", "Contests", "我的题库", "Knowledge", "Reward", "Settings"],
+      ["今日", "比赛", "我的题库", "知识库", "奖励", "设置"],
     );
     assert.equal(view.document.querySelector(".skip-link")?.getAttribute("href"), "#main-content");
     assert.equal(view.document.activeElement?.textContent, "Today");
@@ -917,8 +917,8 @@ test("App shell IPC rejection fails closed into Recovery", { concurrency: false 
   });
   try {
     assert.equal(view.document.querySelector("nav"), null);
-    assert.equal(view.document.querySelector("h1")?.textContent, "Normal startup is blocked");
-    assert.equal(view.document.title, "Recovery · ACM-OS");
+    assert.equal(view.document.querySelector("h1")?.textContent, "正常启动已被阻止");
+    assert.equal(view.document.title, "恢复模式 · ACM-OS");
   } finally {
     await view.cleanup();
   }
@@ -961,7 +961,7 @@ test("Normal navigation pushes and popstate enters Review focus with isolated ch
     throw new Error(`unexpected command ${command}`);
   }, "/today");
   try {
-    const contests = [...view.document.querySelectorAll("a")].find((link) => link.textContent === "Contests");
+    const contests = [...view.document.querySelectorAll("a")].find((link) => link.textContent === "比赛");
     await act(async () => contests.dispatchEvent(new view.window.MouseEvent("click", { bubbles: true, button: 0 })));
     assert.equal(view.window.location.pathname, "/contests");
     assert.equal(view.document.querySelector("h1")?.textContent, "比赛");

@@ -31,8 +31,8 @@ test("Reward navigation and inactive account require explicit confirmation", { c
     return baseIpc(command);
   });
   try {
-    const rewardLink = view.document.querySelector('nav[aria-label="Primary"] a[href="/reward"]');
-    assert.equal(rewardLink?.textContent, "Reward");
+    const rewardLink = view.document.querySelector('nav[aria-label="主导航"] a[href="/reward"]');
+    assert.equal(rewardLink?.textContent, "奖励");
     assert.equal(rewardLink?.getAttribute("aria-current"), "page");
     assert.match(view.document.body.textContent, /Reward Mode is currently off/);
     assert.match(view.document.body.textContent, /cannot be turned off or reset/);

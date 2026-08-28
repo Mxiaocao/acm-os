@@ -33,6 +33,18 @@ export const fallbackMessages = {
   "reward.undoRedemption": "Undo redemption",
   "reward.enableMode": "Enable Reward Mode",
   "errors.unknown": "Something went wrong.",
+  "shell.startupCheck": "Startup check",
+  "shell.checkingFacts": "Checking system facts",
+  "shell.recovery": "Recovery mode",
+  "shell.setupWorkspace": "Connect your workspace",
+  "shell.normalBlocked": "Normal startup is blocked",
+  "shell.skipContent": "Skip to content",
+  "shell.primaryNav": "Primary",
+  "shell.toolsNav": "Tools",
+  "shell.systemFacts": "System Facts",
+  "shell.saveEnter": "Save and enter ACM-OS",
+  "shell.validatingWorkspace": "Validating workspace…",
+  "shell.loading": "Loading…",
 } as const;
 
 export const zhCNMessages = {
@@ -70,6 +82,18 @@ export const zhCNMessages = {
   "reward.undoRedemption": "撤销兑换",
   "reward.enableMode": "启用奖励模式",
   "errors.unknown": "操作失败，请稍后重试。",
+  "shell.startupCheck": "启动检查",
+  "shell.checkingFacts": "正在检查系统事实",
+  "shell.recovery": "恢复模式",
+  "shell.setupWorkspace": "连接工作区",
+  "shell.normalBlocked": "正常启动已被阻止",
+  "shell.skipContent": "跳转到主要内容",
+  "shell.primaryNav": "主导航",
+  "shell.toolsNav": "工具",
+  "shell.systemFacts": "系统事实",
+  "shell.saveEnter": "保存并进入 ACM-OS",
+  "shell.validatingWorkspace": "正在验证工作区…",
+  "shell.loading": "正在加载…",
 } satisfies Record<keyof typeof fallbackMessages, string>;
 
 export type MessageKey = keyof typeof fallbackMessages;

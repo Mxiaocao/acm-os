@@ -4,6 +4,7 @@ import { getFoundationStatus, type FoundationStatus } from "../ipc/foundation";
 import type { WorkspaceStatusDto } from "../ipc/workspace";
 import { parseAppRoute, type NormalPage } from "./routing";
 import { installChineseUiTranslation } from "./translation";
+import { t } from "./i18n";
 import {
   LoadingShell,
   NormalAppShell,
@@ -106,7 +107,7 @@ export function App() {
   if (route.kind === "review") {
     return (
       <>
-        <RouteAnnouncement message="Review focus" />
+        <RouteAnnouncement message={t("nav.review")} />
         <ReviewFocusShell attemptId={route.attemptId} navigate={navigate} />
       </>
     );
@@ -134,22 +135,22 @@ function routeAnnouncement(
   pathname: string,
   startupUnavailable: boolean,
 ): string {
-  if (startupUnavailable || shell?.state === "recovery") return "Recovery";
-  if (!shell) return "Checking system facts";
-  if (shell.state === "setup") return "Connect your workspace";
+  if (startupUnavailable || shell?.state === "recovery") return t("shell.recovery");
+  if (!shell) return t("shell.checkingFacts");
+  if (shell.state === "setup") return t("shell.setupWorkspace");
   const route = parseAppRoute(pathname);
-  if (route.kind === "review") return "Review focus";
+  if (route.kind === "review") return t("nav.review");
   return route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found";
 }
 
 function normalPageLabel(page: NormalPage): string {
   const labels = {
-    today: "Today",
-    contests: "Contests",
+    today: t("nav.today"),
+    contests: t("nav.contests"),
     problems: "我的题库",
-    knowledge: "Knowledge",
-    reward: "Reward",
-    settings: "Settings",
+    knowledge: t("nav.knowledge"),
+    reward: t("nav.reward"),
+    settings: t("nav.settings"),
   };
   return labels[page];
 }
