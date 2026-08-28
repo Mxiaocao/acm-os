@@ -1,6 +1,9 @@
 node_modules/
 .pnpm-store/
-.desktop-e2e-*/
+/.c2e*/
+/.c2t*/
+/.desktop-e2e-*/
+/acm-os.exe
 dist/
 src-tauri/target/
 src-tauri/gen/
