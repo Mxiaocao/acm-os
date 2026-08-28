@@ -34,20 +34,20 @@ test("Reward navigation and inactive account require explicit confirmation", { c
     const rewardLink = view.document.querySelector('nav[aria-label="主导航"] a[href="/reward"]');
     assert.equal(rewardLink?.textContent, "奖励");
     assert.equal(rewardLink?.getAttribute("aria-current"), "page");
-    assert.match(view.document.body.textContent, /Reward Mode is currently off/);
-    assert.match(view.document.body.textContent, /cannot be turned off or reset/);
-    assert.match(view.document.body.textContent, /historical activity.*does not receive positive rewards/i);
+    assert.match(view.document.body.textContent, /奖励模式当前未启用/);
+    assert.match(view.document.body.textContent, /无法关闭或重置/);
+    assert.match(view.document.body.textContent, /历史活动不会追溯获得正向奖励/);
 
     const trigger = findButton(view.document, "Enable Reward Mode");
     await act(async () => trigger.click());
     const dialog = view.document.querySelector('[role="alertdialog"]');
     assert.ok(dialog);
     assert.equal(calls.includes("activate_reward"), false);
-    assert.equal(view.document.activeElement?.textContent, "Enable Reward Mode");
+    assert.equal(view.document.activeElement?.textContent, "启用奖励模式");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true })));
-    assert.equal(view.document.activeElement?.textContent, "Cancel");
+    assert.equal(view.document.activeElement?.textContent, "取消");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
-    assert.equal(view.document.activeElement?.textContent, "Enable Reward Mode");
+    assert.equal(view.document.activeElement?.textContent, "启用奖励模式");
 
     await act(async () => findButton(view.document, "Cancel").click());
     await settle();
@@ -87,7 +87,7 @@ test("Reward activation runs once while pending and refreshes the active account
     });
     assert.equal(calls.filter((command) => command === "activate_reward").length, 1);
     assert.equal(confirm.disabled, true);
-    assert.equal(confirm.textContent, "Enabling...");
+    assert.equal(confirm.textContent, "正在启用…");
 
     await act(async () => resolveActivation());
     await settle();
@@ -97,7 +97,7 @@ test("Reward activation runs once while pending and refreshes the active account
     assert.ok(account);
     assert.deepEqual(
       [...account.querySelectorAll("dt")].map((node) => node.textContent),
-      ["Level", "XP", "Coin"],
+      ["等级", "经验值（XP）", "金币"],
     );
     assert.deepEqual(
       [...account.querySelectorAll("dd")].map((node) => node.textContent),
@@ -122,13 +122,13 @@ test("Reward shows initial loading and a retryable activation-state error", { co
     return baseIpc(command);
   }, false);
   try {
-    assert.match(view.document.body.textContent, /Loading Reward Mode/);
+    assert.match(view.document.body.textContent, /正在加载奖励模式/);
     await act(async () => resolveRead());
     await settle();
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /could not be loaded/i);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /奖励模式无法加载/);
     await act(async () => findButton(view.document, "Retry").click());
     await settle();
-    assert.match(view.document.body.textContent, /Reward Mode is currently off/);
+    assert.match(view.document.body.textContent, /奖励模式当前未启用/);
   } finally {
     await view.cleanup();
   }
@@ -142,7 +142,7 @@ test("Reward account errors remain visible without fake account values", { concu
   });
   try {
     const alert = view.document.querySelector('[role="alert"]');
-    assert.match(alert?.textContent ?? "", /account summary could not be loaded/i);
+    assert.match(alert?.textContent ?? "", /奖励账户摘要无法加载/);
     assert.equal(view.document.querySelector('[aria-labelledby="reward-account-heading"] dl'), null);
     assert.doesNotMatch(view.document.body.textContent, /Level\s*0|XP\s*0|Coin\s*0/);
   } finally {
@@ -165,7 +165,7 @@ test("Reward activation failure is announced and remains retryable", { concurren
     await act(async () => findButton(view.document, "Enable Reward Mode", 1).click());
     await settle();
     assert.equal(activationCalls, 1);
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /was not enabled/i);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /奖励模式未能启用/);
     assert.ok(findButton(view.document, "Enable Reward Mode"));
   } finally {
     await view.cleanup();
@@ -186,7 +186,7 @@ test("active Reward page loads active custom rewards and hides archived by defau
     return baseIpc(command);
   });
   try {
-    assert.match(view.document.body.textContent, /Custom Rewards/);
+    assert.match(view.document.body.textContent, /自定义奖励/);
     assert.match(view.document.body.textContent, /Coffee/);
     assert.doesNotMatch(view.document.body.textContent, /Old prize/);
     assert.equal(calls.includes("list_custom_rewards"), true);
@@ -211,18 +211,18 @@ test("Custom Reward create, edit, archived filter, and archive confirmation use 
     assert.ok(archivedToggle);
     await act(async () => archivedToggle.click()); await settle();
     assert.match(view.document.body.textContent, /Old prize/);
-    assert.equal([...view.document.querySelectorAll("button")].filter((b) => b.textContent === "Edit").length, 1);
+    assert.equal([...view.document.querySelectorAll("button")].filter((b) => b.textContent === "编辑").length, 1);
 
-    const nameInput = view.document.querySelector('input[aria-label="Custom reward name"]');
-    const costInput = view.document.querySelector('input[aria-label="Custom reward coin cost"]');
+    const nameInput = view.document.querySelector('input[aria-label="自定义奖励名称"]');
+    const costInput = view.document.querySelector('input[aria-label="自定义奖励所需金币"]');
     await act(async () => { setInput(nameInput, "Weekend walk"); setInput(costInput, "12"); });
     await act(async () => findButton(view.document, "Create reward").click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "create_custom_reward")[1].input, { name: "Weekend walk", coinCost: 12 });
 
     await act(async () => findButton(view.document, "Edit").click()); await settle();
-    assert.equal(view.document.querySelector('input[aria-label="Edit custom reward name"]').value, "Coffee");
-    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward name"]'), "Tea"));
-    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward coin cost"]'), "7"));
+    assert.equal(view.document.querySelector('input[aria-label="编辑自定义奖励名称"]').value, "Coffee");
+    await act(async () => setInput(view.document.querySelector('input[aria-label="编辑自定义奖励名称"]'), "Tea"));
+    await act(async () => setInput(view.document.querySelector('input[aria-label="编辑自定义奖励所需金币"]'), "7"));
     await act(async () => findButton(view.document, "Save changes").click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "update_custom_reward")[1].input, { customRewardId: "r1", name: "Tea", coinCost: 7 });
 
@@ -247,13 +247,13 @@ test("Custom Reward validation rejects blank names and invalid coin costs before
     return baseIpc(command);
   });
   try {
-    const name = view.document.querySelector('input[aria-label="Custom reward name"]');
-    const cost = view.document.querySelector('input[aria-label="Custom reward coin cost"]');
+    const name = view.document.querySelector('input[aria-label="自定义奖励名称"]');
+    const cost = view.document.querySelector('input[aria-label="自定义奖励所需金币"]');
     for (const value of ["", "0", "-1", "1.5", "9007199254740992"]) {
       await act(async () => { setInput(name, value === "" ? "" : "Valid"); setInput(cost, value); });
       await act(async () => findButton(view.document, "Create reward").click()); await settle();
       assert.equal(calls.length, 0);
-      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /positive safe whole-number/i);
+      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /请输入名称.*有效的正整数/);
       const invalidInput = value === "" ? name : cost;
       assert.equal(invalidInput.getAttribute("aria-invalid"), "true");
       assert.equal(invalidInput.getAttribute("aria-describedby"), "custom-reward-error");
@@ -286,8 +286,8 @@ test("Custom Reward mutations reject rapid duplicate submits while pending", { c
   });
   try {
     await act(async () => {
-      setInput(view.document.querySelector('input[aria-label="Custom reward name"]'), "Coffee");
-      setInput(view.document.querySelector('input[aria-label="Custom reward coin cost"]'), "7");
+      setInput(view.document.querySelector('input[aria-label="自定义奖励名称"]'), "Coffee");
+      setInput(view.document.querySelector('input[aria-label="自定义奖励所需金币"]'), "7");
     });
     const create = findButton(view.document, "Create reward");
     act(() => { create.click(); create.click(); });
@@ -296,7 +296,7 @@ test("Custom Reward mutations reject rapid duplicate submits while pending", { c
     await act(async () => resolveCreate(rewards[1])); await settle();
 
     await act(async () => findButton(view.document, "Edit").click());
-    await act(async () => setInput(view.document.querySelector('input[aria-label="Edit custom reward name"]'), "Tea"));
+    await act(async () => setInput(view.document.querySelector('input[aria-label="编辑自定义奖励名称"]'), "Tea"));
     const save = findButton(view.document, "Save changes");
     act(() => { save.click(); save.click(); });
     assert.equal(calls.filter((command) => command === "update_custom_reward").length, 1);
@@ -324,11 +324,11 @@ test("archive dialog traps focus and restores the originating action on cancel",
   try {
     const trigger = findButton(view.document, "Archive");
     await act(async () => trigger.click());
-    assert.equal(view.document.activeElement?.textContent, "Archive reward");
+    assert.equal(view.document.activeElement?.textContent, "归档奖励");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true })));
-    assert.equal(view.document.activeElement?.textContent, "Cancel");
+    assert.equal(view.document.activeElement?.textContent, "取消");
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
-    assert.equal(view.document.activeElement?.textContent, "Archive reward");
+    assert.equal(view.document.activeElement?.textContent, "归档奖励");
     await act(async () => findButton(view.document, "Cancel").click()); await settle();
     assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
     assert.equal(view.document.activeElement, trigger);
@@ -348,10 +348,10 @@ test("Reward read failures preserve unrelated successful account, reward, and hi
       return baseIpc(command);
     });
     try {
-      if (failedRead !== "reward_account_summary") assert.match(view.document.body.textContent, /Level\s*3[\s\S]*XP\s*30[\s\S]*Coin\s*20/);
+      if (failedRead !== "reward_account_summary") assert.match(view.document.body.textContent, /等级\s*3[\s\S]*经验值（XP）\s*30[\s\S]*金币\s*20/);
       if (failedRead !== "list_custom_rewards") assert.match(view.document.body.textContent, /Coffee/);
-      if (failedRead !== "reward_redemption_history") assert.match(view.document.body.textContent, /Coffee history[\s\S]*4 Coin paid/);
-      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /could not be loaded/i);
+      if (failedRead !== "reward_redemption_history") assert.match(view.document.body.textContent, /Coffee history[\s\S]*已支付 4 金币/);
+      assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /无法加载/);
     } finally { await view.cleanup(); }
   }
 });
@@ -399,10 +399,10 @@ test("R9E history uses historical paid cost and refund sends only IDs", { concur
     return baseIpc(command);
   });
   try {
-    assert.match(view.document.body.textContent, /12 Coin paid/);
-    assert.match(view.document.body.textContent, /Not refunded/);
+    assert.match(view.document.body.textContent, /已支付 12 金币/);
+    assert.match(view.document.body.textContent, /未撤销/);
     await act(async () => findButton(view.document, "Refund").click());
-    assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /12 Coin/);
+    assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /12 金币/);
     await act(async () => findButton(view.document, "Refund reward").click()); await settle();
     assert.equal(calls.length, 1);
     assert.equal(calls[0][1].input.redemptionId, historyItem.redemptionId);
@@ -438,7 +438,7 @@ test("R9E redeem retries reuse one intent, pending duplicates are ignored, and a
     await act(async () => findButton(view.document, "Redeem").click());
     await act(async () => findButton(view.document, "Redeem reward").click());
     await settle();
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /Retry the same intent/);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /使用同一操作重试/);
     const firstId = calls[0].redemptionId;
     assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
@@ -487,7 +487,7 @@ test("R9E refund retries reuse one intent, pending duplicates are ignored, and a
     await act(async () => findButton(view.document, "Refund").click());
     await act(async () => findButton(view.document, "Refund reward").click());
     await settle();
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /Retry the same intent/);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /使用同一操作重试/);
     const firstId = calls[0].refundId;
     assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
@@ -534,14 +534,14 @@ test("Reward transaction errors distinguish terminal stale state from retryable 
   const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
   const history = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee", coinCostPaid: 5, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null };
   for (const [kind, code, message] of [
-    ["redeem", "reward_inactive", /Reward Mode is not active.*reload Reward/i],
-    ["redeem", "custom_reward_not_found", /no longer exists.*reload Reward/i],
-    ["redeem", "custom_reward_archived", /archived.*can no longer be redeemed/i],
-    ["redeem", "reward_integrity_violation", /could not be verified.*reload Reward/i],
-    ["redeem", "reward_database_failure", /storage is unavailable.*Retry the same intent later/i],
-    ["refund", "redemption_not_found", /redemption no longer exists.*reload Reward/i],
-    ["refund", "already_refunded", /already been refunded.*reload Reward/i],
-    ["refund", "refund_intent_conflict", /refund intent conflicts.*start again/i],
+    ["redeem", "reward_inactive", /奖励模式未启用/],
+    ["redeem", "custom_reward_not_found", /自定义奖励已不存在/],
+    ["redeem", "custom_reward_archived", /已归档.*无法再兑换/],
+    ["redeem", "reward_integrity_violation", /奖励数据无法验证/],
+    ["redeem", "reward_database_failure", /奖励存储当前不可用/],
+    ["refund", "redemption_not_found", /兑换记录已不存在/],
+    ["refund", "already_refunded", /兑换已经撤销/],
+    ["refund", "refund_intent_conflict", /撤销.*冲突/],
   ]) {
     const view = await renderApp((command) => {
       if (command === "reward_activation_state") return { active: true };
@@ -577,7 +577,21 @@ function baseIpc(command) {
 function setInput(input, value) { input.value = value; input.dispatchEvent(new input.ownerDocument.defaultView.Event("input", { bubbles: true })); }
 
 function findButton(document, label, index = 0) {
-  const matches = [...document.querySelectorAll("button")].filter((button) => button.textContent === label);
+  const localized = {
+    "Enable Reward Mode": "启用奖励模式",
+    "Cancel": "取消",
+    "Retry": "重试",
+    "Edit": "编辑",
+    "Create reward": "创建奖励",
+    "Save changes": "保存更改",
+    "Archive": "归档",
+    "Archive reward": "归档奖励",
+    "Redeem": "兑换",
+    "Redeem reward": "兑换奖励",
+    "Refund": "撤销兑换",
+    "Refund reward": "确认撤销兑换",
+  }[label] ?? label;
+  const matches = [...document.querySelectorAll("button")].filter((button) => button.textContent === localized);
   assert.ok(matches[index], `missing button: ${label} at index ${index}`);
   return matches[index];
 }
