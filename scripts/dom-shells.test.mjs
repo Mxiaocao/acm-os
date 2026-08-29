@@ -1049,7 +1049,7 @@ test("Contest facts snapshot preserves contest result beside live learning statu
   } finally { await view.cleanup(); }
 });
 
-test("Contest detail preserves cached external problem titles", { concurrency: false }, async () => {
+test("Contest detail displays canonical English problem titles", { concurrency: false }, async () => {
   const detail = {
     contestId: 2256,
     title: "Codeforces Round 1116 (Div. 2)",
@@ -1080,7 +1080,7 @@ test("Contest detail preserves cached external problem titles", { concurrency: f
   }, "/contests/2256");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /C\. Горячая картошка на складе фей/);
+    assert.match(view.document.body.textContent, /C\. Hot Potatoes at the Fairy Warehouse/);
   } finally { await view.cleanup(); }
 });
 

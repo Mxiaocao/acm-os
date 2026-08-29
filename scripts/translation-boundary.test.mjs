@@ -9,6 +9,11 @@ const translation = await runner.import("/src/app/translation.ts");
 
 test.after(() => vite.close());
 
+test("canonical English title is preferred for known historical imports", () => {
+  assert.equal(translation.displayProblemTitle("A", "Три числа на доске"), "Three Numbers on the Blackboard");
+  assert.equal(translation.displayProblemTitle("B", "Неизвестное название"), "Неизвестное название");
+});
+
 test("R6 retires the runtime translator while preserving external titles", () => {
   assert.equal(translation.installChineseUiTranslation, undefined);
   assert.equal(translation.displayProblemTitle("A", "A. Save the City"), "A. Save the City");
