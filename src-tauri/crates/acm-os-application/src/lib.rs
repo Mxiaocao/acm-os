@@ -4,6 +4,8 @@ pub mod codeforces;
 
 use std::path::{Component, Path};
 
+use chrono::{Datelike, SecondsFormat, Timelike};
+
 pub const BOUNDARY_NAME: &str = "acm-os-application";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3281,6 +3283,7 @@ pub trait ContestReadPort {
 pub enum ContestImportContractError {
     TitleRequired,
     SourceUrlRequired,
+    InvalidStartsAtUtc,
     EmptyManifest,
     NonContiguousOrdinal,
     SlotContestMismatch,
@@ -3301,6 +3304,21 @@ impl ContestImportDraft {
         if source_url.trim().is_empty() {
             return Err(ContestImportContractError::SourceUrlRequired);
         }
+        let starts_at_utc = starts_at_utc
+            .map(|value| {
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&value)
+                    .map_err(|_| ContestImportContractError::InvalidStartsAtUtc)?;
+                let canonical = timestamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+                if value.len() != 20
+                    || timestamp.year() <= 0
+                    || timestamp.nanosecond() != 0
+                    || canonical != value
+                {
+                    return Err(ContestImportContractError::InvalidStartsAtUtc);
+                }
+                Ok(value)
+            })
+            .transpose()?;
         if slots.is_empty() {
             return Err(ContestImportContractError::EmptyManifest);
         }
@@ -4803,6 +4821,45 @@ mod tests {
             ),
             Err(ContestImportContractError::DuplicateProblemIdentity)
         );
+    }
+
+    #[test]
+    fn import_manifest_accepts_only_canonical_positive_year_utc_timestamps() {
+        let build = |starts_at_utc: Option<&str>| {
+            let contest = contest_identity();
+            ContestImportDraft::validated(
+                contest.clone(),
+                "Codeforces Round".to_owned(),
+                "https://codeforces.com/contest/1979".to_owned(),
+                starts_at_utc.map(str::to_owned),
+                vec![problem_slot(contest, 1, "A")],
+            )
+        };
+
+        assert_eq!(
+            build(Some("2026-08-10T12:00:00Z"))
+                .expect("current importer and manual format")
+                .starts_at_utc
+                .as_deref(),
+            Some("2026-08-10T12:00:00Z")
+        );
+        assert!(build(None).is_ok());
+        for invalid in [
+            "2026-not-a-date",
+            "2026-01-01",
+            "2026-01-01 12:00:00",
+            "0000-01-01T00:00:00Z",
+            "2026-99-99T00:00:00Z",
+            "2026-08-10T12:00:00+00:00",
+            "2026-08-10T12:00:00.123Z",
+            "+10000-08-10T12:00:00Z",
+        ] {
+            assert_eq!(
+                build(Some(invalid)),
+                Err(ContestImportContractError::InvalidStartsAtUtc),
+                "unexpectedly accepted {invalid}"
+            );
+        }
     }
 
     #[test]

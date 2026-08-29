@@ -8,8 +8,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::Datelike;
-
 use acm_os_application::{
     AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CanonicalProblemDetail,
     CompletedReviewAttempt, ContestAiAnalysis, ContestAiAnalysisError, ContestAiAnalysisPort,
@@ -8238,6 +8236,22 @@ fn contest_library_constraint_error(
     }
 }
 
+fn authoritative_contest_year_sql(starts_at: &str, legacy_year: &str) -> String {
+    format!(
+        "CASE \
+         WHEN length({starts_at}) = 20 \
+          AND {starts_at} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' \
+          AND CAST(substr({starts_at}, 1, 4) AS INTEGER) > 0 \
+          AND strftime('%Y-%m-%dT%H:%M:%SZ', {starts_at}, '+0 seconds') = {starts_at} \
+         THEN CAST(substr({starts_at}, 1, 4) AS INTEGER) \
+         WHEN {legacy_year} IS NOT NULL \
+          AND typeof({legacy_year}) = 'integer' \
+          AND {legacy_year} > 0 \
+         THEN {legacy_year} \
+         ELSE NULL END"
+    )
+}
+
 async fn load_contest_library_placement(
     pool: &SqlitePool,
     placement_id: i64,
@@ -8250,17 +8264,16 @@ async fn load_contest_library_placement(
         Option<String>,
         Option<i64>,
         Option<i64>,
-    )> = sqlx::query_as(
+    )> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT cp.id, cp.family_id, f.display_name, cp.series_id, s.display_name, \
-                CASE WHEN c.starts_at_utc IS NULL THEN cp.year \
-                     WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) \
-                     ELSE NULL END, cp.ordinal \
+                {}, cp.ordinal \
          FROM contest_placements cp \
          JOIN contest_families f ON f.id = cp.family_id \
          JOIN contests c ON c.id = cp.contest_id \
          LEFT JOIN contest_series s ON s.id = cp.series_id AND s.family_id = cp.family_id \
          WHERE cp.id = ?1",
-    )
+        authoritative_contest_year_sql("c.starts_at_utc", "cp.year")
+    )))
     .bind(placement_id)
     .fetch_optional(pool)
     .await
@@ -8288,16 +8301,18 @@ async fn authoritative_contest_year(
     pool: &SqlitePool,
     contest_id: i64,
 ) -> Result<Option<u32>, ContestLibraryError> {
-    let starts_at: Option<String> =
-        sqlx::query_scalar("SELECT starts_at_utc FROM contests WHERE id = ?1")
-            .bind(contest_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-    Ok(starts_at
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
-        .map(|timestamp| timestamp.year())
-        .and_then(|year| u32::try_from(year).ok()))
+    let sql = format!(
+        "SELECT {} FROM contests c WHERE c.id = ?1",
+        authoritative_contest_year_sql("c.starts_at_utc", "NULL")
+    );
+    let year: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(contest_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+    year.map(u32::try_from)
+        .transpose()
+        .map_err(|_| ContestLibraryError::IntegrityViolation)
 }
 
 impl ContestLibraryPort for DatabaseRuntime {
@@ -8684,35 +8699,36 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
+        let year_sql = authoritative_contest_year_sql("c.starts_at_utc", "p.year");
         let rows: Vec<Option<i64>> = match series {
             ContestLibrarySeriesFilter::Any => {
-                sqlx::query_scalar(
-                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT DISTINCT {year_sql} AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id WHERE p.family_id = ?1 \
-                 ORDER BY year IS NULL, year DESC",
-                )
+                 ORDER BY year IS NULL, year DESC"
+                )))
                 .bind(family_id)
                 .fetch_all(pool)
                 .await
             }
             ContestLibrarySeriesFilter::Unassigned => {
-                sqlx::query_scalar(
-                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT DISTINCT {year_sql} AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
                  WHERE p.family_id = ?1 AND p.series_id IS NULL \
-                 ORDER BY year IS NULL, year DESC",
-                )
+                 ORDER BY year IS NULL, year DESC"
+                )))
                 .bind(family_id)
                 .fetch_all(pool)
                 .await
             }
             ContestLibrarySeriesFilter::Exact(series_id) => {
-                sqlx::query_scalar(
-                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT DISTINCT {year_sql} AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
                  WHERE p.family_id = ?1 AND p.series_id = ?2 \
-                 ORDER BY year IS NULL, year DESC",
-                )
+                 ORDER BY year IS NULL, year DESC"
+                )))
                 .bind(family_id)
                 .bind(series_id)
                 .fetch_all(pool)
@@ -9077,10 +9093,20 @@ impl ContestLibraryPort for DatabaseRuntime {
             match year {
                 ContestLibraryYearFilter::Any => {}
                 ContestLibraryYearFilter::Unassigned => {
-                    sql.push_str(" AND CASE WHEN c.starts_at_utc IS NULL THEN placement.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END IS NULL");
+                    sql.push_str(" AND ");
+                    sql.push_str(&authoritative_contest_year_sql(
+                        "c.starts_at_utc",
+                        "placement.year",
+                    ));
+                    sql.push_str(" IS NULL");
                 }
                 ContestLibraryYearFilter::Exact(_) => {
-                    sql.push_str(" AND CASE WHEN c.starts_at_utc IS NULL THEN placement.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END = ?");
+                    sql.push_str(" AND ");
+                    sql.push_str(&authoritative_contest_year_sql(
+                        "c.starts_at_utc",
+                        "placement.year",
+                    ));
+                    sql.push_str(" = ?");
                 }
             }
             sql.push(')');
@@ -17816,53 +17842,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contest_library_malformed_timestamp_is_unknown_in_display_and_filters() {
+    async fn contest_library_timestamp_authority_matrix_keeps_display_and_filters_consistent() {
         let directory = TempDir::new().expect("temporary database");
         let runtime = start_database(directory.path()).await;
         let pool = runtime._pool.as_ref().expect("ready database pool");
-        let family = acm_os_application::create_family(&runtime, "Malformed timestamp family")
+        let family = acm_os_application::create_family(&runtime, "Timestamp authority family")
             .await
             .expect("family");
-        let contest_id = insert_contest_row(pool, 3202).await;
-        sqlx::query("UPDATE contests SET starts_at_utc = '2026-not-a-date' WHERE id = ?1")
+        let cases = [
+            (3202, None, Some(2025), Some(2025), "missing"),
+            (
+                3203,
+                Some("2026-not-a-date"),
+                Some(2025),
+                Some(2025),
+                "malformed",
+            ),
+            (
+                3204,
+                Some("2026-01-01"),
+                Some(2025),
+                Some(2025),
+                "date-only",
+            ),
+            (
+                3205,
+                Some("2026-01-01 12:00:00"),
+                Some(2025),
+                Some(2025),
+                "space-separated",
+            ),
+            (
+                3206,
+                Some("0000-01-01T00:00:00Z"),
+                Some(2025),
+                Some(2025),
+                "year-zero-fallback",
+            ),
+            (
+                3207,
+                Some("0000-01-01T00:00:00Z"),
+                None,
+                None,
+                "year-zero-unknown",
+            ),
+            (
+                3208,
+                Some("2026-99-99T00:00:00Z"),
+                Some(2025),
+                Some(2025),
+                "invalid-date",
+            ),
+        ];
+
+        for (external_key, starts_at, legacy_year, expected_year, label) in cases {
+            let contest_id = insert_contest_row(pool, external_key).await;
+            sqlx::query("UPDATE contests SET starts_at_utc = ?1 WHERE id = ?2")
+                .bind(starts_at)
+                .bind(contest_id)
+                .execute(pool)
+                .await
+                .expect("legacy timestamp fixture");
+            sqlx::query(
+                "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, ?3)",
+            )
             .bind(contest_id)
+            .bind(family.family_id)
+            .bind(legacy_year)
             .execute(pool)
             .await
-            .expect("malformed timestamp");
-        sqlx::query(
-            "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, 2025)",
-        )
-        .bind(contest_id)
-        .bind(family.family_id)
-        .execute(pool)
-        .await
-        .expect("placement");
-        let contest =
-            acm_os_domain::CodeforcesContestIdentity::new(3202).expect("contest identity");
-        let placements = acm_os_application::list_contest_placements(&runtime, &contest)
+            .expect("legacy placement fixture");
+
+            let contest = acm_os_domain::CodeforcesContestIdentity::new(external_key as u64)
+                .expect("contest identity");
+            let placements = acm_os_application::list_contest_placements(&runtime, &contest)
+                .await
+                .expect("placement projection");
+            assert_eq!(placements[0].year, expected_year, "display: {label}");
+
+            let matching_year = expected_year
+                .map(acm_os_application::ContestLibraryYearFilter::Exact)
+                .unwrap_or(acm_os_application::ContestLibraryYearFilter::Unassigned);
+            let matching = acm_os_application::list_library_contests(
+                &runtime,
+                acm_os_application::ContestLibraryScope::Family {
+                    family_id: family.family_id,
+                    series: acm_os_application::ContestLibrarySeriesFilter::Any,
+                    year: matching_year,
+                },
+                acm_os_application::ContestLibraryArchiveFilter::All,
+            )
             .await
-            .expect("placements");
-        assert_eq!(placements[0].year, None);
-        let years = acm_os_application::list_years(
-            &runtime,
-            family.family_id,
-            acm_os_application::ContestLibrarySeriesFilter::Any,
-        )
-        .await
-        .expect("years");
-        assert_eq!(years, vec![None]);
-        let filtered = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: family.family_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                year: acm_os_application::ContestLibraryYearFilter::Unassigned,
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("filtered archive");
-        assert_eq!(filtered.len(), 1);
+            .expect("matching year filter");
+            assert!(
+                matching
+                    .iter()
+                    .any(|item| item.contest.contest_id() == external_key as u64),
+                "matching filter: {label}"
+            );
+
+            let conflicting_year = if expected_year == Some(2026) {
+                2025
+            } else {
+                2026
+            };
+            let conflicting = acm_os_application::list_library_contests(
+                &runtime,
+                acm_os_application::ContestLibraryScope::Family {
+                    family_id: family.family_id,
+                    series: acm_os_application::ContestLibrarySeriesFilter::Any,
+                    year: acm_os_application::ContestLibraryYearFilter::Exact(conflicting_year),
+                },
+                acm_os_application::ContestLibraryArchiveFilter::All,
+            )
+            .await
+            .expect("conflicting year filter");
+            assert!(
+                conflicting
+                    .iter()
+                    .all(|item| item.contest.contest_id() != external_key as u64),
+                "conflicting filter: {label}"
+            );
+        }
+
+        assert_eq!(
+            acm_os_application::list_years(
+                &runtime,
+                family.family_id,
+                acm_os_application::ContestLibrarySeriesFilter::Any,
+            )
+            .await
+            .expect("authoritative years"),
+            vec![Some(2025), None]
+        );
     }
 
     #[tokio::test]
