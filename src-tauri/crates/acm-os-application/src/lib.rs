@@ -941,6 +941,8 @@ pub enum ContestLibraryError {
     DuplicateSeriesName,
     DuplicatePlacement,
     SeriesFamilyMismatch,
+    FamilyInUse,
+    SeriesInUse,
     PersistenceUnavailable,
     IntegrityViolation,
 }
@@ -955,6 +957,11 @@ pub trait ContestLibraryPort {
         family_id: i64,
         display_name: &str,
     ) -> Result<ContestFamily, ContestLibraryError>;
+    async fn delete_family(
+        &self,
+        family_id: i64,
+        replacement_family_id: Option<i64>,
+    ) -> Result<(), ContestLibraryError>;
     async fn list_series(&self, family_id: i64) -> Result<Vec<ContestSeries>, ContestLibraryError>;
     async fn create_series(
         &self,
@@ -966,6 +973,11 @@ pub trait ContestLibraryPort {
         series_id: i64,
         display_name: &str,
     ) -> Result<ContestSeries, ContestLibraryError>;
+    async fn delete_series(
+        &self,
+        series_id: i64,
+        replacement_series_id: Option<i64>,
+    ) -> Result<(), ContestLibraryError>;
     async fn list_years(
         &self,
         family_id: i64,
@@ -1047,6 +1059,21 @@ pub async fn rename_family<P: ContestLibraryPort>(
     port.rename_family(family_id, &display_name).await
 }
 
+pub async fn delete_family<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+    replacement_family_id: Option<i64>,
+) -> Result<(), ContestLibraryError> {
+    let family_id = validate_contest_library_id(family_id)?;
+    let replacement_family_id = replacement_family_id
+        .map(validate_contest_library_id)
+        .transpose()?;
+    if replacement_family_id == Some(family_id) {
+        return Err(ContestLibraryError::FamilyInUse);
+    }
+    port.delete_family(family_id, replacement_family_id).await
+}
+
 pub async fn list_series<P: ContestLibraryPort>(
     port: &P,
     family_id: i64,
@@ -1073,6 +1100,21 @@ pub async fn rename_series<P: ContestLibraryPort>(
     let series_id = validate_contest_library_id(series_id)?;
     let display_name = normalize_contest_library_name(display_name)?;
     port.rename_series(series_id, &display_name).await
+}
+
+pub async fn delete_series<P: ContestLibraryPort>(
+    port: &P,
+    series_id: i64,
+    replacement_series_id: Option<i64>,
+) -> Result<(), ContestLibraryError> {
+    let series_id = validate_contest_library_id(series_id)?;
+    let replacement_series_id = replacement_series_id
+        .map(validate_contest_library_id)
+        .transpose()?;
+    if replacement_series_id == Some(series_id) {
+        return Err(ContestLibraryError::SeriesInUse);
+    }
+    port.delete_series(series_id, replacement_series_id).await
 }
 
 pub async fn list_years<P: ContestLibraryPort>(

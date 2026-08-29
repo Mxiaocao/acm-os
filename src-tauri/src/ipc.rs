@@ -436,6 +436,13 @@ pub struct ContestLibraryFamilyRenameInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContestLibraryFamilyDeleteInput {
+    family_id: i64,
+    replacement_family_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContestLibraryFamilyIdInput {
     family_id: i64,
 }
@@ -452,6 +459,13 @@ pub struct ContestLibrarySeriesInput {
 pub struct ContestLibrarySeriesRenameInput {
     series_id: i64,
     display_name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibrarySeriesDeleteInput {
+    series_id: i64,
+    replacement_series_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1665,6 +1679,16 @@ pub async fn contest_library_rename_family(
 }
 
 #[tauri::command]
+pub async fn contest_library_delete_family(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryFamilyDeleteInput,
+) -> Result<(), &'static str> {
+    acm_os_application::delete_family(database.inner(), input.family_id, input.replacement_family_id)
+        .await
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
 pub async fn contest_library_list_series(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ContestLibraryFamilyIdInput,
@@ -1711,6 +1735,16 @@ pub async fn contest_library_rename_series(
             family_id: item.family_id,
             display_name: item.display_name,
         })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_delete_series(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibrarySeriesDeleteInput,
+) -> Result<(), &'static str> {
+    acm_os_application::delete_series(database.inner(), input.series_id, input.replacement_series_id)
+        .await
         .map_err(contest_library_error_code)
 }
 
@@ -3527,6 +3561,8 @@ fn contest_library_error_code(error: acm_os_application::ContestLibraryError) ->
         acm_os_application::ContestLibraryError::DuplicateSeriesName => "duplicate_series_name",
         acm_os_application::ContestLibraryError::DuplicatePlacement => "duplicate_placement",
         acm_os_application::ContestLibraryError::SeriesFamilyMismatch => "series_family_mismatch",
+        acm_os_application::ContestLibraryError::FamilyInUse => "family_in_use",
+        acm_os_application::ContestLibraryError::SeriesInUse => "series_in_use",
         acm_os_application::ContestLibraryError::PersistenceUnavailable => {
             "contest_library_persistence_unavailable"
         }
