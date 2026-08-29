@@ -1694,8 +1694,20 @@ function contestBookCoverTitle(title: string) {
   };
 }
 
+function contestPlacementMetadata(placement: ContestLibraryPlacementDto) {
+  return (
+    <span className="contest-book__placement" data-placement-id={placement.placementId} key={placement.placementId}>
+      <span data-taxonomy-field="category">{placement.familyName}</span>
+      <span aria-hidden="true"> · </span>
+      <span data-taxonomy-field="year">{placement.year === null ? t("contest.unknownYear") : placement.year}</span>
+      {placement.seriesName ? <><span aria-hidden="true"> · </span><span data-taxonomy-field="series">{placement.seriesName}</span></> : null}
+    </span>
+  );
+}
+
 function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; navigate: Navigate }) {
   const title = item.title;
+  const placements = item.placements ?? [];
   const coverTitle = contestBookCoverTitle(title);
   return (
     <button
@@ -1720,6 +1732,7 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
             <span className="contest-book__round-label">{t("contest.round")}</span>
             <span className="contest-book__round-number">{coverTitle.roundNumber}</span>
           </strong> : <strong className="contest-book__title contest-book__title--fallback">{title}</strong>}
+          {placements.length > 0 ? <span className="contest-book__placements">{placements.map(contestPlacementMetadata)}</span> : null}
           {coverTitle.subtitle ? <span className="contest-book__subtitle">{coverTitle.subtitle}</span> : null}
           <span className="contest-book__footer">
             <span className="contest-book__identity">CF {item.contestId}</span>
@@ -2010,7 +2023,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
               ))}
             </div>
           ) : null}
-          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label={t("contest.remainingAria")}><div><p className="eyebrow">{t("contest.moreView")}</p><h2>{t("contest.remaining")}</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {t("contest.problemsCount", { count: item.problemCount })} · {item.archived ? t("contest.statusArchived") : item.importStatus === "complete" ? t("contest.statusImported") : t("contest.missingSnapshots", { count: item.missingSnapshotCount })}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">{t("contest.retrySnapshots")}</button> : null}</li>)}</ul></section> : null}
+          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label={t("contest.remainingAria")}><div><p className="eyebrow">{t("contest.moreView")}</p><h2>{t("contest.remaining")}</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong>{(item.placements ?? []).map(contestPlacementMetadata)}<span>Codeforces {item.contestId} · {t("contest.problemsCount", { count: item.problemCount })} · {item.archived ? t("contest.statusArchived") : item.importStatus === "complete" ? t("contest.statusImported") : t("contest.missingSnapshots", { count: item.missingSnapshotCount })}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">{t("contest.retrySnapshots")}</button> : null}</li>)}</ul></section> : null}
         </>
       ) : null}
     </>

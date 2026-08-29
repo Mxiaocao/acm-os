@@ -349,6 +349,7 @@ pub async fn system_health_snapshot(
 pub struct ContestShelfItemDto {
     contest_id: u64,
     title: String,
+    placements: Vec<ContestLibraryPlacementDto>,
     import_status: &'static str,
     problem_count: u32,
     missing_snapshot_count: u32,
@@ -3386,6 +3387,11 @@ fn contest_shelf_item_dto(item: acm_os_application::ContestShelfItem) -> Contest
     ContestShelfItemDto {
         contest_id: item.contest.contest_id(),
         title: item.title,
+        placements: item
+            .placements
+            .into_iter()
+            .map(contest_library_placement_dto)
+            .collect(),
         import_status: match item.import_status {
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
             acm_os_application::ContestImportStatus::Complete => "complete",

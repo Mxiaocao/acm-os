@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface ContestShelfItemDto {
   contestId: number;
   title: string;
+  placements: ContestLibraryPlacementDto[];
   importStatus: "incomplete" | "complete";
   problemCount: number;
   missingSnapshotCount: number;

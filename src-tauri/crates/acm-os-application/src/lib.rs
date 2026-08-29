@@ -803,6 +803,7 @@ pub async fn import_codeforces_contest<P: ContestImportPort, S: ContestImportSou
 pub struct ContestShelfItem {
     pub contest: acm_os_domain::CodeforcesContestIdentity,
     pub title: String,
+    pub placements: Vec<ContestPlacement>,
     pub import_status: ContestImportStatus,
     pub problem_count: u32,
     pub missing_snapshot_count: u32,

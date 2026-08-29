@@ -670,6 +670,51 @@ test("Contest Library category deletion discloses series side effects before con
   } finally { await view.cleanup(); }
 });
 
+test("Contest archive exposes explicit placement taxonomy for single and grouped contests", { concurrency: false }, async () => {
+  const items = [
+    {
+      contestId: 4101,
+      title: "Summer multi-campus",
+      importStatus: "complete",
+      problemCount: 3,
+      missingSnapshotCount: 0,
+      archived: false,
+      placements: [
+        { placementId: 1, familyId: 1, familyName: "NiuKe", seriesId: 11, seriesName: "Summer", year: 2026, ordinal: null },
+        { placementId: 2, familyId: 2, familyName: "XCPC", seriesId: null, seriesName: null, year: 2025, ordinal: null },
+      ],
+    },
+    {
+      contestId: 4102,
+      title: "Legacy contest",
+      importStatus: "complete",
+      problemCount: 2,
+      missingSnapshotCount: 0,
+      archived: false,
+      placements: [{ placementId: 3, familyId: 3, familyName: "HangDian", seriesId: null, seriesName: null, year: null, ordinal: null }],
+    },
+  ];
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_contests") return items;
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const books = [...view.document.querySelectorAll("button.contest-book")];
+    assert.equal(books.length, 2);
+    assert.deepEqual([...books[0].querySelectorAll(".contest-book__placement")].map((node) => node.textContent.trim()), ["NiuKe · 2026 · Summer", "XCPC · 2025"]);
+    assert.equal(books[0].querySelector('[data-taxonomy-field="year"]')?.textContent, "2026");
+    const unknownYear = books[1].querySelector('[data-taxonomy-field="year"]')?.textContent;
+    assert.ok(unknownYear);
+    assert.notEqual(unknownYear, "2026");
+    assert.equal(books[1].querySelector('[data-taxonomy-field="series"]'), null);
+    assert.equal(books[1].querySelector('[data-taxonomy-field="year"]')?.textContent.includes("2026"), false);
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Detail manages nullable placements and removal never calls Contest delete", { concurrency: false }, async () => {
   const calls = [];
   let placements = [];

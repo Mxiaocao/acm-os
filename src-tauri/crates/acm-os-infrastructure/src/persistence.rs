@@ -7956,23 +7956,29 @@ impl ContestReadPort for DatabaseRuntime {
         )
         .await
         .map_err(|_| ContestReadError::Unavailable)?;
-        rows.into_iter()
-            .map(|(id, title, status, count, missing, archived_at)| {
-                Ok(ContestShelfItem {
-                    contest: parse_codeforces_contest_identity(&id)
-                        .map_err(|_| ContestReadError::Unavailable)?,
-                    title,
-                    import_status: match status.as_str() {
-                        "incomplete" => ContestImportStatus::Incomplete,
-                        "complete" => ContestImportStatus::Complete,
-                        _ => return Err(ContestReadError::Unavailable),
-                    },
-                    problem_count: count as u32,
-                    missing_snapshot_count: missing as u32,
-                    archived: archived_at.is_some(),
-                })
-            })
-            .collect()
+        let mut items = Vec::with_capacity(rows.len());
+        for (id, title, status, count, missing, archived_at) in rows {
+            let contest = parse_codeforces_contest_identity(&id)
+                .map_err(|_| ContestReadError::Unavailable)?;
+            let placements = self
+                .list_contest_placements(&contest)
+                .await
+                .map_err(|_| ContestReadError::Unavailable)?;
+            items.push(ContestShelfItem {
+                contest,
+                title,
+                placements,
+                import_status: match status.as_str() {
+                    "incomplete" => ContestImportStatus::Incomplete,
+                    "complete" => ContestImportStatus::Complete,
+                    _ => return Err(ContestReadError::Unavailable),
+                },
+                problem_count: count as u32,
+                missing_snapshot_count: missing as u32,
+                archived: archived_at.is_some(),
+            });
+        }
+        Ok(items)
     }
 
     async fn contest_detail(
@@ -9043,27 +9049,28 @@ impl ContestLibraryPort for DatabaseRuntime {
             .fetch_all(pool)
             .await
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-        rows.into_iter()
-            .map(
-                |(contest_id, title, status, problem_count, missing_count, archived_at)| {
-                    Ok(ContestShelfItem {
-                        contest: parse_codeforces_contest_identity(&contest_id)
-                            .map_err(|_| ContestLibraryError::IntegrityViolation)?,
-                        title,
-                        import_status: match status.as_str() {
-                            "incomplete" => ContestImportStatus::Incomplete,
-                            "complete" => ContestImportStatus::Complete,
-                            _ => return Err(ContestLibraryError::IntegrityViolation),
-                        },
-                        problem_count: u32::try_from(problem_count)
-                            .map_err(|_| ContestLibraryError::IntegrityViolation)?,
-                        missing_snapshot_count: u32::try_from(missing_count)
-                            .map_err(|_| ContestLibraryError::IntegrityViolation)?,
-                        archived: archived_at.is_some(),
-                    })
+        let mut items = Vec::with_capacity(rows.len());
+        for (contest_id, title, status, problem_count, missing_count, archived_at) in rows {
+            let contest = parse_codeforces_contest_identity(&contest_id)
+                .map_err(|_| ContestLibraryError::IntegrityViolation)?;
+            let placements = self.list_contest_placements(&contest).await?;
+            items.push(ContestShelfItem {
+                contest,
+                title,
+                placements,
+                import_status: match status.as_str() {
+                    "incomplete" => ContestImportStatus::Incomplete,
+                    "complete" => ContestImportStatus::Complete,
+                    _ => return Err(ContestLibraryError::IntegrityViolation),
                 },
-            )
-            .collect()
+                problem_count: u32::try_from(problem_count)
+                    .map_err(|_| ContestLibraryError::IntegrityViolation)?,
+                missing_snapshot_count: u32::try_from(missing_count)
+                    .map_err(|_| ContestLibraryError::IntegrityViolation)?,
+                archived: archived_at.is_some(),
+            });
+        }
+        Ok(items)
     }
 }
 
