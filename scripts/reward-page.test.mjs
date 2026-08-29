@@ -438,7 +438,7 @@ test("R9E redeem retries reuse one intent, pending duplicates are ignored, and a
     await act(async () => findButton(view.document, "Redeem").click());
     await act(async () => findButton(view.document, "Redeem reward").click());
     await settle();
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /使用同一操作重试/);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /兑换未能完成，请重试或取消/);
     const firstId = calls[0].redemptionId;
     assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
@@ -487,7 +487,7 @@ test("R9E refund retries reuse one intent, pending duplicates are ignored, and a
     await act(async () => findButton(view.document, "Refund").click());
     await act(async () => findButton(view.document, "Refund reward").click());
     await settle();
-    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /使用同一操作重试/);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /撤销未能完成，请重试或取消/);
     const firstId = calls[0].refundId;
     assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
@@ -535,13 +535,13 @@ test("Reward transaction errors distinguish terminal stale state from retryable 
   const history = { redemptionId: "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", customRewardId: "r1", rewardName: "Coffee", coinCostPaid: 5, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null };
   for (const [kind, code, message] of [
     ["redeem", "reward_inactive", /奖励模式未启用/],
-    ["redeem", "custom_reward_not_found", /自定义奖励已不存在/],
-    ["redeem", "custom_reward_archived", /已归档.*无法再兑换/],
+    ["redeem", "custom_reward_not_found", /该自定义奖励服务已不存在/],
+    ["redeem", "custom_reward_archived", /该奖励已归档，无法兑换/],
     ["redeem", "reward_integrity_violation", /奖励数据无法验证/],
-    ["redeem", "reward_database_failure", /奖励存储当前不可用/],
-    ["refund", "redemption_not_found", /兑换记录已不存在/],
-    ["refund", "already_refunded", /兑换已经撤销/],
-    ["refund", "refund_intent_conflict", /撤销.*冲突/],
+    ["redeem", "reward_database_failure", /奖励存储不可用/],
+    ["refund", "redemption_not_found", /该兑换记录不存在/],
+    ["refund", "already_refunded", /该兑换已撤销/],
+    ["refund", "refund_intent_conflict", /撤销意图与已有撤销冲突/],
   ]) {
     const view = await renderApp((command) => {
       if (command === "reward_activation_state") return { active: true };

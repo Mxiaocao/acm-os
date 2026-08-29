@@ -65,7 +65,7 @@ test("Contest Detail focuses the final heading after async detail loading", { co
   }, "/contests/1979");
   try {
     await settle();
-    assert.equal(view.document.querySelector("h1")?.textContent, "Loading contest");
+    assert.equal(view.document.querySelector("h1")?.textContent, "正在加载比赛");
     assert.equal(view.document.activeElement, view.document.querySelector("h1"));
     await act(async () => resolveDetail({ contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2026-08-10", importStatus: "complete", factsStatus: "completed", problems: [], corrections: [], aiAnalysis: null, archived: false }));
     await settle();
@@ -88,21 +88,21 @@ test("Contest AI analysis previews before explicit save and preserves failed raw
   }, "/contests/1979");
   try {
     await settle();
-    const textarea = view.document.querySelector('textarea[aria-label="Contest AI analysis raw text"]');
+    const textarea = view.document.querySelector('textarea[aria-label="比赛 AI 分析原始文本"]');
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "unstructured raw"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await settle();
     const buttons = [...view.document.querySelectorAll("button")];
-    const preview = buttons.find((button) => button.textContent === "Parse preview");
-    let save = buttons.find((button) => button.textContent === "Save analysis");
+    const preview = buttons.find((button) => button.textContent === "解析预览");
+    let save = buttons.find((button) => button.textContent === "保存分析");
     assert.equal(save.disabled, true);
     await act(async () => preview.click()); await settle();
     assert.deepEqual(calls, ["preview_contest_ai_analysis"]);
-    assert.match(view.document.body.textContent, /Preview: FAILED/);
-    save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Save analysis");
+    assert.match(view.document.body.textContent, /预览：FAILED/);
+    save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "保存分析");
     assert.equal(save.disabled, false);
     await act(async () => save.click()); await settle();
     assert.deepEqual(calls, ["preview_contest_ai_analysis", "save_contest_ai_analysis"]);
-    assert.match(view.document.body.textContent, /Saved raw analysis \(FAILED\)/);
+    assert.match(view.document.body.textContent, /已保存原始分析（FAILED）/);
   } finally { await view.cleanup(); }
 });
 
@@ -127,7 +127,7 @@ test("Manual Contest submits explicit identities and statement text through one 
     assert.equal(calls[0].contestId, 1979);
     assert.equal(calls[0].problems[0].index, "A");
     assert.equal(calls[0].problems[0].statementText, "x < y");
-    assert.match(view.document.body.textContent, /canonical import and statement snapshot contract/);
+    assert.match(view.document.body.textContent, /已通过标准导入和题面快照契约保存/);
   } finally { await view.cleanup(); }
 });
 
@@ -145,15 +145,15 @@ test("Contest delete requires consequence preview and archive stays reversible",
   }, "/contests/1979");
   try {
     await settle();
-    const archive = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Archive Contest");
+    const archive = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "归档比赛");
     await act(async () => archive.click()); await settle();
     assert.deepEqual(calls, ["set_contest_archived"]);
-    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Restore Contest"));
-    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Preview delete");
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "恢复比赛"));
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "预览删除影响");
     assert.equal(calls.includes("delete_contest"), false);
     await act(async () => preview.click()); await settle();
-    assert.match(view.document.body.textContent, /Preserve 1 global Problems/);
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Delete Contest");
+    assert.match(view.document.body.textContent, /保留 1 道具有身份或历史的全局题目/);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "删除比赛");
     await act(async () => confirm.click()); await settle();
     assert.deepEqual(calls, ["set_contest_archived", "preview_delete_contest", "delete_contest"]);
     assert.equal(view.window.location.pathname, "/contests");
@@ -278,11 +278,11 @@ test("Contest Library uses typed All, Family, Series, Year, and archive filters"
     assert.deepEqual(calls.find(([name]) => name === "contest_library_list_contests")[1], { scope: { kind: "all" }, archive: "active" });
     const codeforces = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Codeforces");
     await act(async () => codeforces.click()); await settle();
-    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "All series"));
-    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned series"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "全部系列"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "未分配系列"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2026"));
-    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned year"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "未分配年份"));
     const rounds = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Rounds");
     await act(async () => rounds.click()); await settle();
     const year = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "2026");
@@ -318,9 +318,9 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
   try {
     await settle();
     const books = [...view.document.querySelectorAll("button.contest-book")];
-    const cabinet = view.document.querySelector('[aria-label="Three-tier contest cabinet"]');
+    const cabinet = view.document.querySelector('[aria-label="三层比赛收藏柜"]');
     assert.ok(cabinet);
-    assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 contests/);
+    assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 场比赛/);
     assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece").length, 3);
     assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece[alt='']").length, 3);
     assert.equal(view.document.querySelector(".contest-cabinet__shell")?.getAttribute("aria-hidden"), "true");
@@ -371,23 +371,23 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
     assert.ok(books[0].querySelector(".contest-book__footer"));
     assert.equal(books[0].querySelector(".contest-book__hinge"), null);
     assert.equal(books[0].querySelector(".contest-book__collection")?.textContent, "Codeforces");
-    assert.equal(books[0].querySelector(".contest-book__series")?.textContent, "Round series");
-    assert.equal(books[0].querySelector(".contest-book__round-label")?.textContent, "Round");
+    assert.equal(books[0].querySelector(".contest-book__series")?.textContent, "场次系列");
+    assert.equal(books[0].querySelector(".contest-book__round-label")?.textContent, "场次");
     assert.equal(books[0].querySelector(".contest-book__round-number")?.textContent, "951");
     assert.equal(books[0].querySelector(".contest-book__subtitle")?.textContent, "Div. 2");
     assert.equal(books[0].querySelector(".contest-book__identity")?.textContent, "CF 1979");
-    assert.equal(books[1].querySelector(".contest-book__series")?.textContent, "Educational series");
+    assert.equal(books[1].querySelector(".contest-book__series")?.textContent, "教育系列");
     assert.equal(books[1].querySelector(".contest-book__round-number")?.textContent, "166");
-    const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
+    const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
     assert.ok(pager);
     assert.equal(cabinet.contains(pager), false);
-    const previous = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Previous");
-    const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+    const previous = [...pager.querySelectorAll("button")].find((button) => button.textContent === "上一列");
+    const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
     const pageStatus = pager.querySelector("output");
     assert.equal(previous.disabled, true);
     assert.equal(next.disabled, false);
     assert.equal(pageStatus.textContent.trim(), "1 / 4");
-    assert.equal(pageStatus.getAttribute("aria-label"), "Cabinet column 1 of 4");
+    assert.equal(pageStatus.getAttribute("aria-label"), "收藏柜第 1 列，共 4 列");
     assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1979", "1983", "1987"]);
     await act(async () => next.click()); await settle();
     assert.equal(pageStatus.textContent.trim(), "2 / 4");
@@ -403,13 +403,13 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
       ["1983", "1984", "1985", "1986"],
       ["1987", "1988", "1989", "1990"],
     ]);
-    const remaining = view.document.querySelector('[aria-label="Remaining contest list"]');
+    const remaining = view.document.querySelector('[aria-label="其余比赛列表"]');
     assert.ok(remaining);
     assert.match(remaining.textContent, /Codeforces Round 965/);
-    assert.ok(view.document.querySelector('[aria-label="Contest Library navigation"]'));
+    assert.ok(view.document.querySelector('[aria-label="比赛库导航"]'));
     assert.ok(view.document.querySelector(".contest-import-form"));
 
-    const retry = [...remaining.querySelectorAll("button")].find((button) => button.textContent === "Retry missing snapshots");
+    const retry = [...remaining.querySelectorAll("button")].find((button) => button.textContent === "重试缺失题面");
     await act(async () => retry.click()); await settle();
     assert.equal(view.window.location.pathname, "/contests");
     assert.deepEqual(retryCalls, ["https://codeforces.com/contest/1991"]);
@@ -418,7 +418,7 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
       const item = items[position];
       const book = [...view.document.querySelectorAll("button.contest-book")][position];
       assert.equal(book.dataset.contestId, String(item.contestId));
-      assert.equal(book.getAttribute("aria-label"), `Open contest ${item.title}`);
+      assert.equal(book.getAttribute("aria-label"), `打开比赛“${item.title}”`);
       await act(async () => book.click()); await settle();
       assert.equal(view.window.location.pathname, `/contests/${item.contestId}`);
       await act(async () => {
@@ -428,7 +428,7 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
       await settle();
     }
 
-    const remainderLink = view.document.querySelector('[aria-label="Remaining contest list"] button.list-link');
+    const remainderLink = view.document.querySelector('[aria-label="其余比赛列表"] button.list-link');
     await act(async () => remainderLink.click()); await settle();
     assert.equal(view.window.location.pathname, "/contests/1991");
   } finally { await view.cleanup(); }
@@ -480,18 +480,18 @@ test("Contest Library Compact page count follows populated logical columns", { c
     try {
       await settle();
       const expectedPages = Math.min(count, 4);
-      const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
+      const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
       if (expectedPages === 1) {
         assert.equal(pager, null);
       } else {
         assert.ok(pager);
         assert.equal(pager.querySelector("output")?.textContent.trim(), `1 / ${expectedPages}`);
       }
-      assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", new RegExp(`${count} ${count === 1 ? "contest" : "contests"}`));
-      assert.doesNotMatch(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", /in this view/);
+      assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", new RegExp(`${count} 场比赛`));
+      assert.doesNotMatch(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", /当前视图没有比赛/);
       if (expectedPages === 1) continue;
       const previous = pager.querySelector("button");
-      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
       assert.equal(previous.disabled, true);
       for (let page = 1; page < expectedPages; page += 1) {
         await act(async () => next.click()); await settle();
@@ -499,7 +499,7 @@ test("Contest Library Compact page count follows populated logical columns", { c
         assert.ok([...view.document.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].length > 0);
       }
       assert.equal(next.disabled, true);
-      if (count === 13) assert.ok(view.document.querySelector('[aria-label="Remaining contest list"]'));
+      if (count === 13) assert.ok(view.document.querySelector('[aria-label="其余比赛列表"]'));
     } finally { await view.cleanup(); }
   }
 });
@@ -522,8 +522,8 @@ test("Contest Library Compact column 4 opens the real tier 1, 2, and 3 Contest i
   }, "/contests");
   try {
     for (const position of [3, 7, 11]) {
-      const pager = view.document.querySelector('[aria-label="Compact cabinet column navigation"]');
-      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "Next");
+      const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
+      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
       for (let page = 1; page < 4; page += 1) {
         await act(async () => next.click()); await settle();
       }
@@ -534,7 +534,7 @@ test("Contest Library Compact column 4 opens the real tier 1, 2, and 3 Contest i
 
       const item = items[position];
       const book = activeBooks.find((candidate) => candidate.dataset.contestId === String(item.contestId));
-      assert.equal(book.getAttribute("aria-label"), `Open contest ${item.title}`);
+      assert.equal(book.getAttribute("aria-label"), `打开比赛“${item.title}”`);
       await act(async () => book.click()); await settle();
       assert.equal(view.window.location.pathname, `/contests/${item.contestId}`);
 
@@ -565,13 +565,13 @@ test("Contest Library D2-A preserves all three tiers for an empty filtered resul
   }, "/contests");
   try {
     await settle();
-    const cabinet = view.document.querySelector('[aria-label="Three-tier contest cabinet"]');
+    const cabinet = view.document.querySelector('[aria-label="三层比赛收藏柜"]');
     assert.ok(cabinet);
     assert.equal(cabinet.querySelectorAll(".contest-cabinet__tier").length, 3);
     assert.equal(cabinet.querySelectorAll("button.contest-book").length, 0);
-    assert.equal(cabinet.querySelector(".contest-cabinet__empty")?.textContent, "No contests in this view");
+    assert.equal(cabinet.querySelector(".contest-cabinet__empty")?.textContent, "当前视图没有比赛");
     assert.equal(view.document.querySelector(".empty-state"), null);
-    assert.equal(view.document.querySelector('[aria-label="Compact cabinet column navigation"]'), null);
+    assert.equal(view.document.querySelector('[aria-label="紧凑收藏柜列导航"]'), null);
   } finally { await view.cleanup(); }
 });
 
@@ -594,7 +594,7 @@ test("Contest Library creates and renames persisted Family and Series without ch
   }, "/contests");
   try {
     await settle();
-    const createFamilyDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("Create family"));
+    const createFamilyDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("创建分类"));
     createFamilyDetails.open = true;
     const familyInput = createFamilyDetails.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(familyInput, " User Family "); familyInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
@@ -605,7 +605,7 @@ test("Contest Library creates and renames persisted Family and Series without ch
     assert.equal(calls.find(([name]) => name === "contest_library_create_family")[1].displayName, " User Family ");
     const selected = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "User Family");
     await act(async () => selected.click()); await settle();
-    const createSeriesDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("Create series"));
+    const createSeriesDetails = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("创建系列"));
     createSeriesDetails.open = true;
     const seriesInput = createSeriesDetails.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(seriesInput, "Rounds"); seriesInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
@@ -614,7 +614,7 @@ test("Contest Library creates and renames persisted Family and Series without ch
     await settle();
     assert.ok(calls.some(([name]) => name === "contest_library_create_series"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
-    const familyRename = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "Rename");
+    const familyRename = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "重命名");
     await act(async () => familyRename.click()); await settle();
     const familyRenameForm = view.document.querySelector(".management-list .inline-form");
     const familyRenameInput = familyRenameForm.querySelector("input");
@@ -622,7 +622,7 @@ test("Contest Library creates and renames persisted Family and Series without ch
     await settle();
     await act(async () => familyRenameForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.deepEqual(calls.find(([name]) => name === "contest_library_rename_family")[1], { familyId: 2, displayName: "Renamed Family" });
-    const seriesRename = [...view.document.querySelectorAll(".management-list__row > button")].find((button) => button.textContent === "Rename");
+    const seriesRename = [...view.document.querySelectorAll(".management-list__row > button")].find((button) => button.textContent === "重命名");
     await act(async () => seriesRename.click()); await settle();
     const seriesRenameForm = view.document.querySelector(".management-list__row .inline-form");
     const seriesRenameInput = seriesRenameForm.querySelector("input");
@@ -651,26 +651,26 @@ test("Contest Detail manages nullable placements and removal never calls Contest
   }, "/contests/1979");
   try {
     await settle();
-    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add placement");
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "添加位置");
     await act(async () => add.click()); await settle();
     const form = view.document.querySelector(".placement-form");
     await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.deepEqual(calls[0], ["contest_library_create_placement", { contestId: 1979, familyId: 1, seriesId: null, year: null, ordinal: null }]);
-    const edit = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Edit");
+    const edit = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "编辑");
     await act(async () => edit.click()); await settle();
     const numberInputs = [...view.document.querySelectorAll(".placement-form input")];
     await act(async () => { for (const [input, value] of [[numberInputs[0], "2026"], [numberInputs[1], "8"]]) { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new view.window.Event("change", { bubbles: true })); } view.document.querySelector(".placement-form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })); });
     await settle();
     assert.equal(calls[1][0], "contest_library_update_placement");
     assert.equal(calls[1][1].placementId, 9);
-    const remove = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Remove placement");
+    const remove = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "移除位置");
     await act(async () => remove.click()); await settle();
-    assert.match(view.document.body.textContent, /removes the Codeforces archive location only/i);
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Remove placement" && button.closest('[role="dialog"]'));
+    assert.match(view.document.body.textContent, /只会移除“Codeforces”归档位置/);
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "移除位置" && button.closest('[role="dialog"]'));
     await act(async () => confirm.click()); await settle();
     assert.ok(calls.some(([name]) => name === "contest_library_remove_placement"));
     assert.equal(calls.some(([name]) => name === "delete_contest"), false);
-    assert.match(view.document.body.textContent, /No archive placement yet/);
+    assert.match(view.document.body.textContent, /尚无归档位置/);
   } finally { await view.cleanup(); }
 });
 
@@ -689,7 +689,7 @@ test("Contest Library Retry reloads Families after the first Family request fail
   }, "/contests");
   try {
     await settle();
-    const retry = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Retry");
+    const retry = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "重试");
     assert.ok(retry);
     await act(async () => retry.click()); await settle();
     assert.equal(familyCalls, 2);
@@ -737,9 +737,9 @@ test("Contest Library shows Unassigned year only when Backend years contain null
     await settle();
     const family = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family");
     await act(async () => family.click()); await settle();
-    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "All years"));
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "全部年份"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "2026"));
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Unassigned year"), false);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "未分配年份"), false);
   } finally { await view.cleanup(); }
 });
 
@@ -800,7 +800,7 @@ test("Contest placement editor ignores stale Series responses after Family chang
   }, "/contests/1979");
   try {
     await settle();
-    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Add placement");
+    const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "添加位置");
     await act(async () => add.click()); await settle();
     const familySelect = view.document.querySelector(".placement-form select");
     await act(async () => {
@@ -1101,13 +1101,13 @@ test("Completed Contest correction updates facts and keeps an explicit history e
     const [resultSelect] = view.document.querySelectorAll("select");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(resultSelect, "accepted"); resultSelect.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
     const correct = view.document.querySelector(
-      'form[aria-label="Contest facts snapshot"] button.secondary-action',
+      'form[aria-label="比赛事实快照"] button.secondary-action',
     );
     assert.ok(correct);
     await act(async () => correct.dispatchEvent(new view.window.MouseEvent("click", { bubbles: true })));
     await settle();
     assert.match(view.document.body.textContent, /纠错已保存/);
-    assert.match(view.document.body.textContent, /Correction history/);
+    assert.match(view.document.body.textContent, /纠错历史/);
     assert.match(view.document.body.textContent, /wrong_answer → accepted/);
     assert.match(view.document.body.textContent, /当前学习状态：长期复习/);
   } finally { await view.cleanup(); }
@@ -1170,7 +1170,7 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
   }, "/problems/1979/A");
   try {
     const createButton = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Create my note");
+      .find((button) => button.textContent === "创建个人 Markdown");
     assert.ok(createButton);
     await act(async () => createButton.click());
     await settle();
@@ -1178,11 +1178,11 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     assert.equal(detailReads, 2);
     assert.match(view.document.body.textContent, /个人题目/);
     assert.match(view.document.body.textContent, /Archive\/renamed\.md/);
-    assert.match(view.document.body.textContent, /binding was restored/);
+    assert.match(view.document.body.textContent, /笔记绑定已恢复到当前位置/);
     assert.match(view.document.body.textContent, /External edit ×/);
     assert.equal(
       [...view.document.querySelectorAll("button")]
-        .some((button) => button.textContent === "Create my note"),
+        .some((button) => button.textContent === "创建个人 Markdown"),
       false,
     );
   } finally {
@@ -1225,7 +1225,7 @@ test("Location Anomaly lists possible Markdown locations and explicitly rebinds 
   }, "/problems/1979/A");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /Note location needs attention/);
+    assert.match(view.document.body.textContent, /笔记位置需要处理/);
     const find = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "查找可能的位置");
     await act(async () => find.click()); await settle();
@@ -1235,7 +1235,7 @@ test("Location Anomaly lists possible Markdown locations and explicitly rebinds 
     const candidate = [...view.document.querySelectorAll("li")]
       .find((item) => item.textContent.includes("Recovered/manual.md"));
     await act(async () => candidate.querySelector("button").click()); await settle();
-    assert.doesNotMatch(view.document.body.textContent, /Note location needs attention/);
+    assert.doesNotMatch(view.document.body.textContent, /笔记位置需要处理/);
     assert.match(view.document.body.textContent, /Recovered\/manual.md/);
     const rebindCall = calls.find(([command]) => command === "rebind_personal_note");
     assert.equal(rebindCall[1].input.vaultRelativePath, "Recovered/manual.md");
@@ -1269,15 +1269,15 @@ test("Location Anomaly confirms a missing file only through an explicit conseque
   try {
     await settle();
     const preview = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Confirm file was deleted…");
+      .find((button) => button.textContent === "确认文件已删除…");
     await act(async () => preview.click()); await settle();
-    assert.match(view.document.body.textContent, /does not delete any file/);
+    assert.match(view.document.body.textContent, /不会删除任何文件/);
     assert.equal(calls.some(([command]) => command === "confirm_personal_note_deleted"), false);
     const confirm = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Confirm deleted");
+      .find((button) => button.textContent === "确认已删除");
     await act(async () => confirm.click()); await settle();
     assert.match(view.document.body.textContent, /轻量题目/);
-    assert.doesNotMatch(view.document.body.textContent, /Note location needs attention/);
+    assert.doesNotMatch(view.document.body.textContent, /笔记位置需要处理/);
     assert.equal(calls.filter(([command]) => command === "confirm_personal_note_deleted").length, 1);
   } finally {
     await view.cleanup();
@@ -1310,7 +1310,7 @@ test("StrictMode keeps the ready Personal Markdown projection and exposes the Ob
     const openButton = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "在 Obsidian 中打开并编辑题解");
     assert.ok(openButton);
-    assert.match(view.document.body.textContent, /Personal Markdown:.*Problems\/CF-1979-A\.md/);
+    assert.match(view.document.body.textContent, /个人 Markdown：.*Problems\/CF-1979-A\.md/);
   } finally {
     await view.cleanup();
   }
@@ -1405,14 +1405,14 @@ test("Canonical bound Personal Note exposes read, open, and delete through probl
   try {
     await settle();
     assert.match(view.document.body.textContent, /Problems\/Canonical\.md/);
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => /Create my note|Create Personal Markdown/.test(button.textContent)), false);
-    const open = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Open in Obsidian");
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "创建个人 Markdown"), false);
+    const open = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "在 Obsidian 中打开");
     assert.ok(open);
     await act(async () => open.click()); await settle();
-    const deleteButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Delete note");
+    const deleteButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "删除笔记");
     assert.ok(deleteButton);
     await act(async () => deleteButton.click()); await settle();
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm delete");
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认删除");
     assert.ok(confirm);
     await act(async () => confirm.click()); await settle();
     const personalCommands = calls.filter(([command]) => command.includes("personal_note"));
@@ -1451,16 +1451,16 @@ test("Canonical Personal Note anomaly exposes relocation, rebind, and missing co
   }, "/problems/id/43");
   try {
     await settle();
-    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Find note locations");
+    const find = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "查找笔记位置");
     assert.ok(find);
     await act(async () => find.click()); await settle();
-    const rebind = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Rebind");
+    const rebind = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "重新绑定");
     assert.ok(rebind);
     await act(async () => rebind.click()); await settle();
-    const missing = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm missing note deleted");
+    const missing = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认缺失笔记已删除");
     assert.ok(missing);
     await act(async () => missing.click()); await settle();
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm");
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认");
     assert.ok(confirm);
     await act(async () => confirm.click()); await settle();
     const commands = calls.map(([command]) => command);
@@ -1509,13 +1509,13 @@ test("Unbound canonical Problem creates Personal Markdown only through problem_i
     await settle();
     assert.match(view.document.body.textContent, /Unbound Canonical Problem/);
     const create = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Create Personal Markdown");
+      .find((button) => button.textContent === "创建个人 Markdown");
     assert.ok(create);
     await act(async () => create.click());
     await settle();
     assert.match(view.document.body.textContent, /Problems\/Problem-44\.md/);
     assert.ok([...view.document.querySelectorAll("button")]
-      .some((button) => button.textContent === "Open in Obsidian"));
+      .some((button) => button.textContent === "在 Obsidian 中打开"));
     assert.equal(calls.filter(([command]) => command === "create_personal_note_by_id").length, 1);
     assert.equal(calls.some(([command]) => command === "create_personal_note"), false);
     const createCall = calls.find(([command]) => command === "create_personal_note_by_id");
@@ -1549,7 +1549,7 @@ test("Canonical Problem renders the next Review due date from canonical lifecycl
   }, "/problems/id/45");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /Next Review due:\s*2026-09-03/);
+    assert.match(view.document.body.textContent, /下次复习到期：\s*2026-09-03/);
     assert.equal(calls.some(([command]) => command === "lightweight_problem_detail"), false);
     assert.deepEqual(calls.find(([command]) => command === "lightweight_problem_detail_by_id")?.[1]?.input, { problemId: "45" });
   } finally {
@@ -1586,7 +1586,7 @@ test("Canonical Knowledge candidate can return to pending only through problem_i
   try {
     await settle();
     const returnToPending = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Return to pending");
+      .find((button) => button.textContent === "退回待处理");
     assert.ok(returnToPending);
     await act(async () => returnToPending.click());
     await settle();
@@ -1626,12 +1626,12 @@ test("Canonical Personal Note renders parsed sections routes and warnings", {
   }, "/problems/id/47");
   try {
     await settle();
-    const projection = view.document.querySelector('[aria-label="Personal Markdown projection"]');
+    const projection = view.document.querySelector('[aria-label="个人 Markdown 内容"]');
     assert.ok(projection);
     assert.match(projection.textContent, /Prerequisite Knowledge/);
     assert.match(projection.textContent, /Binary search route/);
-    assert.match(projection.textContent, /Duplicate section:\s*Solution \(2\)/);
-    assert.match(projection.textContent, /binding was restored/);
+    assert.match(projection.textContent, /重复章节：Solution（2 处）/);
+    assert.match(projection.textContent, /笔记绑定已恢复到当前位置/);
   } finally {
     await view.cleanup();
   }
@@ -1659,9 +1659,9 @@ test("Canonical Vault-unavailable state preserves identity and disables Markdown
   }, "/problems/id/48");
   try {
     await settle();
-    assert.match(view.document.body.textContent, /Vault is unavailable/);
-    assert.match(view.document.body.textContent, /Personal Problem and its System Facts (?:remain|were) preserved/);
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Open in Obsidian"), false);
+    assert.match(view.document.body.textContent, /Vault 当前不可用/);
+    assert.match(view.document.body.textContent, /个人题目及其系统事实已保留/);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "在 Obsidian 中打开"), false);
     assert.equal(calls.some(([command]) => command === "personal_note_projection"), false);
     assert.ok(calls.some(([command, args]) => command === "personal_note_projection_by_id" && args.input.problemId === "48"));
   } finally {
@@ -1714,16 +1714,16 @@ test("Problem lifecycle actions and personal-note consequence preview use author
     assert.match(view.document.body.textContent, /待补/);
 
     const beginDelete = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Delete my personal note…");
+      .find((button) => button.textContent === "删除我的个人笔记…");
     await act(async () => beginDelete.click());
-    assert.match(view.document.body.textContent, /Contest history, completed Review history/);
+    assert.match(view.document.body.textContent, /比赛历史、已完成的复习历史/);
     const confirmDelete = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Delete personal note");
+      .find((button) => button.textContent === "删除笔记");
     await act(async () => confirmDelete.click());
     await settle();
     assert.equal(deleteCalls, 1);
     assert.match(view.document.body.textContent, /轻量题目/);
-    assert.match(view.document.body.textContent, /historical facts were preserved/);
+    assert.match(view.document.body.textContent, /历史事实已保留/);
   } finally {
     await view.cleanup();
   }
@@ -1846,7 +1846,7 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
   }, "/problems/1979/A");
   try {
     const start = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Start Review");
+      .find((button) => button.textContent === "开始复习");
     assert.ok(start);
     await act(async () => start.click());
     await settle();
@@ -1868,14 +1868,14 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     await act(async () => openHelp.click());
     await settle();
     assert.equal(drawerCalls, 1);
-    assert.match(view.document.body.textContent, /Opening this drawer records nothing/);
+    assert.match(view.document.body.textContent, /打开此面板不会产生记录/);
     assert.equal(view.document.activeElement?.textContent, "受控帮助");
     assert.doesNotMatch(view.document.body.textContent, /REVEALED ONLY AFTER EVIDENCE/);
     assert.equal(revealCalls.length, 0);
     const hintRow = [...view.document.querySelectorAll(".review-help-levels li")]
-      .find((row) => row.textContent.includes("Level 2"));
+      .find((row) => row.textContent.includes("第 2 级"));
     await act(async () => hintRow.querySelector("button").click());
-    assert.match(view.document.body.textContent, /Partial at best/);
+    assert.match(view.document.body.textContent, /最多只能判定为部分掌握/);
     assert.equal(view.document.activeElement?.textContent, "确认并查看");
     assert.equal(revealCalls.length, 0, "confirmation precedes reveal IPC");
     const confirm = [...view.document.querySelectorAll("button")]
@@ -1885,12 +1885,12 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     assert.deepEqual(revealCalls, [{ attemptId, level: 2, impactAcknowledged: true }]);
     assert.match(view.document.body.textContent, /REVEALED ONLY AFTER EVIDENCE/);
     const solutionRow = [...view.document.querySelectorAll(".review-help-levels li")]
-      .find((row) => row.textContent.includes("Level 5"));
+      .find((row) => row.textContent.includes("第 5 级"));
     await act(async () => solutionRow.querySelector("button").click());
-    assert.match(view.document.body.textContent, /can only be judged Not passed/);
+    assert.match(view.document.body.textContent, /只能判定为未通过/);
     assert.equal(revealCalls.length, 1, "Level 5 needs its own confirmation");
     const cancel = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Cancel");
+      .find((button) => button.textContent === "取消");
     await act(async () => cancel.click());
     assert.doesNotMatch(view.document.body.textContent, /FULL SOLUTION AFTER EVIDENCE/);
     assert.equal(view.document.activeElement?.textContent, "受控帮助");
@@ -1899,7 +1899,7 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     await act(async () => closeHelp.click());
     assert.equal(view.document.activeElement, openHelp);
     const voidTrigger = [...view.document.querySelectorAll("button")]
-      .find((button) => button.textContent === "Void mistaken Attempt");
+      .find((button) => button.textContent === "作废误开的复习");
     await act(async () => voidTrigger.click());
     const voidDialog = view.document.querySelector('[aria-labelledby="void-review-title"]');
     const voidReason = voidDialog.querySelector("input");
@@ -1917,9 +1917,9 @@ test("Due Review starts once and Focus renders only statement, OJ, and Attempt m
     await act(async () => [...view.document.querySelectorAll("form.review-facts-form button[type=submit]")][0].click());
     await settle();
     assert.equal(completeCalls.length, 1);
-    assert.match(view.document.body.textContent, /Select at least one failure reason/);
+    assert.match(view.document.body.textContent, /请至少选择一个失败原因/);
     const reason = [...view.document.querySelectorAll("label")]
-      .find((label) => label.textContent.includes("Direction found, key property blocked"));
+      .find((label) => label.textContent.includes("找到方向，但卡在关键性质"));
     await act(async () => reason.querySelector("input").click());
     await act(async () => [...view.document.querySelectorAll("form.review-facts-form button[type=submit]")][0].click());
     await settle();
@@ -1981,7 +1981,7 @@ test("Review history preserves an earlier Mastered result after a later Partial 
     await settle();
     assert.match(view.document.body.textContent, /历史最佳复习证据：\s*已掌握/);
     assert.match(view.document.body.textContent, /部分掌握/);
-    assert.match(view.document.body.textContent, /Direction found, key property blocked/);
+    assert.match(view.document.body.textContent, /找到方向，但卡在关键性质/);
   } finally {
     await view.cleanup();
   }
@@ -2022,11 +2022,11 @@ test("Problem detail preserves Personal identity when the Vault is unavailable",
   try {
     await settle();
     assert.match(view.document.body.textContent, /个人题目/);
-    assert.match(view.document.body.textContent, /Vault is unavailable/);
-    assert.match(view.document.body.textContent, /System Facts were preserved/);
+    assert.match(view.document.body.textContent, /Vault 当前不可用/);
+    assert.match(view.document.body.textContent, /系统事实已保留/);
     assert.equal(
       [...view.document.querySelectorAll("button")]
-        .some((button) => button.textContent === "Create my note"),
+        .some((button) => button.textContent === "创建个人 Markdown"),
       false,
     );
   } finally {
@@ -2089,7 +2089,7 @@ test("six mastery evidence items preserve historical thorough digestion after cu
     assert.equal(updates[1].transferSolvedIndependently, false);
     assert.match(view.document.body.textContent, /当前：\s*5\/6 项证据/);
     assert.match(view.document.body.textContent, /历史最高：\s*已彻底掌握/);
-    assert.match(view.document.body.textContent, /回炉中|鍥炵倝涓?/);
+    assert.match(view.document.body.textContent, /回炉中/);
   } finally {
     await view.cleanup();
   }
@@ -2153,10 +2153,10 @@ test("Obsidian open failure is scoped and exposes recovery actions", {
     assert.ok(openButton);
     await act(async () => openButton.click());
     await settle();
-    assert.match(view.document.body.textContent, /learning state were not changed/);
-    assert.match(view.document.body.textContent, /Retry/);
-    assert.match(view.document.body.textContent, /Copy path/);
-    assert.match(view.document.body.textContent, /Check settings/);
+    assert.match(view.document.body.textContent, /学习状态没有改变/);
+    assert.match(view.document.body.textContent, /重试/);
+    assert.match(view.document.body.textContent, /复制路径/);
+    assert.match(view.document.body.textContent, /检查设置/);
     assert.match(view.document.body.textContent, /个人题目/);
   } finally {
     await view.cleanup();
@@ -2212,7 +2212,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
   }, "/today");
   try {
     assert.match(view.document.body.textContent, /补题/);
-    const down = view.document.querySelector('button[aria-label="Move 补题 down"]');
+    const down = view.document.querySelector('button[aria-label="将“补题”任务下移"]');
     await act(async () => down.click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "reorder_today")[1].input.orderedEntryIds, ["entry-b", "entry-a"]);
     const firstEntry = view.document.querySelector(".today-entry");
@@ -2245,14 +2245,14 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
       orderedEntryIds: ["entry-b", "entry-a"],
     });
 
-    const done = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Done for today");
+    const done = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "今日完成");
     await act(async () => done.click()); await settle();
     assert.ok(calls.some(([name]) => name === "complete_today_entry"));
     assert.match(view.document.body.textContent, /额外建议/);
     const add = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "加入今日计划");
     await act(async () => add.click()); await settle();
     assert.ok(calls.some(([name, args]) => name === "accept_today_extra_suggestion" && args.input.problemId === "3"));
-    assert.match(view.document.body.textContent, /Manual/);
+    assert.match(view.document.body.textContent, /手动/);
 
     const budget = view.document.querySelector('.today-toolbar input[type="number"]');
     await act(async () => {
@@ -2265,7 +2265,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
       budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
     });
     assert.equal(budget.value, "95");
-    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Preview replan");
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "预览重新规划");
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(budget, "-1");
       budget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
@@ -2274,7 +2274,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     await settle();
     await act(async () => preview.click());
     await settle();
-    assert.match(view.document.body.textContent, /Daily budget must be a non-negative whole number/);
+    assert.match(view.document.body.textContent, /每日预算必须是非负整数分钟数/);
     assert.equal(calls.filter(([name]) => name === "preview_today_replan").length, 0);
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(budget, "95");
@@ -2292,7 +2292,7 @@ test("Today drives stable reorder, Done, explicit suggestions, and confirmed rep
     const reopenedApply = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "应用重新规划");
     await act(async () => reopenedApply.click()); await settle();
     assert.ok(calls.some(([name]) => name === "apply_today_replan"));
-    assert.ok([...view.document.querySelectorAll(".sr-only")].some((node) => /Today replan applied/.test(node.textContent ?? "")));
+    assert.ok([...view.document.querySelectorAll(".sr-only")].some((node) => /今日重新规划已应用/.test(node.textContent ?? "")));
   } finally {
     await view.cleanup();
   }
@@ -2363,8 +2363,8 @@ test("Today asks for a budget before creating the first daily snapshot", {
   }, "/today");
   try {
     assert.deepEqual(loads, [null]);
-    assert.match(view.document.body.textContent, /Set today's budget/);
-    const create = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Create Today plan");
+    assert.match(view.document.body.textContent, /设置今日预算/);
+    const create = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "创建今日计划");
     const initialBudget = view.document.querySelector(".today-budget-start input");
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(initialBudget, "");
@@ -2375,7 +2375,7 @@ test("Today asks for a budget before creating the first daily snapshot", {
     await act(async () => create.click());
     await settle();
     assert.deepEqual(loads, [null]);
-    assert.match(view.document.body.textContent, /Daily budget must be a non-negative whole number/);
+    assert.match(view.document.body.textContent, /每日预算必须是非负整数分钟数/);
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(initialBudget, "60");
       initialBudget.dispatchEvent(new view.window.Event("input", { bubbles: true }));
@@ -2464,7 +2464,7 @@ test("Problem Detail accepts only a uniquely resolved existing Knowledge Node th
     await act(async () => accept.click()); await settle();
     assert.equal(calls.length, 1);
     assert.equal(calls[0][1].input.knowledgeNodeId, candidate.knowledgeNodeId);
-    assert.match(view.document.body.textContent, /written to current Markdown, re-read, and verified as a formal relation/);
+    assert.match(view.document.body.textContent, /知识链接已写入当前 Markdown，并经重新读取验证为正式关系/);
     assert.match(view.document.body.textContent, /当前个人题目没有前置知识建议/);
   } finally { await view.cleanup(); }
 });
@@ -2523,8 +2523,8 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
   }, "/settings");
   try {
     await settle();
-    const wednesday = view.document.querySelector('input[aria-label="Wednesday ACM budget in minutes"]');
-    const thursday = view.document.querySelector('input[aria-label="Thursday ACM budget in minutes"]');
+    const wednesday = view.document.querySelector('input[aria-label="Wednesday 的 ACM 预算分钟数"]');
+    const thursday = view.document.querySelector('input[aria-label="Thursday 的 ACM 预算分钟数"]');
     assert.equal(wednesday.value, "95");
     assert.equal(thursday.value, "");
     await act(async () => {
@@ -2533,7 +2533,7 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
     });
     await settle();
     assert.equal(wednesday.value, "73");
-    const save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "淇濆瓨姣忓懆棰勭畻");
+    const save = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "保存每周预算");
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "-1");
       wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
@@ -2542,7 +2542,7 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
     await act(async () => save.click());
     await settle();
     assert.equal(calls.length, 0);
-    assert.match(view.document.body.textContent, /Each weekly budget must be blank or a non-negative whole number/);
+    assert.match(view.document.body.textContent, /每周预算必须留空或填写非负整数分钟数/);
     await act(async () => {
       Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(wednesday, "73");
       wednesday.dispatchEvent(new view.window.Event("input", { bubbles: true }));
@@ -2551,7 +2551,7 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
     assert.equal(calls.length, 1);
     assert.equal(calls[0].wednesday, 73);
     assert.equal(calls[0].thursday, null);
-    assert.match(view.document.body.textContent, /Existing Today plans and one-day overrides were not changed/);
+    assert.match(view.document.body.textContent, /现有今日计划和单日覆盖值没有改变/);
   } finally { await view.cleanup(); }
 });
 
@@ -2686,11 +2686,11 @@ test("Knowledge deletion confirmation previews consequences before mutating", {
     throw new Error(`unexpected command ${command}`);
   }, "/knowledge");
   try {
-    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm file was deleted…");
+    const preview = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认文件已删除…");
     await act(async () => preview.click()); await settle();
-    assert.match(view.document.body.textContent, /This does not delete any file/);
+    assert.match(view.document.body.textContent, /此操作不会删除任何文件/);
     assert.equal(calls.some(([name]) => name === "confirm_knowledge_markdown_deleted"), false);
-    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Confirm deleted");
+    const confirm = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "确认已删除");
     await act(async () => confirm.click()); await settle();
     assert.equal(calls.find(([name]) => name === "confirm_knowledge_markdown_deleted")[1].input.knowledgeNodeId, anomaly.knowledgeNodeId);
     assert.doesNotMatch(view.document.body.textContent, /location anomaly and require recovery/);
@@ -2753,7 +2753,7 @@ test("Settings previews manual backup before creating it", { concurrency: false 
     const preview = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "预览手动备份");
     await act(async () => preview.click()); await settle();
     assert.equal(calls[0], "preview_manual_backup");
-    assert.match(view.document.body.textContent, /Schema 23/);
+    assert.match(view.document.body.textContent, /数据库结构版本 23/);
     assert.equal(calls.includes("create_manual_backup"), false);
     const create = [...view.document.querySelectorAll("button")].find((b) => b.textContent === "创建备份");
     await act(async () => create.click()); await settle();
