@@ -637,6 +637,39 @@ test("Contest Library creates and renames persisted Family and Series without ch
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library category deletion discloses series side effects before confirmation", { concurrency: false }, async () => {
+  const calls = [];
+  let families = [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+  const series = [{ seriesId: 11, familyId: 1, displayName: "Series A" }];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return families;
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? series : [];
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_delete_family") { calls.push([command, args.input]); families = families.filter((item) => item.familyId !== args.input.familyId); return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const family = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A");
+    await act(async () => family.click()); await settle();
+    const deleteButton = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "删除");
+    await act(async () => deleteButton.click()); await settle();
+    assert.match(view.document.body.textContent, /迁移比赛到替代分类后，比赛的系列关联将被解除。此分类下共 1 个系列将被删除。/);
+    const dialog = view.document.querySelector('[role="dialog"]');
+    assert.ok(dialog);
+    assert.equal(dialog.querySelectorAll("select option").length, 2);
+    assert.equal(calls.length, 0);
+    const replacement = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "2"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    const confirm = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "删除");
+    await act(async () => confirm.click()); await settle();
+    assert.deepEqual(calls[0][1], { familyId: 1, replacementFamilyId: 2 });
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Detail manages nullable placements and removal never calls Contest delete", { concurrency: false }, async () => {
   const calls = [];
   let placements = [];

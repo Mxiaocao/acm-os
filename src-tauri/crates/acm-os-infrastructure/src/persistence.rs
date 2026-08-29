@@ -18163,6 +18163,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contest_library_delete_contracts_preserve_atomic_taxonomy_boundaries() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let source = acm_os_application::create_family(&runtime, "Delete source")
+            .await
+            .expect("source family");
+        let replacement = acm_os_application::create_family(&runtime, "Delete replacement")
+            .await
+            .expect("replacement family");
+        let source_series = acm_os_application::create_series(&runtime, source.family_id, "Source series")
+            .await
+            .expect("source series");
+        let replacement_series = acm_os_application::create_series(&runtime, replacement.family_id, "Replacement series")
+            .await
+            .expect("replacement series");
+        let contest_row = insert_contest_row(pool, 7001).await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(7001).expect("contest identity");
+        let placement = acm_os_application::create_placement(
+            &runtime,
+            acm_os_application::CreateContestPlacement {
+                contest: contest.clone(),
+                family_id: source.family_id,
+                series_id: Some(source_series.series_id),
+                year: None,
+                ordinal: None,
+            },
+        )
+        .await
+        .expect("source placement");
+
+        assert_eq!(
+            acm_os_application::delete_family(&runtime, source.family_id, None).await,
+            Err(acm_os_application::ContestLibraryError::FamilyInUse)
+        );
+        assert_eq!(
+            acm_os_application::delete_family(&runtime, source.family_id, Some(source.family_id)).await,
+            Err(acm_os_application::ContestLibraryError::FamilyInUse)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT family_id FROM contest_placements WHERE id = ?1")
+                .bind(placement.placement_id)
+                .fetch_one(pool)
+                .await
+                .expect("source placement remains"),
+            source.family_id
+        );
+
+        acm_os_application::delete_family(&runtime, source.family_id, Some(replacement.family_id))
+            .await
+            .expect("replace and delete source family");
+        let moved: (i64, Option<i64>) = sqlx::query_as(
+            "SELECT family_id, series_id FROM contest_placements WHERE id = ?1",
+        )
+        .bind(placement.placement_id)
+        .fetch_one(pool)
+        .await
+        .expect("moved placement");
+        assert_eq!(moved, (replacement.family_id, None));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_series WHERE family_id = ?1")
+                .bind(source.family_id)
+                .fetch_one(pool)
+                .await
+                .expect("source series removed"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_families WHERE id = ?1")
+                .bind(source.family_id)
+                .fetch_one(pool)
+                .await
+                .expect("source family removed"),
+            0
+        );
+
+        let unused_family = acm_os_application::create_family(&runtime, "Unused family")
+            .await
+            .expect("unused family");
+        let unused_series = acm_os_application::create_series(&runtime, unused_family.family_id, "Unused series")
+            .await
+            .expect("unused series");
+        acm_os_application::delete_series(&runtime, unused_series.series_id, None)
+            .await
+            .expect("delete unused series");
+        acm_os_application::delete_family(&runtime, unused_family.family_id, None)
+            .await
+            .expect("delete unused family");
+
+        let series_placement = acm_os_application::create_placement(
+            &runtime,
+            acm_os_application::CreateContestPlacement {
+                contest,
+                family_id: replacement.family_id,
+                series_id: Some(replacement_series.series_id),
+                year: None,
+                ordinal: Some(2),
+            },
+        )
+        .await
+        .expect("replacement series placement");
+        assert_eq!(
+            acm_os_application::delete_series(&runtime, replacement_series.series_id, Some(replacement_series.series_id)).await,
+            Err(acm_os_application::ContestLibraryError::SeriesInUse)
+        );
+        acm_os_application::delete_series(&runtime, replacement_series.series_id, None)
+            .await
+            .expect("unassign and delete series");
+        let series_after: Option<i64> = sqlx::query_scalar(
+            "SELECT series_id FROM contest_placements WHERE id = ?1",
+        )
+        .bind(series_placement.placement_id)
+        .fetch_one(pool)
+        .await
+        .expect("series placement remains");
+        assert_eq!(series_after, None);
+
+        let migrate_source = acm_os_application::create_series(&runtime, replacement.family_id, "Migrate source")
+            .await
+            .expect("migrate source series");
+        let migrate_target = acm_os_application::create_series(&runtime, replacement.family_id, "Migrate target")
+            .await
+            .expect("migrate target series");
+        let migrate_placement = acm_os_application::create_placement(
+            &runtime,
+            acm_os_application::CreateContestPlacement {
+                contest: acm_os_domain::CodeforcesContestIdentity::new(7001).expect("contest identity"),
+                family_id: replacement.family_id,
+                series_id: Some(migrate_source.series_id),
+                year: None,
+                ordinal: Some(3),
+            },
+        )
+        .await
+        .expect("migrate placement");
+        acm_os_application::delete_series(&runtime, migrate_source.series_id, Some(migrate_target.series_id))
+            .await
+            .expect("migrate and delete series");
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>("SELECT series_id FROM contest_placements WHERE id = ?1")
+                .bind(migrate_placement.placement_id)
+                .fetch_one(pool)
+                .await
+                .expect("migrated series placement"),
+            Some(migrate_target.series_id)
+        );
+
+        let other = acm_os_application::create_family(&runtime, "Other family")
+            .await
+            .expect("other family");
+        let other_series = acm_os_application::create_series(&runtime, other.family_id, "Other series")
+            .await
+            .expect("other series");
+        let replacement_series = acm_os_application::create_series(&runtime, replacement.family_id, "Replacement series 2")
+            .await
+            .expect("replacement series 2");
+        assert_eq!(
+            acm_os_application::delete_series(&runtime, replacement_series.series_id, Some(other_series.series_id)).await,
+            Err(acm_os_application::ContestLibraryError::SeriesFamilyMismatch)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_series WHERE id = ?1")
+                .bind(replacement_series.series_id)
+                .fetch_one(pool)
+                .await
+                .expect("failed delete is atomic"),
+            1
+        );
+        let _ = contest_row;
+    }
+
+    #[tokio::test]
     async fn known_legacy_m5_schema_upgrades_without_losing_today_or_learning_facts() {
         let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
         let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
