@@ -1709,15 +1709,16 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
   const title = item.title;
   const placements = item.placements ?? [];
   const coverTitle = contestBookCoverTitle(title);
+  const [assetFailed, setAssetFailed] = useState(false);
   return (
     <button
       aria-label={t("contest.open", { title })}
-      className="contest-book contest-book--asset"
+      className={assetFailed ? "contest-book" : "contest-book contest-book--asset"}
       data-contest-id={item.contestId}
       onClick={() => navigate(`/contests/${item.contestId}`)}
       type="button"
     >
-      <img aria-hidden="true" className="contest-book__shell" src={contestBookShell} alt="" />
+      {!assetFailed ? <img aria-hidden="true" className="contest-book__shell" onError={() => setAssetFailed(true)} src={contestBookShell} alt="" /> : null}
       <span aria-hidden="true" className="contest-book__volume" />
       <span aria-hidden="true" className="contest-book__spine" />
       <span className="contest-book__cover">

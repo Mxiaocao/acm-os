@@ -7,6 +7,9 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
   plugins: [react()],
+  // Tauri serves the production bundle from a custom protocol origin.
+  // Relative asset URLs keep imported artwork inside frontendDist.
+  base: "./",
   clearScreen: false,
   server: {
     port: 1420,

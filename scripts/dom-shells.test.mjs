@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import path from "node:path";
 
 import { JSDOM } from "jsdom";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { createServer, createServerModuleRunner } from "vite";
+import { createServer, createServerModuleRunner, loadConfigFromFile } from "vite";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,6 +42,11 @@ const moduleRunner = createServerModuleRunner(vite.environments.ssr, { hmr: fals
 moduleRunner.options.transport.timeout = 300_000;
 moduleRunner.transport.timeout = 300_000;
 const shells = await moduleRunner.import("/src/app/shells.tsx");
+
+test("Contest artwork keeps production asset URLs relative to the Tauri bundle", async () => {
+  const loaded = await loadConfigFromFile({ command: "build", mode: "production" }, path.resolve("vite.config.ts"));
+  assert.equal(loaded.config.base, "./");
+});
 
 const configuredWorkspace = {
   state: "configured",
@@ -363,6 +369,7 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
     assert.ok(shell);
     assert.equal(shell.getAttribute("alt"), "");
     assert.equal(shell.getAttribute("aria-hidden"), "true");
+    assert.equal(shell.getAttribute("src"), "dom-shells-asset://../assets/contest-book-shell.png");
     assert.ok(books[0].querySelector(".contest-book__volume"));
     assert.ok(books[0].querySelector(".contest-book__spine"));
     assert.ok(books[0].querySelector(".contest-book__cover"));
@@ -741,6 +748,13 @@ test("Contest archive exposes explicit placement taxonomy for single and grouped
     assert.notEqual(unknownYear, "2026");
     assert.equal(books[1].querySelector('[data-taxonomy-field="series"]'), null);
     assert.equal(books[1].querySelector('[data-taxonomy-field="year"]')?.textContent.includes("2026"), false);
+    const artwork = books[0].querySelector(".contest-book__shell");
+    await act(async () => artwork.dispatchEvent(new view.window.Event("error")));
+    await settle();
+    assert.equal(books[0].querySelector(".contest-book__shell"), null);
+    assert.equal(books[0].classList.contains("contest-book--asset"), false);
+    assert.ok(books[0].querySelector(".contest-book__cover"));
+    assert.equal(books[0].querySelectorAll(".contest-book__placement").length, 2);
   } finally { await view.cleanup(); }
 });
 
