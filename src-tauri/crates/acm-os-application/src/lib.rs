@@ -4,6 +4,8 @@ pub mod codeforces;
 
 use std::path::{Component, Path};
 
+use chrono::{Datelike, SecondsFormat, Timelike};
+
 pub const BOUNDARY_NAME: &str = "acm-os-application";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,6 +805,7 @@ pub async fn import_codeforces_contest<P: ContestImportPort, S: ContestImportSou
 pub struct ContestShelfItem {
     pub contest: acm_os_domain::CodeforcesContestIdentity,
     pub title: String,
+    pub placements: Vec<ContestPlacement>,
     pub import_status: ContestImportStatus,
     pub problem_count: u32,
     pub missing_snapshot_count: u32,
@@ -941,6 +944,8 @@ pub enum ContestLibraryError {
     DuplicateSeriesName,
     DuplicatePlacement,
     SeriesFamilyMismatch,
+    FamilyInUse,
+    SeriesInUse,
     PersistenceUnavailable,
     IntegrityViolation,
 }
@@ -955,6 +960,11 @@ pub trait ContestLibraryPort {
         family_id: i64,
         display_name: &str,
     ) -> Result<ContestFamily, ContestLibraryError>;
+    async fn delete_family(
+        &self,
+        family_id: i64,
+        replacement_family_id: Option<i64>,
+    ) -> Result<(), ContestLibraryError>;
     async fn list_series(&self, family_id: i64) -> Result<Vec<ContestSeries>, ContestLibraryError>;
     async fn create_series(
         &self,
@@ -966,6 +976,11 @@ pub trait ContestLibraryPort {
         series_id: i64,
         display_name: &str,
     ) -> Result<ContestSeries, ContestLibraryError>;
+    async fn delete_series(
+        &self,
+        series_id: i64,
+        replacement_series_id: Option<i64>,
+    ) -> Result<(), ContestLibraryError>;
     async fn list_years(
         &self,
         family_id: i64,
@@ -1047,6 +1062,21 @@ pub async fn rename_family<P: ContestLibraryPort>(
     port.rename_family(family_id, &display_name).await
 }
 
+pub async fn delete_family<P: ContestLibraryPort>(
+    port: &P,
+    family_id: i64,
+    replacement_family_id: Option<i64>,
+) -> Result<(), ContestLibraryError> {
+    let family_id = validate_contest_library_id(family_id)?;
+    let replacement_family_id = replacement_family_id
+        .map(validate_contest_library_id)
+        .transpose()?;
+    if replacement_family_id == Some(family_id) {
+        return Err(ContestLibraryError::FamilyInUse);
+    }
+    port.delete_family(family_id, replacement_family_id).await
+}
+
 pub async fn list_series<P: ContestLibraryPort>(
     port: &P,
     family_id: i64,
@@ -1073,6 +1103,21 @@ pub async fn rename_series<P: ContestLibraryPort>(
     let series_id = validate_contest_library_id(series_id)?;
     let display_name = normalize_contest_library_name(display_name)?;
     port.rename_series(series_id, &display_name).await
+}
+
+pub async fn delete_series<P: ContestLibraryPort>(
+    port: &P,
+    series_id: i64,
+    replacement_series_id: Option<i64>,
+) -> Result<(), ContestLibraryError> {
+    let series_id = validate_contest_library_id(series_id)?;
+    let replacement_series_id = replacement_series_id
+        .map(validate_contest_library_id)
+        .transpose()?;
+    if replacement_series_id == Some(series_id) {
+        return Err(ContestLibraryError::SeriesInUse);
+    }
+    port.delete_series(series_id, replacement_series_id).await
 }
 
 pub async fn list_years<P: ContestLibraryPort>(
@@ -3238,6 +3283,7 @@ pub trait ContestReadPort {
 pub enum ContestImportContractError {
     TitleRequired,
     SourceUrlRequired,
+    InvalidStartsAtUtc,
     EmptyManifest,
     NonContiguousOrdinal,
     SlotContestMismatch,
@@ -3258,6 +3304,21 @@ impl ContestImportDraft {
         if source_url.trim().is_empty() {
             return Err(ContestImportContractError::SourceUrlRequired);
         }
+        let starts_at_utc = starts_at_utc
+            .map(|value| {
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&value)
+                    .map_err(|_| ContestImportContractError::InvalidStartsAtUtc)?;
+                let canonical = timestamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+                if value.len() != 20
+                    || timestamp.year() <= 0
+                    || timestamp.nanosecond() != 0
+                    || canonical != value
+                {
+                    return Err(ContestImportContractError::InvalidStartsAtUtc);
+                }
+                Ok(value)
+            })
+            .transpose()?;
         if slots.is_empty() {
             return Err(ContestImportContractError::EmptyManifest);
         }
@@ -4760,6 +4821,45 @@ mod tests {
             ),
             Err(ContestImportContractError::DuplicateProblemIdentity)
         );
+    }
+
+    #[test]
+    fn import_manifest_accepts_only_canonical_positive_year_utc_timestamps() {
+        let build = |starts_at_utc: Option<&str>| {
+            let contest = contest_identity();
+            ContestImportDraft::validated(
+                contest.clone(),
+                "Codeforces Round".to_owned(),
+                "https://codeforces.com/contest/1979".to_owned(),
+                starts_at_utc.map(str::to_owned),
+                vec![problem_slot(contest, 1, "A")],
+            )
+        };
+
+        assert_eq!(
+            build(Some("2026-08-10T12:00:00Z"))
+                .expect("current importer and manual format")
+                .starts_at_utc
+                .as_deref(),
+            Some("2026-08-10T12:00:00Z")
+        );
+        assert!(build(None).is_ok());
+        for invalid in [
+            "2026-not-a-date",
+            "2026-01-01",
+            "2026-01-01 12:00:00",
+            "0000-01-01T00:00:00Z",
+            "2026-99-99T00:00:00Z",
+            "2026-08-10T12:00:00+00:00",
+            "2026-08-10T12:00:00.123Z",
+            "+10000-08-10T12:00:00Z",
+        ] {
+            assert_eq!(
+                build(Some(invalid)),
+                Err(ContestImportContractError::InvalidStartsAtUtc),
+                "unexpectedly accepted {invalid}"
+            );
+        }
     }
 
     #[test]

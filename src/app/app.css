@@ -687,6 +687,22 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
   align-items: center;
 }
 .contest-book--asset .contest-book__title { margin-top: 34px; }
+.contest-book__placements {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  color: #ead8da;
+  font-size: .48rem;
+  font-weight: 650;
+  line-height: 1.35;
+  text-align: center;
+  text-wrap: balance;
+}
+.contest-book__placement { display: block; overflow-wrap: anywhere; }
 .contest-book--asset .contest-book__footer {
   display: flex;
   width: 100%;

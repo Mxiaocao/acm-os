@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface ContestShelfItemDto {
   contestId: number;
   title: string;
+  placements: ContestLibraryPlacementDto[];
   importStatus: "incomplete" | "complete";
   problemCount: number;
   missingSnapshotCount: number;
@@ -383,6 +384,9 @@ export function renameContestLibraryFamily(
     input: { familyId, displayName },
   });
 }
+export function deleteContestLibraryFamily(familyId: number, replacementFamilyId: number | null): Promise<void> {
+  return invoke<void>("contest_library_delete_family", { input: { familyId, replacementFamilyId } });
+}
 
 export function listContestLibrarySeries(familyId: number): Promise<ContestLibrarySeriesDto[]> {
   return invoke<ContestLibrarySeriesDto[]>("contest_library_list_series", {
@@ -406,6 +410,9 @@ export function renameContestLibrarySeries(
   return invoke<ContestLibrarySeriesDto>("contest_library_rename_series", {
     input: { seriesId, displayName },
   });
+}
+export function deleteContestLibrarySeries(seriesId: number, replacementSeriesId: number | null): Promise<void> {
+  return invoke<void>("contest_library_delete_series", { input: { seriesId, replacementSeriesId } });
 }
 
 export function listContestLibraryYears(

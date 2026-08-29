@@ -57,9 +57,11 @@ import {
   listContestLibraryFamilies,
   createContestLibraryFamily,
   renameContestLibraryFamily,
+  deleteContestLibraryFamily,
   listContestLibrarySeries,
   createContestLibrarySeries,
   renameContestLibrarySeries,
+  deleteContestLibrarySeries,
   listContestLibraryYears,
   listContestLibraryPlacements,
   createContestLibraryPlacement,
@@ -1692,18 +1694,31 @@ function contestBookCoverTitle(title: string) {
   };
 }
 
+function contestPlacementMetadata(placement: ContestLibraryPlacementDto) {
+  return (
+    <span className="contest-book__placement" data-placement-id={placement.placementId} key={placement.placementId}>
+      <span data-taxonomy-field="category">{placement.familyName}</span>
+      <span aria-hidden="true"> · </span>
+      <span data-taxonomy-field="year">{placement.year === null ? t("contest.unknownYear") : placement.year}</span>
+      {placement.seriesName ? <><span aria-hidden="true"> · </span><span data-taxonomy-field="series">{placement.seriesName}</span></> : null}
+    </span>
+  );
+}
+
 function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; navigate: Navigate }) {
   const title = item.title;
+  const placements = item.placements ?? [];
   const coverTitle = contestBookCoverTitle(title);
+  const [assetFailed, setAssetFailed] = useState(false);
   return (
     <button
       aria-label={t("contest.open", { title })}
-      className="contest-book contest-book--asset"
+      className={assetFailed ? "contest-book" : "contest-book contest-book--asset"}
       data-contest-id={item.contestId}
       onClick={() => navigate(`/contests/${item.contestId}`)}
       type="button"
     >
-      <img aria-hidden="true" className="contest-book__shell" src={contestBookShell} alt="" />
+      {!assetFailed ? <img aria-hidden="true" className="contest-book__shell" onError={() => setAssetFailed(true)} src={contestBookShell} alt="" /> : null}
       <span aria-hidden="true" className="contest-book__volume" />
       <span aria-hidden="true" className="contest-book__spine" />
       <span className="contest-book__cover">
@@ -1718,6 +1733,7 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
             <span className="contest-book__round-label">{t("contest.round")}</span>
             <span className="contest-book__round-number">{coverTitle.roundNumber}</span>
           </strong> : <strong className="contest-book__title contest-book__title--fallback">{title}</strong>}
+          {placements.length > 0 ? <span className="contest-book__placements">{placements.map(contestPlacementMetadata)}</span> : null}
           {coverTitle.subtitle ? <span className="contest-book__subtitle">{coverTitle.subtitle}</span> : null}
           <span className="contest-book__footer">
             <span className="contest-book__identity">CF {item.contestId}</span>
@@ -1838,6 +1854,11 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const [seriesDraft, setSeriesDraft] = useState("");
   const [editingFamily, setEditingFamily] = useState<number | null>(null);
   const [editingSeries, setEditingSeries] = useState<number | null>(null);
+  const [creationMode, setCreationMode] = useState<"category" | "series" | null>(null);
+  const [deleteFamilyTarget, setDeleteFamilyTarget] = useState<number | null>(null);
+  const [deleteSeriesTarget, setDeleteSeriesTarget] = useState<number | null>(null);
+  const [deleteFamilyReplacement, setDeleteFamilyReplacement] = useState<number | null>(null);
+  const [deleteSeriesReplacement, setDeleteSeriesReplacement] = useState<number | null>(null);
   const familyRequest = useRef(0);
   const libraryRequest = useRef(0);
   const [contestUrl, setContestUrl] = useState("");
@@ -1847,6 +1868,29 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const [manualTitle, setManualTitle] = useState("");
   const [manualDate, setManualDate] = useState("");
   const [manualProblems, setManualProblems] = useState([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
+
+  const reconcileYearFilter = (filter: ContestLibraryYearFilterDto, available: Array<number | null>): ContestLibraryYearFilterDto => {
+    if (filter.kind === "any") return filter;
+    if (filter.kind === "unassigned") return available.includes(null) ? filter : { kind: "any" };
+    return available.includes(filter.year) ? filter : { kind: "any" };
+  };
+  const reloadArchive = async (
+    nextFamilyId: number | null,
+    nextSeriesFilter: ContestLibrarySeriesFilterDto,
+    nextYearFilter: ContestLibraryYearFilterDto,
+  ) => {
+    const request = ++libraryRequest.current;
+    setLoading(true); setFailed(false);
+    const scope: ContestLibraryScopeDto = nextFamilyId === null
+      ? { kind: "all" }
+      : { kind: "family", familyId: nextFamilyId, series: nextSeriesFilter, year: nextYearFilter };
+    try {
+      const nextItems = await listContestLibraryContests({ scope, archive: archiveFilter });
+      if (request === libraryRequest.current) { setItems(nextItems); setLoading(false); }
+    } catch {
+      if (request === libraryRequest.current) { setFailed(true); setLoading(false); }
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -1890,7 +1934,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const createFamily = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (managementBusy) return;
     setManagementBusy(true); setManagementMessage(null);
-    try { const created = await createContestLibraryFamily(familyDraft); await refreshFamilies(created.familyId); setFamilyDraft(""); }
+    try { const created = await createContestLibraryFamily(familyDraft); await refreshFamilies(created.familyId); setFamilyDraft(""); setCreationMode(null); }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
@@ -1904,7 +1948,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const createSeries = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (managementBusy || familyId === null) return;
     setManagementBusy(true); setManagementMessage(null);
-    try { await createContestLibrarySeries(familyId, seriesDraft); setSeriesDraft(""); setSeries(await listContestLibrarySeries(familyId)); }
+    try { await createContestLibrarySeries(familyId, seriesDraft); setSeriesDraft(""); setSeries(await listContestLibrarySeries(familyId)); setCreationMode(null); }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
@@ -1912,6 +1956,61 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     event.preventDefault(); if (managementBusy) return;
     setManagementBusy(true); setManagementMessage(null);
     try { await renameContestLibrarySeries(id, seriesDraft); setSeriesDraft(""); setEditingSeries(null); if (familyId !== null) setSeries(await listContestLibrarySeries(familyId)); }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const deleteFamily = async (id: number, replacementFamilyId: number | null) => {
+    if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try {
+      await deleteContestLibraryFamily(id, replacementFamilyId);
+      const nextFamilies = await listContestLibraryFamilies();
+      const nextFamilyId = familyId === id
+        ? (replacementFamilyId !== null && nextFamilies.some((family) => family.familyId === replacementFamilyId) ? replacementFamilyId : null)
+        : familyId;
+      let nextSeries: ContestLibrarySeriesDto[] = [];
+      let nextSeriesFilter = seriesFilter;
+      let nextYears: Array<number | null> = [];
+      let nextYearFilter = yearFilter;
+      if (nextFamilyId !== null) {
+        nextSeries = await listContestLibrarySeries(nextFamilyId);
+        const exactSeriesId = nextSeriesFilter.kind === "exact" ? nextSeriesFilter.seriesId : null;
+        if (exactSeriesId !== null && !nextSeries.some((item) => item.seriesId === exactSeriesId)) nextSeriesFilter = { kind: "any" };
+        nextYears = await listContestLibraryYears(nextFamilyId, nextSeriesFilter);
+        nextYearFilter = reconcileYearFilter(nextYearFilter, nextYears);
+      } else {
+        nextSeriesFilter = { kind: "any" }; nextYearFilter = { kind: "any" };
+      }
+      setDeleteFamilyTarget(null); setFamilies(nextFamilies); setFamilyId(nextFamilyId); setSeries(nextSeries); setYears(nextYears);
+      setSeriesFilter(nextSeriesFilter); setYearFilter(nextYearFilter);
+      await reloadArchive(nextFamilyId, nextSeriesFilter, nextYearFilter);
+    }
+    catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { setManagementBusy(false); }
+  };
+  const deleteSeries = async (id: number, replacementSeriesId: number | null) => {
+    if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try {
+      await deleteContestLibrarySeries(id, replacementSeriesId);
+      if (familyId !== null) {
+        const nextSeries = await listContestLibrarySeries(familyId);
+        let nextSeriesFilter = seriesFilter;
+        if (nextSeriesFilter.kind === "exact" && nextSeriesFilter.seriesId === id) {
+          nextSeriesFilter = replacementSeriesId !== null && nextSeries.some((item) => item.seriesId === replacementSeriesId)
+            ? { kind: "exact", seriesId: replacementSeriesId }
+            : { kind: "unassigned" };
+        }
+        const exactSeriesId = nextSeriesFilter.kind === "exact" ? nextSeriesFilter.seriesId : null;
+        if (exactSeriesId !== null && !nextSeries.some((item) => item.seriesId === exactSeriesId)) nextSeriesFilter = { kind: "any" };
+        const nextYears = await listContestLibraryYears(familyId, nextSeriesFilter);
+        const nextYearFilter = reconcileYearFilter(yearFilter, nextYears);
+        setDeleteSeriesTarget(null); setSeries(nextSeries); setYears(nextYears); setSeriesFilter(nextSeriesFilter); setYearFilter(nextYearFilter);
+        await reloadArchive(familyId, nextSeriesFilter, nextYearFilter);
+      } else {
+        setDeleteSeriesTarget(null); await reloadArchive(familyId, seriesFilter, yearFilter);
+      }
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
@@ -1959,9 +2058,19 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
         </div>
         {families === null && !failed ? <p aria-busy="true">{t("contest.loading")}</p> : null}
         {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
-        <div className="action-row"><details><summary className="secondary-action">{t("contest.createFamily")}</summary><form className="inline-form" onSubmit={createFamily}><label>{t("contest.familyName")}<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.createFamily")}</button></form></details>{familyId !== null ? <details><summary className="secondary-action">{t("contest.createSeries")}</summary><form className="inline-form" onSubmit={createSeries}><label>{t("contest.seriesName")}<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.createSeries")}</button></form></details> : null}</div>
-        {familyId !== null && families?.find((family) => family.familyId === familyId) ? <div className="management-list"><div><strong>{t("contest.selectedFamily")}</strong><button className="text-button" onClick={() => { setEditingFamily(familyId); setFamilyDraft(families.find((family) => family.familyId === familyId)?.displayName ?? ""); }} type="button">{t("contest.rename")}</button></div>{editingFamily === familyId ? <form className="inline-form" onSubmit={(event) => void renameFamily(event, familyId)}><label>{t("contest.familyName")}<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingFamily(null)} type="button">{t("common.cancel")}</button></form> : null}</div> : null}
-        {familyId !== null && series.length > 0 ? <div className="management-list"><strong>{t("contest.seriesManagement")}</strong>{series.map((item) => <div className="management-list__row" key={item.seriesId}><span>{item.displayName}</span><button className="text-button" onClick={() => { setEditingSeries(item.seriesId); setSeriesDraft(item.displayName); }} type="button">{t("contest.rename")}</button>{editingSeries === item.seriesId ? <form className="inline-form" onSubmit={(event) => void renameSeries(event, item.seriesId)}><label>{t("contest.seriesName")}<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingSeries(null)} type="button">{t("common.cancel")}</button></form> : null}</div>)}</div> : null}
+        <div className="action-row">
+          <button className="secondary-action" onClick={() => setCreationMode((mode) => mode === "category" ? null : "category")} type="button">{t("contest.createFamily")}</button>
+          <button className="secondary-action" onClick={() => setCreationMode((mode) => mode === "series" ? null : "series")} type="button">{t("contest.createSeries")}</button>
+        </div>
+        {creationMode ? <form className="inline-form contest-library-create-panel" onSubmit={creationMode === "category" ? createFamily : createSeries}>
+          <strong>{creationMode === "category" ? t("contest.createFamily") : t("contest.createSeries")}</strong>
+          {creationMode === "category" ? <label>{t("contest.familyName")}<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label> : <label>{t("contest.seriesName")}<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label>}
+          <div className="action-row"><button className="primary-action" disabled={managementBusy || (creationMode === "series" && familyId === null)} type="submit">{t("common.confirm")}</button><button className="secondary-action" onClick={() => setCreationMode(null)} type="button">{t("common.cancel")}</button></div>
+        </form> : null}
+        {familyId !== null && families?.find((family) => family.familyId === familyId) ? <div className="management-list"><div><strong>{t("contest.selectedFamily")}</strong><button className="text-button" onClick={() => { setEditingFamily(familyId); setFamilyDraft(families.find((family) => family.familyId === familyId)?.displayName ?? ""); }} type="button">{t("contest.rename")}</button><button className="danger-action" onClick={() => { setDeleteFamilyReplacement(null); setDeleteFamilyTarget(familyId); }} type="button">{t("common.delete")}</button></div>{editingFamily === familyId ? <form className="inline-form" onSubmit={(event) => void renameFamily(event, familyId)}><label>{t("contest.familyName")}<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingFamily(null)} type="button">{t("common.cancel")}</button></form> : null}</div> : null}
+        {familyId !== null && series.length > 0 ? <div className="management-list"><strong>{t("contest.seriesManagement")}</strong>{series.map((item) => <div className="management-list__row" key={item.seriesId}><span>{item.displayName}</span><button className="text-button" onClick={() => { setEditingSeries(item.seriesId); setSeriesDraft(item.displayName); }} type="button">{t("contest.rename")}</button><button className="danger-action" onClick={() => { setDeleteSeriesReplacement(null); setDeleteSeriesTarget(item.seriesId); }} type="button">{t("common.delete")}</button>{editingSeries === item.seriesId ? <form className="inline-form" onSubmit={(event) => void renameSeries(event, item.seriesId)}><label>{t("contest.seriesName")}<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingSeries(null)} type="button">{t("common.cancel")}</button></form> : null}</div>)}</div> : null}
+        {deleteFamilyTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.selectedFamily")}</p><p>{t("contest.deleteFamilyDescription", { count: series.length })}</p><label>{t("contest.family")}<select value={deleteFamilyReplacement ?? ""} onChange={(event) => setDeleteFamilyReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{families?.filter((family) => family.familyId !== deleteFamilyTarget).map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteFamily(deleteFamilyTarget, deleteFamilyReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteFamilyTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
+        {deleteSeriesTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.seriesManagement")}</p><label>{t("contest.series")}<select value={deleteSeriesReplacement ?? ""} onChange={(event) => setDeleteSeriesReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.unassignedSeries")}</option>{series.filter((item) => item.seriesId !== deleteSeriesTarget).map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteSeries(deleteSeriesTarget, deleteSeriesReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteSeriesTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
       </section>
       <form className="content-panel contest-import-form" onSubmit={submitImport}><label>{t("contest.url")}<input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} /></label><button className="primary-action" disabled={importing} type="submit">{importing ? t("contest.importing") : t("contest.import")}</button>{importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}</form>
       <details className="content-panel manual-import-panel"><summary>{t("contest.manualImport")}</summary><form className="manual-import-form" onSubmit={submitManual}><p>{t("contest.manualDescription")}</p><label>{t("contest.contestId")}<input inputMode="numeric" min="1" onInput={(event) => setManualContestId(event.currentTarget.value)} required type="number" value={manualContestId} /></label><label>{t("contest.contestTitle")}<input onInput={(event) => setManualTitle(event.currentTarget.value)} required value={manualTitle} /></label><label>{t("contest.contestDate")}<input onInput={(event) => setManualDate(event.currentTarget.value)} required type="date" value={manualDate} /></label>{manualProblems.map((problem, position) => <fieldset className="manual-problem-card" key={position}><legend>{t("contest.problemNumber", { count: position + 1 })}</legend><label>{t("contest.problemIndex")}<input aria-label={t("contest.manualIndexAria", { count: position + 1 })} onInput={(event) => updateManualProblem(position, { index: event.currentTarget.value })} required value={problem.index} /></label><label>{t("contest.englishTitle")}<input aria-label={t("contest.manualTitleAria", { count: position + 1 })} onInput={(event) => updateManualProblem(position, { title: event.currentTarget.value })} required value={problem.title} /></label><label>{t("contest.problemUrl")}<input aria-label={t("contest.manualUrlAria", { count: position + 1 })} onInput={(event) => updateManualProblem(position, { sourceUrl: event.currentTarget.value })} required type="url" value={problem.sourceUrl} /></label><label>{t("contest.statementText")}<textarea aria-label={t("contest.manualStatementAria", { count: position + 1 })} onInput={(event) => updateManualProblem(position, { statementText: event.currentTarget.value })} required rows={8} value={problem.statementText} /></label></fieldset>)}<div className="action-row"><button className="secondary-action" onClick={() => setManualProblems((current) => [...current, { index: "", title: "", sourceUrl: "", statementText: "" }])} type="button">{t("contest.addProblem")}</button><button className="primary-action" disabled={importing} type="submit">{t("contest.saveManual")}</button></div></form></details>
@@ -1979,7 +2088,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
               ))}
             </div>
           ) : null}
-          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label={t("contest.remainingAria")}><div><p className="eyebrow">{t("contest.moreView")}</p><h2>{t("contest.remaining")}</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong><span>Codeforces {item.contestId} · {t("contest.problemsCount", { count: item.problemCount })} · {item.archived ? t("contest.statusArchived") : item.importStatus === "complete" ? t("contest.statusImported") : t("contest.missingSnapshots", { count: item.missingSnapshotCount })}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">{t("contest.retrySnapshots")}</button> : null}</li>)}</ul></section> : null}
+          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label={t("contest.remainingAria")}><div><p className="eyebrow">{t("contest.moreView")}</p><h2>{t("contest.remaining")}</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong>{(item.placements ?? []).map(contestPlacementMetadata)}<span>Codeforces {item.contestId} · {t("contest.problemsCount", { count: item.problemCount })} · {item.archived ? t("contest.statusArchived") : item.importStatus === "complete" ? t("contest.statusImported") : t("contest.missingSnapshots", { count: item.missingSnapshotCount })}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">{t("contest.retrySnapshots")}</button> : null}</li>)}</ul></section> : null}
         </>
       ) : null}
     </>
@@ -2077,6 +2186,8 @@ function contestLibraryErrorMessage(error: unknown): string {
     contest_not_found: "比赛已不存在，请返回比赛库并重新加载。",
     placement_not_found: "此归档位置已不存在，请重新加载后再试。",
     series_family_mismatch: "此系列属于其他分类。",
+    family_in_use: "分类仍被比赛使用，请选择替代分类后再删除。",
+    series_in_use: "系列仍被比赛使用，请选择替代系列或解除关联后再删除。",
     duplicate_placement: "此比赛已存在相同的分类、系列、年份和序号位置。",
     invalid_year: "年份必须留空或填写正整数。",
     invalid_ordinal: "序号必须留空或填写正整数。",
@@ -2196,7 +2307,7 @@ function ContestPlacementPanel({
     {placements === null && !error ? <p aria-busy="true">{t("contest.loadingPlacements")}</p> : null}
     {placements?.length === 0 ? <p className="safe-note">{t("contest.noPlacement")}</p> : null}
     {placements?.length ? <ul className="placement-list">{placements.map((item) => <li key={item.placementId}><div><strong>{item.familyName}</strong><span>{item.seriesName ?? t("contest.noSeries")} · {item.year ?? t("contest.unassignedYear")}{item.ordinal === null ? "" : ` · #${String(item.ordinal).padStart(2, "0")}`}</span></div><div className="action-row"><button className="secondary-action" onClick={() => onEdit(item)} type="button">{t("contest.edit")}</button><button className="danger-action" onClick={() => setRemoveTarget(item)} ref={removeButtonRef} type="button">{t("contest.removePlacement")}</button></div></li>)}</ul> : null}
-    {editor ? <form className="placement-form" onSubmit={submit}><h3>{editor === "new" ? t("contest.addPlacementTitle") : t("contest.editPlacementTitle")}</h3><label>{t("contest.family")}<select disabled={busy} onChange={(event) => changeFamily(Number(event.currentTarget.value))} required value={familyId}>{families.map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><label>{t("contest.series")}<select disabled={busy} onChange={(event) => setSeriesId(event.currentTarget.value === "" ? null : Number(event.currentTarget.value))} value={seriesId ?? ""}><option value="">{t("contest.noSeries")}</option>{series.map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><label>{t("contest.year")}<input disabled={busy} inputMode="numeric" min="1" onChange={(event) => setYear(event.currentTarget.value)} placeholder={t("contest.unassigned")} type="number" value={year} /></label><label>{t("contest.ordinal")}<input disabled={busy} inputMode="numeric" min="1" onChange={(event) => setOrdinal(event.currentTarget.value)} placeholder={t("contest.optional")} type="number" value={ordinal} /></label>{formError ? <p className="error-message" role="alert">{formError}</p> : null}<div className="action-row"><button className="primary-action" disabled={busy || familyId <= 0} type="submit">{busy ? t("contest.saving") : t("contest.savePlacement")}</button><button className="secondary-action" disabled={busy} onClick={() => onEdit(null)} type="button">{t("common.cancel")}</button></div></form> : null}
+    {editor ? <form className="placement-form" onSubmit={submit}><h3>{editor === "new" ? t("contest.addPlacementTitle") : t("contest.editPlacementTitle")}</h3><label>{t("contest.family")}<select disabled={busy} onChange={(event) => changeFamily(Number(event.currentTarget.value))} required value={familyId}>{families.map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><label>{t("contest.series")}<select disabled={busy} onChange={(event) => setSeriesId(event.currentTarget.value === "" ? null : Number(event.currentTarget.value))} value={seriesId ?? ""}><option value="">{t("contest.noSeries")}</option>{series.map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><label>{t("contest.year")}<input aria-readonly="true" disabled inputMode="numeric" readOnly type="number" value={year} placeholder={t("contest.unassigned")} /></label><label>{t("contest.ordinal")}<input disabled={busy} inputMode="numeric" min="1" onChange={(event) => setOrdinal(event.currentTarget.value)} placeholder={t("contest.optional")} type="number" value={ordinal} /></label>{formError ? <p className="error-message" role="alert">{formError}</p> : null}<div className="action-row"><button className="primary-action" disabled={busy || familyId <= 0} type="submit">{busy ? t("contest.saving") : t("contest.savePlacement")}</button><button className="secondary-action" disabled={busy} onClick={() => onEdit(null)} type="button">{t("common.cancel")}</button></div></form> : null}
     {removeTarget ? <div className="modal-backdrop"><div aria-describedby="remove-placement-description" aria-labelledby="remove-placement-title" aria-modal="true" ref={dialogRef} role="dialog"><h2 id="remove-placement-title">{t("contest.removePlacementQuestion")}</h2><p id="remove-placement-description">{t("contest.removePlacementDescription", { family: removeTarget.familyName })}</p><div className="action-row"><button className="danger-action" disabled={busy} onClick={() => void remove()} type="button">{t("contest.removePlacement")}</button><button className="secondary-action" disabled={busy} onClick={() => { setRemoveTarget(null); queueMicrotask(() => removeButtonRef.current?.focus()); }} type="button">{t("common.cancel")}</button></div></div></div> : null}
   </section>;
 }
