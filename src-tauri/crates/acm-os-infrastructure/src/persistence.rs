@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::Datelike;
+
 use acm_os_application::{
     AcceptedKnowledgeCandidateProjection, ActiveReviewCycle, CanonicalProblemDetail,
     CompletedReviewAttempt, ContestAiAnalysis, ContestAiAnalysisError, ContestAiAnalysisPort,
@@ -8250,7 +8252,9 @@ async fn load_contest_library_placement(
         Option<i64>,
     )> = sqlx::query_as(
         "SELECT cp.id, cp.family_id, f.display_name, cp.series_id, s.display_name, \
-                COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), cp.year), cp.ordinal \
+                CASE WHEN c.starts_at_utc IS NULL THEN cp.year \
+                     WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) \
+                     ELSE NULL END, cp.ordinal \
          FROM contest_placements cp \
          JOIN contest_families f ON f.id = cp.family_id \
          JOIN contests c ON c.id = cp.contest_id \
@@ -8290,11 +8294,10 @@ async fn authoritative_contest_year(
             .fetch_optional(pool)
             .await
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-    let Some(value) = starts_at else {
-        return Ok(None);
-    };
-    let prefix = value.get(0..4).and_then(|year| year.parse::<u32>().ok());
-    Ok(prefix.filter(|year| *year > 0))
+    Ok(starts_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        .map(|timestamp| timestamp.year())
+        .and_then(|year| u32::try_from(year).ok()))
 }
 
 impl ContestLibraryPort for DatabaseRuntime {
@@ -8684,7 +8687,7 @@ impl ContestLibraryPort for DatabaseRuntime {
         let rows: Vec<Option<i64>> = match series {
             ContestLibrarySeriesFilter::Any => {
                 sqlx::query_scalar(
-                    "SELECT DISTINCT COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), p.year) AS year \
+                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id WHERE p.family_id = ?1 \
                  ORDER BY year IS NULL, year DESC",
                 )
@@ -8694,7 +8697,7 @@ impl ContestLibraryPort for DatabaseRuntime {
             }
             ContestLibrarySeriesFilter::Unassigned => {
                 sqlx::query_scalar(
-                    "SELECT DISTINCT COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), p.year) AS year \
+                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
                  WHERE p.family_id = ?1 AND p.series_id IS NULL \
                  ORDER BY year IS NULL, year DESC",
@@ -8705,7 +8708,7 @@ impl ContestLibraryPort for DatabaseRuntime {
             }
             ContestLibrarySeriesFilter::Exact(series_id) => {
                 sqlx::query_scalar(
-                    "SELECT DISTINCT COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), p.year) AS year \
+                    "SELECT DISTINCT CASE WHEN c.starts_at_utc IS NULL THEN p.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END AS year \
                  FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
                  WHERE p.family_id = ?1 AND p.series_id = ?2 \
                  ORDER BY year IS NULL, year DESC",
@@ -9074,10 +9077,10 @@ impl ContestLibraryPort for DatabaseRuntime {
             match year {
                 ContestLibraryYearFilter::Any => {}
                 ContestLibraryYearFilter::Unassigned => {
-                    sql.push_str(" AND COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), placement.year) IS NULL");
+                    sql.push_str(" AND CASE WHEN c.starts_at_utc IS NULL THEN placement.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END IS NULL");
                 }
                 ContestLibraryYearFilter::Exact(_) => {
-                    sql.push_str(" AND COALESCE(CAST(strftime('%Y', c.starts_at_utc) AS INTEGER), placement.year) = ?");
+                    sql.push_str(" AND CASE WHEN c.starts_at_utc IS NULL THEN placement.year WHEN strftime('%Y', c.starts_at_utc) IS NOT NULL THEN CAST(strftime('%Y', c.starts_at_utc) AS INTEGER) ELSE NULL END = ?");
                 }
             }
             sql.push(')');
@@ -17810,6 +17813,56 @@ mod tests {
         .await
         .expect("2025 archive query");
         assert!(year_2025.is_empty());
+    }
+
+    #[tokio::test]
+    async fn contest_library_malformed_timestamp_is_unknown_in_display_and_filters() {
+        let directory = TempDir::new().expect("temporary database");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let family = acm_os_application::create_family(&runtime, "Malformed timestamp family")
+            .await
+            .expect("family");
+        let contest_id = insert_contest_row(pool, 3202).await;
+        sqlx::query("UPDATE contests SET starts_at_utc = '2026-not-a-date' WHERE id = ?1")
+            .bind(contest_id)
+            .execute(pool)
+            .await
+            .expect("malformed timestamp");
+        sqlx::query(
+            "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, 2025)",
+        )
+        .bind(contest_id)
+        .bind(family.family_id)
+        .execute(pool)
+        .await
+        .expect("placement");
+        let contest =
+            acm_os_domain::CodeforcesContestIdentity::new(3202).expect("contest identity");
+        let placements = acm_os_application::list_contest_placements(&runtime, &contest)
+            .await
+            .expect("placements");
+        assert_eq!(placements[0].year, None);
+        let years = acm_os_application::list_years(
+            &runtime,
+            family.family_id,
+            acm_os_application::ContestLibrarySeriesFilter::Any,
+        )
+        .await
+        .expect("years");
+        assert_eq!(years, vec![None]);
+        let filtered = acm_os_application::list_library_contests(
+            &runtime,
+            acm_os_application::ContestLibraryScope::Family {
+                family_id: family.family_id,
+                series: acm_os_application::ContestLibrarySeriesFilter::Any,
+                year: acm_os_application::ContestLibraryYearFilter::Unassigned,
+            },
+            acm_os_application::ContestLibraryArchiveFilter::All,
+        )
+        .await
+        .expect("filtered archive");
+        assert_eq!(filtered.len(), 1);
     }
 
     #[tokio::test]

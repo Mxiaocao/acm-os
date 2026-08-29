@@ -894,6 +894,93 @@ test("Contest Library mutation refresh uses the latest selected scope", { concur
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library Series deletion reconciles replacement filter and reloads archive", { concurrency: false }, async () => {
+  const contestCalls = [];
+  let series = [{ seriesId: 11, familyId: 1, displayName: "Series S" }, { seriesId: 12, familyId: 1, displayName: "Series R" }];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family" }];
+    if (command === "contest_library_list_series") return series;
+    if (command === "contest_library_list_years") return [2026];
+    if (command === "contest_library_list_contests") { contestCalls.push(args.input); return []; }
+    if (command === "contest_library_delete_series") { series = series.filter((item) => item.seriesId !== args.input.seriesId); return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Series S").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "2026").click()); await settle();
+    const row = [...view.document.querySelectorAll(".management-list__row")].find((item) => item.textContent.includes("Series S"));
+    await act(async () => row.querySelector(".danger-action").click()); await settle();
+    const dialog = view.document.querySelector('[role="dialog"]');
+    const replacement = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "12"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.className.includes("danger-action")).click()); await settle();
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series S"), false);
+    assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series R" && button.className.includes("filter-option--selected")));
+    assert.deepEqual(contestCalls.at(-1).scope, { kind: "family", familyId: 1, series: { kind: "exact", seriesId: 12 }, year: { kind: "exact", year: 2026 } });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library Series deletion to unassigned clears stale ID and reloads archive", { concurrency: false }, async () => {
+  const contestCalls = [];
+  let series = [{ seriesId: 11, familyId: 1, displayName: "Series S" }];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Family" }];
+    if (command === "contest_library_list_series") return series;
+    if (command === "contest_library_list_years") return [2026, null];
+    if (command === "contest_library_list_contests") { contestCalls.push(args.input); return []; }
+    if (command === "contest_library_delete_series") { series = []; return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Series S").click()); await settle();
+    const row = [...view.document.querySelectorAll(".management-list__row")].find((item) => item.textContent.includes("Series S"));
+    await act(async () => row.querySelector(".danger-action").click()); await settle();
+    const dialog = view.document.querySelector('[role="dialog"]');
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.className.includes("danger-action")).click()); await settle();
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series S"), false);
+    assert.equal(contestCalls.at(-1).scope.series.kind, "unassigned");
+    assert.deepEqual(contestCalls.at(-1).scope, { kind: "family", familyId: 1, series: { kind: "unassigned" }, year: { kind: "any" } });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library Category deletion clears child Series filter while preserving valid Year", { concurrency: false }, async () => {
+  const contestCalls = [];
+  let families = [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
+  const seriesByFamily = { 1: [{ seriesId: 11, familyId: 1, displayName: "Series S" }], 2: [] };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return families;
+    if (command === "contest_library_list_series") return seriesByFamily[args.input.familyId] ?? [];
+    if (command === "contest_library_list_years") return [2026];
+    if (command === "contest_library_list_contests") { contestCalls.push(args.input); return []; }
+    if (command === "contest_library_delete_family") { families = families.filter((item) => item.familyId !== args.input.familyId); return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Series S").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll("button")].find((button) => button.textContent === "2026").click()); await settle();
+    await act(async () => [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.className.includes("danger-action")).click()); await settle();
+    const dialog = view.document.querySelector('[role="dialog"]');
+    const replacement = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "2"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.className.includes("danger-action")).click()); await settle();
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Family A"), false);
+    assert.equal([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Series S"), false);
+    assert.deepEqual(contestCalls.at(-1).scope, { kind: "family", familyId: 2, series: { kind: "any" }, year: { kind: "exact", year: 2026 } });
+  } finally { await view.cleanup(); }
+});
+
 test("Contest placement editor ignores stale Series responses after Family changes", { concurrency: false }, async () => {
   let resolveA;
   let resolveB;

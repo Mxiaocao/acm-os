@@ -1868,6 +1868,29 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const [manualDate, setManualDate] = useState("");
   const [manualProblems, setManualProblems] = useState([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
 
+  const reconcileYearFilter = (filter: ContestLibraryYearFilterDto, available: Array<number | null>): ContestLibraryYearFilterDto => {
+    if (filter.kind === "any") return filter;
+    if (filter.kind === "unassigned") return available.includes(null) ? filter : { kind: "any" };
+    return available.includes(filter.year) ? filter : { kind: "any" };
+  };
+  const reloadArchive = async (
+    nextFamilyId: number | null,
+    nextSeriesFilter: ContestLibrarySeriesFilterDto,
+    nextYearFilter: ContestLibraryYearFilterDto,
+  ) => {
+    const request = ++libraryRequest.current;
+    setLoading(true); setFailed(false);
+    const scope: ContestLibraryScopeDto = nextFamilyId === null
+      ? { kind: "all" }
+      : { kind: "family", familyId: nextFamilyId, series: nextSeriesFilter, year: nextYearFilter };
+    try {
+      const nextItems = await listContestLibraryContests({ scope, archive: archiveFilter });
+      if (request === libraryRequest.current) { setItems(nextItems); setLoading(false); }
+    } catch {
+      if (request === libraryRequest.current) { setFailed(true); setLoading(false); }
+    }
+  };
+
   useEffect(() => {
     let active = true;
     listContestLibraryFamilies().then((next) => { if (active) setFamilies(next); }).catch(() => { if (active) setFailed(true); });
@@ -1938,14 +1961,55 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const deleteFamily = async (id: number, replacementFamilyId: number | null) => {
     if (managementBusy) return;
     setManagementBusy(true); setManagementMessage(null);
-    try { await deleteContestLibraryFamily(id, replacementFamilyId); setDeleteFamilyTarget(null); await refreshFamilies(null); selectFamily(null); }
+    try {
+      await deleteContestLibraryFamily(id, replacementFamilyId);
+      const nextFamilies = await listContestLibraryFamilies();
+      const nextFamilyId = familyId === id
+        ? (replacementFamilyId !== null && nextFamilies.some((family) => family.familyId === replacementFamilyId) ? replacementFamilyId : null)
+        : familyId;
+      let nextSeries: ContestLibrarySeriesDto[] = [];
+      let nextSeriesFilter = seriesFilter;
+      let nextYears: Array<number | null> = [];
+      let nextYearFilter = yearFilter;
+      if (nextFamilyId !== null) {
+        nextSeries = await listContestLibrarySeries(nextFamilyId);
+        const exactSeriesId = nextSeriesFilter.kind === "exact" ? nextSeriesFilter.seriesId : null;
+        if (exactSeriesId !== null && !nextSeries.some((item) => item.seriesId === exactSeriesId)) nextSeriesFilter = { kind: "any" };
+        nextYears = await listContestLibraryYears(nextFamilyId, nextSeriesFilter);
+        nextYearFilter = reconcileYearFilter(nextYearFilter, nextYears);
+      } else {
+        nextSeriesFilter = { kind: "any" }; nextYearFilter = { kind: "any" };
+      }
+      setDeleteFamilyTarget(null); setFamilies(nextFamilies); setFamilyId(nextFamilyId); setSeries(nextSeries); setYears(nextYears);
+      setSeriesFilter(nextSeriesFilter); setYearFilter(nextYearFilter);
+      await reloadArchive(nextFamilyId, nextSeriesFilter, nextYearFilter);
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
   const deleteSeries = async (id: number, replacementSeriesId: number | null) => {
     if (managementBusy) return;
     setManagementBusy(true); setManagementMessage(null);
-    try { await deleteContestLibrarySeries(id, replacementSeriesId); setDeleteSeriesTarget(null); if (familyId !== null) setSeries(await listContestLibrarySeries(familyId)); }
+    try {
+      await deleteContestLibrarySeries(id, replacementSeriesId);
+      if (familyId !== null) {
+        const nextSeries = await listContestLibrarySeries(familyId);
+        let nextSeriesFilter = seriesFilter;
+        if (nextSeriesFilter.kind === "exact" && nextSeriesFilter.seriesId === id) {
+          nextSeriesFilter = replacementSeriesId !== null && nextSeries.some((item) => item.seriesId === replacementSeriesId)
+            ? { kind: "exact", seriesId: replacementSeriesId }
+            : { kind: "unassigned" };
+        }
+        const exactSeriesId = nextSeriesFilter.kind === "exact" ? nextSeriesFilter.seriesId : null;
+        if (exactSeriesId !== null && !nextSeries.some((item) => item.seriesId === exactSeriesId)) nextSeriesFilter = { kind: "any" };
+        const nextYears = await listContestLibraryYears(familyId, nextSeriesFilter);
+        const nextYearFilter = reconcileYearFilter(yearFilter, nextYears);
+        setDeleteSeriesTarget(null); setSeries(nextSeries); setYears(nextYears); setSeriesFilter(nextSeriesFilter); setYearFilter(nextYearFilter);
+        await reloadArchive(familyId, nextSeriesFilter, nextYearFilter);
+      } else {
+        setDeleteSeriesTarget(null); await reloadArchive(familyId, seriesFilter, yearFilter);
+      }
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
