@@ -3,7 +3,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const vite = await createServer({ configFile: false, root: process.cwd(), server: { middlewareMode: true } });
-const { DEFAULT_LOCALE, FALLBACK_LOCALE, t, validateCatalogs } = await vite.ssrLoadModule("/src/app/i18n/index.ts");
+const { DEFAULT_LOCALE, FALLBACK_LOCALE, t, validateCatalogs, validateChineseCatalogMojibake } = await vite.ssrLoadModule("/src/app/i18n/index.ts");
 test.after(() => vite.close());
 
 test("defaults to zh-CN and translates semantic keys", () => {
@@ -24,4 +24,8 @@ test("preserves context-specific reward terminology and interpolation", () => {
 test("catalog placeholders validate and unknown keys never return undefined", () => {
   assert.deepEqual(validateCatalogs(), []);
   assert.equal(t("missing.key"), "Something went wrong.");
+});
+
+test("zh-CN application catalog contains no known mojibake signatures", () => {
+  assert.deepEqual(validateChineseCatalogMojibake(), []);
 });
