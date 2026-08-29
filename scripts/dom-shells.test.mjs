@@ -2523,8 +2523,8 @@ test("Settings saves optional arbitrary-minute weekly defaults without touching 
   }, "/settings");
   try {
     await settle();
-    const wednesday = view.document.querySelector('input[aria-label="Wednesday 的 ACM 预算分钟数"]');
-    const thursday = view.document.querySelector('input[aria-label="Thursday 的 ACM 预算分钟数"]');
+    const wednesday = view.document.querySelector('input[aria-label="星期三 的 ACM 预算分钟数"]');
+    const thursday = view.document.querySelector('input[aria-label="星期四 的 ACM 预算分钟数"]');
     assert.equal(wednesday.value, "95");
     assert.equal(thursday.value, "");
     await act(async () => {

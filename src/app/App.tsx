@@ -109,7 +109,7 @@ export function App() {
   }
   return (
     <>
-      <RouteAnnouncement message={route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found"} />
+      <RouteAnnouncement message={routePageLabel(route)} />
       <NormalAppShell
         foundation={foundation}
         key={route.kind === "normal" ? route.page : route.kind === "contestDetail" ? `contest-${route.contestId}` : route.kind === "problemDetail" ? `${route.contestId}-${route.index}` : route.kind === "canonicalProblemDetail" ? `problem-id-${route.problemId}` : route.pathname}
@@ -135,14 +135,21 @@ function routeAnnouncement(
   if (shell.state === "setup") return t("shell.setupWorkspace");
   const route = parseAppRoute(pathname);
   if (route.kind === "review") return t("nav.review");
-  return route.kind === "normal" ? normalPageLabel(route.page) : route.kind === "contestDetail" ? "Contest detail" : route.kind === "problemDetail" || route.kind === "canonicalProblemDetail" ? "Problem statement" : "Page not found";
+  return routePageLabel(route);
+}
+
+function routePageLabel(route: ReturnType<typeof parseAppRoute>): string {
+  if (route.kind === "normal") return normalPageLabel(route.page);
+  if (route.kind === "contestDetail") return t("contest.detail");
+  if (route.kind === "problemDetail" || route.kind === "canonicalProblemDetail") return t("problem.detail");
+  return t("errors.notFound");
 }
 
 function normalPageLabel(page: NormalPage): string {
   const labels = {
     today: t("nav.today"),
     contests: t("nav.contests"),
-    problems: "我的题库",
+    problems: t("nav.problems"),
     knowledge: t("nav.knowledge"),
     reward: t("nav.reward"),
     settings: t("nav.settings"),

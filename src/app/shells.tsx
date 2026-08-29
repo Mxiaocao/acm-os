@@ -1367,8 +1367,8 @@ function KnowledgeNeighborList({ heading, nodes, onOpen }: { heading: string; no
 }
 
 const weekBudgetFields: Array<[keyof WeeklyAcmBudgetDto, string]> = [
-  ["monday", "Monday"], ["tuesday", "Tuesday"], ["wednesday", "Wednesday"],
-  ["thursday", "Thursday"], ["friday", "Friday"], ["saturday", "Saturday"], ["sunday", "Sunday"],
+  ["monday", "星期一"], ["tuesday", "星期二"], ["wednesday", "星期三"],
+  ["thursday", "星期四"], ["friday", "星期五"], ["saturday", "星期六"], ["sunday", "星期日"],
 ];
 
 function WeeklyAcmBudgetSettings() {
@@ -2600,8 +2600,8 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <PageHeader eyebrow="M1 · 本地题面快照" headingRef={headingRef} title={detail.index + ". " + displayProblemTitle(detail.index, detail.title)} />
     <section className="content-panel">
       <p>
-        Codeforces {detail.contestId}{detail.rating ? " · Rating " + detail.rating : ""}
-        {" · "}{detail.identityType === "personal" ? "个人题目" : "轻量题目"}
+        Codeforces {detail.contestId}{detail.rating ? ` · ${t("problem.rating", { rating: detail.rating })}` : ""}
+        {" · "}{detail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}
       </p>
       <a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
       {detail.identityType === "lightweight" ? (

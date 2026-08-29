@@ -4,7 +4,8 @@ import test from "node:test";
 import { createServer, createServerModuleRunner } from "vite";
 
 const root = new URL("../", import.meta.url);
-const [shells, css, messages] = await Promise.all([
+const [app, shells, css, messages] = await Promise.all([
+  readFile(new URL("src/app/App.tsx", root), "utf8"),
   readFile(new URL("src/app/shells.tsx", root), "utf8"),
   readFile(new URL("src/app/app.css", root), "utf8"),
   readFile(new URL("src/app/i18n/messages.ts", root), "utf8"),
@@ -43,6 +44,12 @@ test("R7 application-owned accessible names and visible copy do not leak known E
     "Vault is unavailable",
   ];
   for (const copy of forbiddenApplicationCopy) assert.doesNotMatch(shells, new RegExp(copy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  for (const copy of ["Contest detail", "Problem statement", "Page not found"]) {
+    assert.doesNotMatch(app, new RegExp(copy));
+  }
+  for (const copy of ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", " · Rating "]) {
+    assert.doesNotMatch(shells, new RegExp(copy));
+  }
 });
 
 test("R7 dialogs and long-content surfaces remain reachable at narrow viewport heights", () => {
