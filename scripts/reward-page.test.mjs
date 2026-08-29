@@ -225,6 +225,7 @@ test("Custom Reward create, edit, archived filter, and archive confirmation use 
     await act(async () => setInput(view.document.querySelector('input[aria-label="编辑自定义奖励所需金币"]'), "7"));
     await act(async () => findButton(view.document, "Save changes").click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "update_custom_reward")[1].input, { customRewardId: "r1", name: "Tea", coinCost: 7 });
+    assert.match(view.document.querySelector('[aria-labelledby="reward-actions-heading"]')?.textContent ?? "", /Tea/);
 
     await act(async () => findButton(view.document, "Archive").click()); await settle();
     assert.match(view.document.querySelector('[role="alertdialog"]')?.textContent ?? "", /Tea/);
@@ -234,6 +235,106 @@ test("Custom Reward create, edit, archived filter, and archive confirmation use 
     await act(async () => findButton(view.document, "Archive").click());
     await act(async () => findButton(view.document, "Archive reward").click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "archive_custom_reward")[1].input, { customRewardId: "r1" });
+    assert.doesNotMatch(view.document.querySelector('[aria-labelledby="reward-actions-heading"]')?.textContent ?? "", /Tea/);
+  } finally { await view.cleanup(); }
+});
+
+test("Custom Reward create synchronizes the redemption area immediately", { concurrency: false }, async () => {
+  let rewards = [{ customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" }];
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+    if (command === "list_custom_rewards") return rewards;
+    if (command === "create_custom_reward") {
+      const created = { customRewardId: "r2", name: args.input.name, coinCost: args.input.coinCost, status: "active" };
+      rewards = [...rewards, created];
+      return created;
+    }
+    if (command === "reward_redemption_history") return [];
+    return baseIpc(command, args);
+  });
+  try {
+    const management = view.document.querySelector('[aria-labelledby="custom-rewards-heading"]');
+    const [name, cost] = management.querySelectorAll('input:not([type="checkbox"])');
+    await act(async () => { setInput(name, "Tea"); setInput(cost, "7"); });
+    await act(async () => findButton(view.document, "Create reward").click());
+    await settle();
+    const redemption = view.document.querySelector('[aria-labelledby="reward-actions-heading"]');
+    assert.match(redemption?.textContent ?? "", /Tea/);
+    assert.match(redemption?.textContent ?? "", /7 金币/);
+  } finally { await view.cleanup(); }
+});
+
+test("Reward mutations never fake-add when create fails", { concurrency: false }, async () => {
+  const reward = { customRewardId: "r1", name: "Coffee", coinCost: 5, status: "active" };
+  const view = await renderApp((command) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+    if (command === "list_custom_rewards") return [reward];
+    if (command === "reward_redemption_history") return [];
+    if (command === "create_custom_reward") throw new Error("offline");
+    return baseIpc(command);
+  });
+  try {
+    const management = view.document.querySelector('[aria-labelledby="custom-rewards-heading"]');
+    const [name, cost] = management.querySelectorAll('input:not([type="checkbox"])');
+    await act(async () => { setInput(name, "Tea"); setInput(cost, "7"); });
+    await act(async () => findButton(view.document, "Create reward").click()); await settle();
+    assert.doesNotMatch(view.document.querySelector('[aria-labelledby="reward-actions-heading"]')?.textContent ?? "", /Tea/);
+    assert.match(view.document.querySelector('[role="alert"]')?.textContent ?? "", /鏇存敼鏈繚瀛|奖励/);
+  } finally { await view.cleanup(); }
+});
+
+test("Redeem refreshes balance, history count, and affordability", { concurrency: false }, async () => {
+  const rewards = [
+    { customRewardId: "r1", name: "Small", coinCost: 100, status: "active" },
+    { customRewardId: "r2", name: "Large", coinCost: 250, status: "active" },
+  ];
+  let coin = 320;
+  let history = [];
+  const view = await renderApp((command, args) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin };
+    if (command === "list_custom_rewards") return rewards;
+    if (command === "reward_redemption_history") return history;
+    if (command === "redeem_custom_reward") {
+      coin -= 100;
+      history = [{ redemptionId: args.input.redemptionId, customRewardId: "r1", rewardName: "Small", coinCostPaid: 100, redeemedAtUtc: "2026-08-25T00:00:00Z", refundId: null, refundedAtUtc: null }];
+      return { disposition: "processed", redemptionId: args.input.redemptionId, customRewardId: "r1", coinCostPaid: 100, redeemedAtUtc: "2026-08-25T00:00:00Z" };
+    }
+    return baseIpc(command);
+  });
+  try {
+    const buttons = [...view.document.querySelectorAll('[aria-labelledby="reward-actions-heading"] button')];
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[1].disabled, false);
+    await act(async () => buttons[0].click());
+    await act(async () => findButton(view.document, "Redeem reward").click()); await settle();
+    assert.match(view.document.querySelector('[aria-labelledby="reward-account-heading"]')?.textContent ?? "", /220/);
+    assert.equal(view.document.querySelector('[aria-labelledby="reward-actions-heading"] button[aria-label*="Large"]')?.disabled, true);
+    assert.equal(view.document.querySelector('.reward-history .reward-section-summary > span')?.textContent, "1");
+    assert.equal(view.document.querySelector('.reward-management')?.hasAttribute("open"), false);
+    assert.equal(view.document.querySelector('.reward-history')?.hasAttribute("open"), false);
+  } finally { await view.cleanup(); }
+});
+
+test("Redemption cards show six by default and support view-all collapse", { concurrency: false }, async () => {
+  const rewards = Array.from({ length: 7 }, (_, index) => ({ customRewardId: `r${index}`, name: `Reward ${index}`, coinCost: 1, status: "active" }));
+  const view = await renderApp((command) => {
+    if (command === "reward_activation_state") return { active: true };
+    if (command === "reward_account_summary") return { level: 1, xp: 1, coin: 20 };
+    if (command === "list_custom_rewards") return rewards;
+    if (command === "reward_redemption_history") return [];
+    return baseIpc(command);
+  });
+  try {
+    assert.equal(view.document.querySelectorAll(".reward-card").length, 6);
+    const expand = view.document.querySelector(".reward-expand");
+    assert.ok(expand);
+    await act(async () => expand.click());
+    assert.equal(view.document.querySelectorAll(".reward-card").length, 7);
+    await act(async () => expand.click());
+    assert.equal(view.document.querySelectorAll(".reward-card").length, 6);
   } finally { await view.cleanup(); }
 });
 

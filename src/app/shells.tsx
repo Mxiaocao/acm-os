@@ -6,6 +6,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
@@ -789,6 +790,9 @@ function RewardPage() {
   const [account, setAccount] = useState<RewardAccountSummaryDto | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState(false);
+  const [customRewards, setCustomRewards] = useState<CustomRewardDto[]>([]);
+  const [customRewardsLoading, setCustomRewardsLoading] = useState(false);
+  const [customRewardsError, setCustomRewardsError] = useState(false);
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [activating, setActivating] = useState(false);
   const [activationError, setActivationError] = useState(false);
@@ -807,7 +811,19 @@ function RewardPage() {
     }
   }, []);
 
-  const refreshRewardAccount = useCallback(() => { void loadAccount(); }, [loadAccount]);
+  const refreshRewardAccount = useCallback(async () => { await loadAccount(); }, [loadAccount]);
+
+  const loadCustomRewards = useCallback(async () => {
+    setCustomRewardsLoading(true);
+    setCustomRewardsError(false);
+    try {
+      setCustomRewards(await listCustomRewards());
+    } catch {
+      setCustomRewardsError(true);
+    } finally {
+      setCustomRewardsLoading(false);
+    }
+  }, []);
 
   const loadActivation = useCallback(async () => {
     setActivationView("loading");
@@ -816,11 +832,11 @@ function RewardPage() {
     try {
       const state = await getRewardActivationState();
       setActivationView(state.active ? "active" : "inactive");
-      if (state.active) await loadAccount();
+      if (state.active) await Promise.all([loadAccount(), loadCustomRewards()]);
     } catch {
       setActivationView("error");
     }
-  }, [loadAccount]);
+  }, [loadAccount, loadCustomRewards]);
 
   useEffect(() => { void loadActivation(); }, [loadActivation]);
 
@@ -907,7 +923,22 @@ function RewardPage() {
           {accountError ? <div role="alert"><p>{t("reward.accountError")}</p><button className="secondary-action" onClick={() => void loadAccount()} type="button">{t("common.retry")}</button></div> : null}
           {account ? <dl className="detail-list"><dt>{t("reward.level")}</dt><dd>{account.level}</dd><dt>{t("reward.xpLabel")}</dt><dd>{account.xp}</dd><dt>{t("reward.coin")}</dt><dd>{account.coin}</dd></dl> : null}
         </section>
-        <CustomRewardManagement account={account} onTransactionResolved={refreshRewardAccount} />
+        <RewardTransactions
+          account={account}
+          customRewards={customRewards}
+          customRewardsError={customRewardsError}
+          customRewardsLoading={customRewardsLoading}
+          managementSlot={
+            <CustomRewardManagement
+              customRewards={customRewards}
+              customRewardsError={customRewardsError}
+              customRewardsLoading={customRewardsLoading}
+              onCustomRewardsRefresh={loadCustomRewards}
+            />
+          }
+          onCustomRewardsRefresh={loadCustomRewards}
+          onTransactionResolved={refreshRewardAccount}
+        />
       </>
     ) : null}
     {confirmationOpen ? (
@@ -926,14 +957,16 @@ function RewardPage() {
   </>;
 }
 
-function CustomRewardManagement({ account, onTransactionResolved }: { account: RewardAccountSummaryDto | null; onTransactionResolved: () => void }) {
+function CustomRewardManagement({ customRewards, customRewardsLoading, customRewardsError, onCustomRewardsRefresh }: {
+  customRewards: CustomRewardDto[];
+  customRewardsLoading: boolean;
+  customRewardsError: boolean;
+  onCustomRewardsRefresh: () => Promise<void>;
+}) {
   const archiveTriggerRef = useRef<HTMLButtonElement>(null);
   const archiveDialogRef = useRef<HTMLDivElement>(null);
   const archiveConfirmRef = useRef<HTMLButtonElement>(null);
   const mutationPendingRef = useRef(false);
-  const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [name, setName] = useState("");
   const [coinCost, setCoinCost] = useState("");
@@ -944,8 +977,6 @@ function CustomRewardManagement({ account, onTransactionResolved }: { account: R
   const [pending, setPending] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [invalidFields, setInvalidFields] = useState({ name: false, coinCost: false });
-  const load = useCallback(async () => { setLoading(true); setError(false); try { setRewards(await listCustomRewards()); } catch { setError(true); } finally { setLoading(false); } }, []);
-  useEffect(() => { void load(); }, [load]);
   const closeArchive = useCallback(() => {
     if (mutationPendingRef.current) return;
     setArchiveTarget(null);
@@ -969,22 +1000,24 @@ function CustomRewardManagement({ account, onTransactionResolved }: { account: R
   }, [archiveTarget, closeArchive]);
   const parseCost = (value: string) => { if (!/^\d+$/.test(value)) return null; const n = Number(value); return Number.isSafeInteger(n) && n > 0 ? n : null; };
   const validate = (nextName: string, nextCost: string) => { const invalid = { name: !nextName.trim(), coinCost: parseCost(nextCost) === null }; setInvalidFields(invalid); if (invalid.name || invalid.coinCost) { setMutationError(t("reward.validation")); return null; } return { name: nextName.trim(), coinCost: Number(nextCost) }; };
-  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; mutationPendingRef.current = true; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError(t("reward.changeError")); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const input = validate(name, coinCost); if (!input) return; mutationPendingRef.current = true; setPending(true); try { await createCustomReward(input); setName(""); setCoinCost(""); setInvalidFields({ name: false, coinCost: false }); await onCustomRewardsRefresh(); } catch { setMutationError(t("reward.changeError")); } finally { mutationPendingRef.current = false; setPending(false); } };
   const edit = (reward: CustomRewardDto) => { setEditingId(reward.customRewardId); setEditName(reward.name); setEditCoinCost(String(reward.coinCost)); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); };
-  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; mutationPendingRef.current = true; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); setInvalidFields({ name: false, coinCost: false }); await load(); } catch { setMutationError(t("reward.editConflict")); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
-  const archive = async () => { if (!archiveTarget || mutationPendingRef.current) return; mutationPendingRef.current = true; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await load(); } catch { setMutationError(t("reward.changeError")); await load(); } finally { mutationPendingRef.current = false; setPending(false); } };
-  const visible = rewards.filter((reward) => showArchived || reward.status === "active");
-  return <section aria-labelledby="custom-rewards-heading" className="content-panel">
-    <div className="statement-heading-row"><h2 id="custom-rewards-heading">{t("reward.customRewards")}</h2><label><input checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} type="checkbox" /> {t("reward.showArchived")}</label></div>
+  const update = async (event: FormEvent<HTMLFormElement>, reward: CustomRewardDto) => { event.preventDefault(); if (mutationPendingRef.current) return; setMutationError(null); const values = validate(editName, editCoinCost); if (!values) return; mutationPendingRef.current = true; setPending(true); try { await updateCustomReward({ customRewardId: reward.customRewardId, ...values }); setEditingId(null); setInvalidFields({ name: false, coinCost: false }); await onCustomRewardsRefresh(); } catch { setMutationError(t("reward.editConflict")); await onCustomRewardsRefresh(); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const archive = async () => { if (!archiveTarget || mutationPendingRef.current) return; mutationPendingRef.current = true; setPending(true); setMutationError(null); try { await archiveCustomReward(archiveTarget.customRewardId); setArchiveTarget(null); await onCustomRewardsRefresh(); } catch { setMutationError(t("reward.changeError")); await onCustomRewardsRefresh(); } finally { mutationPendingRef.current = false; setPending(false); } };
+  const visible = customRewards.filter((reward) => showArchived || reward.status === "active");
+  return <details aria-labelledby="custom-rewards-heading" className="content-panel reward-management">
+    <summary className="reward-section-summary"><h2 id="custom-rewards-heading">{t("reward.customRewards")}</h2><span>{customRewards.filter((reward) => reward.status === "active").length}</span></summary>
+    <div className="reward-management__body">
+    <div className="statement-heading-row"><span>{t("reward.customRewards")}</span><label><input checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} type="checkbox" /> {t("reward.showArchived")}</label></div>
     {mutationError ? <p aria-live="assertive" className="error-message" id="custom-reward-error" role="alert">{mutationError}</p> : null}
     <form className="action-row" noValidate onSubmit={create}><label>{t("reward.name")}<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label={t("reward.customNameAria")} onInput={(event) => { setName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={name} /></label><label>{t("reward.coinCost")}<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label={t("reward.customCoinCostAria")} inputMode="numeric" onInput={(event) => { setCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={coinCost} /></label><button className="primary-action" disabled={pending} type="submit">{t("reward.create")}</button></form>
-    {loading ? <p aria-live="polite">{t("reward.loadingCustom")}</p> : null}
-    {error ? <div role="alert"><p>{t("reward.customLoadError")}</p><button className="secondary-action" onClick={() => void load()} type="button">{t("common.retry")}</button></div> : null}
-    {!loading && !error && visible.length === 0 ? <p>{showArchived ? t("reward.noCustomAll") : t("reward.noCustomActive")}</p> : null}
-    {!loading && !error && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{t("reward.coinCostValue", { cost: reward.coinCost })}</span><span>{reward.status === "archived" ? t("reward.archived") : t("reward.active")}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">{t("reward.edit")}</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">{t("reward.archive")}</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>{t("reward.name")}<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label={t("reward.editNameAria")} onInput={(event) => { setEditName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={editName} /></label><label>{t("reward.coinCost")}<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label={t("reward.editCoinCostAria")} onInput={(event) => { setEditCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">{t("reward.saveChanges")}</button><button className="secondary-action" disabled={pending} onClick={() => { setEditingId(null); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); }} type="button">{t("common.cancel")}</button></form> : null}</li>)}</ul> : null}
+    {customRewardsLoading ? <p aria-live="polite">{t("reward.loadingCustom")}</p> : null}
+    {customRewardsError ? <div role="alert"><p>{t("reward.customLoadError")}</p><button className="secondary-action" onClick={() => void onCustomRewardsRefresh()} type="button">{t("common.retry")}</button></div> : null}
+    {!customRewardsLoading && !customRewardsError && visible.length === 0 ? <p>{showArchived ? t("reward.noCustomAll") : t("reward.noCustomActive")}</p> : null}
+    {!customRewardsLoading && !customRewardsError && visible.length > 0 ? <ul className="detail-list">{visible.map((reward) => <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{t("reward.coinCostValue", { cost: reward.coinCost })}</span><span>{reward.status === "archived" ? t("reward.archived") : t("reward.active")}</span></div>{reward.status === "active" ? <div className="action-row"><button className="secondary-action" onClick={() => edit(reward)} type="button">{t("reward.edit")}</button><button className="danger-action" onClick={(event) => { archiveTriggerRef.current = event.currentTarget; setArchiveTarget(reward); }} type="button">{t("reward.archive")}</button></div> : null}{editingId === reward.customRewardId ? <form className="action-row" noValidate onSubmit={(event) => void update(event, reward)}><label>{t("reward.name")}<input aria-describedby={invalidFields.name ? "custom-reward-error" : undefined} aria-invalid={invalidFields.name} aria-label={t("reward.editNameAria")} onInput={(event) => { setEditName(event.currentTarget.value); if (invalidFields.name) setInvalidFields((current) => ({ ...current, name: false })); }} value={editName} /></label><label>{t("reward.coinCost")}<input aria-describedby={invalidFields.coinCost ? "custom-reward-error" : undefined} aria-invalid={invalidFields.coinCost} aria-label={t("reward.editCoinCostAria")} onInput={(event) => { setEditCoinCost(event.currentTarget.value); if (invalidFields.coinCost) setInvalidFields((current) => ({ ...current, coinCost: false })); }} value={editCoinCost} /></label><button className="primary-action" disabled={pending} type="submit">{t("reward.saveChanges")}</button><button className="secondary-action" disabled={pending} onClick={() => { setEditingId(null); setInvalidFields({ name: false, coinCost: false }); setMutationError(null); }} type="button">{t("common.cancel")}</button></form> : null}</li>)}</ul> : null}
+    </div>
     {archiveTarget ? <div className="modal-backdrop"><div aria-describedby="archive-reward-description" aria-labelledby="archive-reward-title" aria-modal="true" ref={archiveDialogRef} role="alertdialog"><h2 id="archive-reward-title">{t("reward.archiveQuestion", { name: archiveTarget.name })}</h2><p id="archive-reward-description">{t("reward.archiveWarning")}</p><div className="button-row"><button className="danger-action" disabled={pending} onClick={() => void archive()} ref={archiveConfirmRef} type="button">{pending ? t("reward.archiving") : t("reward.archiveReward")}</button><button className="secondary-action" disabled={pending} onClick={closeArchive} type="button">{t("common.cancel")}</button></div></div></div> : null}
-    <RewardTransactions account={account} onTransactionResolved={onTransactionResolved} />
-  </section>;
+  </details>;
 }
 function rewardErrorCode(error: unknown): string {
   if (typeof error === "string") return error;
@@ -1012,23 +1045,29 @@ function formatRewardDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 
-function RewardTransactions({ account, onTransactionResolved }: { account: RewardAccountSummaryDto | null; onTransactionResolved: () => void }) {
+function RewardTransactions({ account, customRewards, customRewardsLoading, customRewardsError, managementSlot, onCustomRewardsRefresh, onTransactionResolved }: {
+  account: RewardAccountSummaryDto | null;
+  customRewards: CustomRewardDto[];
+  customRewardsLoading: boolean;
+  customRewardsError: boolean;
+  managementSlot: ReactNode;
+  onCustomRewardsRefresh: () => Promise<void>;
+  onTransactionResolved: () => void;
+}) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const pendingRef = useRef(false);
   const redeemIntentRef = useRef<{ reward: CustomRewardDto; id: string } | null>(null);
   const refundIntentRef = useRef<{ item: RedemptionHistoryItemDto; id: string } | null>(null);
-  const [rewards, setRewards] = useState<CustomRewardDto[]>([]);
   const [history, setHistory] = useState<RedemptionHistoryItemDto[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState(false);
   const [transaction, setTransaction] = useState<"redeem" | "refund" | null>(null);
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const loadRewards = useCallback(async () => { try { setRewards(await listCustomRewards()); } catch { setRewards([]); } }, []);
   const loadHistory = useCallback(async () => { setHistoryLoading(true); setHistoryError(false); try { setHistory(await getRewardRedemptionHistory()); } catch { setHistoryError(true); } finally { setHistoryLoading(false); } }, []);
-  useEffect(() => { void loadRewards(); void loadHistory(); }, [loadRewards, loadHistory]);
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
   const close = useCallback(() => {
     if (pendingRef.current) return;
     setTransaction(null); setTransactionError(null); redeemIntentRef.current = null; refundIntentRef.current = null;
@@ -1052,7 +1091,7 @@ function RewardTransactions({ account, onTransactionResolved }: { account: Rewar
   }, [close, transaction]);
   const beginRedeem = (reward: CustomRewardDto, event: MouseEvent<HTMLButtonElement>) => { triggerRef.current = event.currentTarget; redeemIntentRef.current = { reward, id: createRewardIntentId() }; setTransactionError(null); setTransaction("redeem"); };
   const beginRefund = (item: RedemptionHistoryItemDto, event: MouseEvent<HTMLButtonElement>) => { triggerRef.current = event.currentTarget; refundIntentRef.current = { item, id: createRewardIntentId() }; setTransactionError(null); setTransaction("refund"); };
-  const refresh = async () => { await Promise.all([loadRewards(), loadHistory()]); onTransactionResolved(); };
+  const refresh = async () => { await Promise.all([onCustomRewardsRefresh(), loadHistory()]); await onTransactionResolved(); };
   const confirm = async () => {
     if (!transaction || pendingRef.current) return;
     pendingRef.current = true; setPending(true); setTransactionError(null);
@@ -1073,7 +1112,9 @@ function RewardTransactions({ account, onTransactionResolved }: { account: Rewar
     } catch (error) { setTransactionError(transactionMessage(error, transaction)); }
     finally { pendingRef.current = false; setPending(false); }
   };
-  const activeRewards = rewards.filter((reward) => reward.status === "active");
+  const activeRewards = customRewards.filter((reward) => reward.status === "active");
+  const [rewardsExpanded, setRewardsExpanded] = useState(false);
+  const visibleRewards = rewardsExpanded ? activeRewards : activeRewards.slice(0, 6);
   const activeTransaction = transaction === "redeem" ? redeemIntentRef.current : null;
   const refundTransaction = transaction === "refund" ? refundIntentRef.current : null;
   const transactionTitle = transaction === "redeem"
@@ -1083,8 +1124,9 @@ function RewardTransactions({ account, onTransactionResolved }: { account: Rewar
     ? t("reward.redeemDescription", { cost: activeTransaction?.reward.coinCost ?? 0 })
     : t("reward.refundDescription", { cost: refundTransaction?.item.coinCostPaid ?? 0, date: formatRewardDate(refundTransaction?.item.redeemedAtUtc ?? "") });
   return <>
-    {activeRewards.length > 0 ? <section aria-labelledby="reward-actions-heading" className="content-panel"><h2 id="reward-actions-heading">{t("reward.redeemRewards")}</h2><ul className="detail-list">{activeRewards.map((reward) => { const insufficient = account !== null && account.coin < reward.coinCost; const descriptionId = "reward-insufficient-" + reward.customRewardId; return <li key={reward.customRewardId}><div><strong>{reward.name}</strong><span>{t("reward.coinCostValue", { cost: reward.coinCost })}</span>{insufficient ? <small id={descriptionId}>{t("reward.notEnoughCoin")}</small> : null}</div><button aria-describedby={insufficient ? descriptionId : undefined} className="primary-action" disabled={insufficient || pending} onClick={(event) => beginRedeem(reward, event)} type="button">{t("reward.redeem")}</button></li>; })}</ul></section> : null}
-    <section aria-labelledby="redemption-history-heading" className="content-panel"><h2 id="redemption-history-heading">{t("reward.redemptionHistory")}</h2>{historyLoading ? <p aria-live="polite">{t("reward.historyLoading")}</p> : null}{historyError ? <div role="alert"><p>{t("reward.historyError")}</p><button className="secondary-action" onClick={() => void loadHistory()} type="button">{t("reward.retryHistory")}</button></div> : null}{!historyLoading && !historyError && history.length === 0 ? <p>{t("reward.noRedemptions")}</p> : null}{!historyLoading && !historyError && history.length > 0 ? <ul className="detail-list">{history.map((item) => <li key={item.redemptionId}><div><strong>{item.rewardName}</strong><span>{t("reward.coinPaidValue", { cost: item.coinCostPaid })}</span><span>{t("reward.redeemed", { date: formatRewardDate(item.redeemedAtUtc) })}</span><span>{item.refundedAtUtc ? t("reward.refunded", { date: formatRewardDate(item.refundedAtUtc) }) : t("reward.notRefunded")}</span></div>{item.refundId === null ? <button className="secondary-action" onClick={(event) => beginRefund(item, event)} type="button">{t("reward.refund")}</button> : <span aria-label={t("reward.refundedStatus")} className="safe-note">{t("reward.refundedStatus")}</span>}</li>)}</ul> : null}</section>
+    <section aria-labelledby="reward-actions-heading" className="content-panel reward-redemption"><div className="statement-heading-row"><h2 id="reward-actions-heading">{t("reward.redeemRewards")}</h2>{account ? <span className="reward-balance">{t("reward.coin")}: {account.coin}</span> : null}</div>{customRewardsLoading ? <p aria-live="polite">{t("reward.loadingCustom")}</p> : null}{customRewardsError ? <div role="alert"><p>{t("reward.customLoadError")}</p><button className="secondary-action" onClick={() => void onCustomRewardsRefresh()} type="button">{t("common.retry")}</button></div> : null}{!customRewardsLoading && !customRewardsError && activeRewards.length === 0 ? <p>{t("reward.noCustomActive")}</p> : null}{!customRewardsLoading && !customRewardsError && activeRewards.length > 0 ? <><ul className="reward-grid">{visibleRewards.map((reward) => { const insufficient = account !== null && account.coin < reward.coinCost; const descriptionId = "reward-insufficient-" + reward.customRewardId; return <li className="reward-card" key={reward.customRewardId}><strong>{reward.name}</strong><span>{t("reward.coinCostValue", { cost: reward.coinCost })}</span><button aria-describedby={insufficient ? descriptionId : undefined} aria-label={`${t("reward.redeem")} ${reward.name}`} className="primary-action" disabled={insufficient || pending} onClick={(event) => beginRedeem(reward, event)} type="button">{t("reward.redeem")}</button>{insufficient ? <span className="sr-only" id={descriptionId}>{t("reward.notEnoughCoin")}</span> : null}</li>; })}</ul>{activeRewards.length > 6 ? <button className="secondary-action reward-expand" onClick={() => setRewardsExpanded((expanded) => !expanded)} type="button">{rewardsExpanded ? t("reward.collapse") : t("reward.viewAll", { count: activeRewards.length })}</button> : null}</> : null}</section>
+    {managementSlot}
+    <details className="content-panel reward-history"><summary className="reward-section-summary"><h2 id="redemption-history-heading">{t("reward.redemptionHistory")}</h2><span>{history.length}</span></summary><div className="reward-history__body">{historyLoading ? <p aria-live="polite">{t("reward.historyLoading")}</p> : null}{historyError ? <div role="alert"><p>{t("reward.historyError")}</p><button className="secondary-action" onClick={() => void loadHistory()} type="button">{t("reward.retryHistory")}</button></div> : null}{!historyLoading && !historyError && history.length === 0 ? <p>{t("reward.noRedemptions")}</p> : null}{!historyLoading && !historyError && history.length > 0 ? <ul className="detail-list">{history.map((item) => <li key={item.redemptionId}><div><strong>{item.rewardName}</strong><span>{t("reward.coinPaidValue", { cost: item.coinCostPaid })}</span><span>{t("reward.redeemed", { date: formatRewardDate(item.redeemedAtUtc) })}</span><span>{item.refundedAtUtc ? t("reward.refunded", { date: formatRewardDate(item.refundedAtUtc) }) : t("reward.notRefunded")}</span></div>{item.refundId === null ? <button className="secondary-action" onClick={(event) => beginRefund(item, event)} type="button">{t("reward.refund")}</button> : <span aria-label={t("reward.refundedStatus")} className="safe-note">{t("reward.refundedStatus")}</span>}</li>)}</ul> : null}</div></details>
     {transaction ? <div className="modal-backdrop"><div aria-describedby="reward-transaction-description" aria-labelledby="reward-transaction-title" aria-modal="true" ref={dialogRef} role="alertdialog"><h2 id="reward-transaction-title">{transactionTitle}</h2><p id="reward-transaction-description">{transactionDescription}</p>{transactionError ? <p className="error-message" role="alert">{transactionError}</p> : null}<div className="button-row"><button className="primary-action" disabled={pending} onClick={() => void confirm()} ref={confirmRef} type="button">{pending ? (transaction === "redeem" ? t("reward.redeeming") : t("reward.refunding")) : (transaction === "redeem" ? t("reward.redeemReward") : t("reward.refundReward"))}</button><button className="secondary-action" disabled={pending} onClick={close} type="button">{t("common.cancel")}</button></div></div></div> : null}
   </>;
 }
