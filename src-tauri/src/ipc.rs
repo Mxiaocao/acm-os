@@ -1684,9 +1684,13 @@ pub async fn contest_library_delete_family(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ContestLibraryFamilyDeleteInput,
 ) -> Result<(), &'static str> {
-    acm_os_application::delete_family(database.inner(), input.family_id, input.replacement_family_id)
-        .await
-        .map_err(contest_library_error_code)
+    acm_os_application::delete_family(
+        database.inner(),
+        input.family_id,
+        input.replacement_family_id,
+    )
+    .await
+    .map_err(contest_library_error_code)
 }
 
 #[tauri::command]
@@ -1744,9 +1748,13 @@ pub async fn contest_library_delete_series(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ContestLibrarySeriesDeleteInput,
 ) -> Result<(), &'static str> {
-    acm_os_application::delete_series(database.inner(), input.series_id, input.replacement_series_id)
-        .await
-        .map_err(contest_library_error_code)
+    acm_os_application::delete_series(
+        database.inner(),
+        input.series_id,
+        input.replacement_series_id,
+    )
+    .await
+    .map_err(contest_library_error_code)
 }
 
 #[tauri::command]
@@ -5291,8 +5299,8 @@ mod tests {
 
     use super::{
         app_shell_status_dto, contest_library_error_code, contest_library_placement_dto,
-        contest_library_scope, contest_library_series_filter, knowledge_index_error_code,
-        knowledge_understanding_dto, knowledge_understanding_level,
+        contest_library_scope, contest_library_series_filter, contest_shelf_item_dto,
+        knowledge_index_error_code, knowledge_understanding_dto, knowledge_understanding_level,
         normalize_windows_verbatim_path, obsidian_open_uri, parse_review_completion_input,
         personal_note_read_state_dto, problem_lifecycle_state_dto, redemption_disposition,
         redemption_history_item_dto, redemption_result_dto, refund_disposition, refund_result_dto,
@@ -5495,6 +5503,66 @@ mod tests {
                 "seriesName": null,
                 "year": 2026,
                 "ordinal": null
+            })
+        );
+
+        let shelf = contest_shelf_item_dto(acm_os_application::ContestShelfItem {
+            contest: acm_os_domain::CodeforcesContestIdentity::new(1979).expect("contest identity"),
+            title: "Round".to_owned(),
+            placements: vec![
+                acm_os_application::ContestPlacement {
+                    placement_id: 10,
+                    family_id: 3,
+                    family_name: "Codeforces".to_owned(),
+                    series_id: Some(7),
+                    series_name: Some("Summer".to_owned()),
+                    year: None,
+                    ordinal: Some(1),
+                },
+                acm_os_application::ContestPlacement {
+                    placement_id: 11,
+                    family_id: 4,
+                    family_name: "XCPC".to_owned(),
+                    series_id: None,
+                    series_name: None,
+                    year: Some(2026),
+                    ordinal: None,
+                },
+            ],
+            import_status: acm_os_application::ContestImportStatus::Complete,
+            problem_count: 2,
+            missing_snapshot_count: 0,
+            archived: true,
+        });
+        assert_eq!(
+            serde_json::to_value(shelf).expect("serialize shelf DTO"),
+            json!({
+                "contestId": 1979,
+                "title": "Round",
+                "placements": [
+                    {
+                        "placementId": 10,
+                        "familyId": 3,
+                        "familyName": "Codeforces",
+                        "seriesId": 7,
+                        "seriesName": "Summer",
+                        "year": null,
+                        "ordinal": 1
+                    },
+                    {
+                        "placementId": 11,
+                        "familyId": 4,
+                        "familyName": "XCPC",
+                        "seriesId": null,
+                        "seriesName": null,
+                        "year": 2026,
+                        "ordinal": null
+                    }
+                ],
+                "importStatus": "complete",
+                "problemCount": 2,
+                "missingSnapshotCount": 0,
+                "archived": true
             })
         );
 

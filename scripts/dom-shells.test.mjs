@@ -637,6 +637,35 @@ test("Contest Library creates and renames persisted Family and Series without ch
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library creation panel switches and closes with at most one form", { concurrency: false }, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Codeforces" }];
+    if (command === "contest_library_list_series") return [];
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const managementActions = view.document.querySelector(".contest-library-navigation > .action-row");
+    const [createFamilyButton, createSeriesButton] = [...managementActions.querySelectorAll("button")];
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
+    await act(async () => createFamilyButton.click()); await settle();
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
+    assert.equal(view.document.querySelector(".contest-library-create-panel input")?.getAttribute("type"), null);
+    await act(async () => createSeriesButton.click()); await settle();
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel input").length, 1);
+    await act(async () => createSeriesButton.click()); await settle();
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
+    await act(async () => createFamilyButton.click()); await settle();
+    await act(async () => createFamilyButton.click()); await settle();
+    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Library category deletion discloses series side effects before confirmation", { concurrency: false }, async () => {
   const calls = [];
   let families = [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }];
