@@ -2721,6 +2721,40 @@ pub async fn open_knowledge_in_obsidian(
 }
 
 #[tauri::command]
+pub async fn open_obsidian_graph(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    app: tauri::AppHandle,
+) -> Result<(), &'static str> {
+    use acm_os_application::WorkspaceConfigurationPort;
+    use tauri_plugin_opener::OpenerExt;
+
+    let workspace = database
+        .load_workspace_configuration()
+        .await
+        .map_err(|_| "workspace_unavailable")?
+        .ok_or("workspace_unavailable")?;
+    let vault_name = obsidian_vault_name(workspace.active_vault_path())?;
+
+    if run_obsidian_graph_command(&vault_name).is_ok() {
+        return Ok(());
+    }
+
+    // The CLI talks to an already-running Obsidian instance. Open the configured
+    // vault through the registered protocol, then give the CLI a short window to connect.
+    let uri = obsidian_vault_uri(&vault_name)?;
+    app.opener()
+        .open_url(uri, None::<&str>)
+        .map_err(|_| "obsidian_graph_open_failed")?;
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if run_obsidian_graph_command(&vault_name).is_ok() {
+            return Ok(());
+        }
+    }
+    Err("obsidian_graph_open_failed")
+}
+
+#[tauri::command]
 pub async fn knowledge_index(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: KnowledgeSearchInput,
@@ -3259,6 +3293,80 @@ fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, 
     // Obsidian treats `+` as a literal filename character in `path`; use URI
     // percent encoding for spaces instead of form-url-encoded spaces.
     Ok(String::from(uri).replace('+', "%20"))
+}
+
+fn obsidian_vault_name(active_vault: &str) -> Result<String, &'static str> {
+    let vault = std::fs::canonicalize(active_vault).map_err(|_| "vault_unavailable")?;
+    let name = vault
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or("vault_unavailable")?;
+    Ok(name.to_owned())
+}
+
+fn run_obsidian_graph_command(vault_name: &str) -> Result<(), &'static str> {
+    let args = obsidian_graph_args(vault_name);
+    for candidate in obsidian_cli_candidates() {
+        match std::process::Command::new(&candidate).args(&args).output() {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("obsidian_graph_open_failed"),
+        }
+    }
+    Err("obsidian_graph_unavailable")
+}
+
+fn obsidian_graph_args(vault_name: &str) -> [String; 3] {
+    [
+        format!("vault={vault_name}"),
+        "command".to_owned(),
+        "id=graph:open".to_owned(),
+    ]
+}
+
+fn obsidian_vault_uri(vault_name: &str) -> Result<String, &'static str> {
+    let mut uri = url::Url::parse("obsidian://open").map_err(|_| "obsidian_graph_open_failed")?;
+    uri.query_pairs_mut().append_pair("vault", vault_name);
+    Ok(String::from(uri).replace('+', "%20"))
+}
+
+fn obsidian_cli_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![std::path::PathBuf::from("obsidian.com")];
+    #[cfg(windows)]
+    {
+        for variable in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
+            if let Some(root) = std::env::var_os(variable) {
+                candidates.push(std::path::PathBuf::from(root).join("Obsidian/Obsidian.com"));
+            }
+        }
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Classes\obsidian\shell\open\command",
+                "/ve",
+            ])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let value = line
+                    .split_once("REG_SZ")
+                    .map(|(_, value)| value)
+                    .unwrap_or(line);
+                if let Some(index) = value.to_ascii_lowercase().find("obsidian.exe") {
+                    let executable = value[..index + "obsidian.exe".len()]
+                        .trim_matches(['"', ' ', '\t'])
+                        .to_owned();
+                    if let Some(parent) = std::path::Path::new(&executable).parent() {
+                        candidates.push(parent.join("Obsidian.com"));
+                    }
+                }
+            }
+        }
+    }
+    candidates
 }
 
 fn obsidian_external_path(path: &std::path::Path) -> Result<String, &'static str> {
@@ -5251,7 +5359,8 @@ mod tests {
         app_shell_status_dto, contest_library_error_code, contest_library_placement_dto,
         contest_library_scope, contest_library_series_filter, knowledge_index_error_code,
         knowledge_understanding_dto, knowledge_understanding_level,
-        normalize_windows_verbatim_path, obsidian_open_uri, parse_review_completion_input,
+        normalize_windows_verbatim_path, obsidian_graph_args, obsidian_open_uri,
+        obsidian_vault_name, obsidian_vault_uri, parse_review_completion_input,
         personal_note_read_state_dto, problem_lifecycle_state_dto, redemption_disposition,
         redemption_history_item_dto, redemption_result_dto, refund_disposition, refund_result_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
@@ -6036,6 +6145,24 @@ mod tests {
             obsidian_open_uri(vault.to_str().expect("utf-8 vault"), "../outside.md"),
             Err("note_open_failed")
         );
+    }
+
+    #[test]
+    fn graph_command_targets_the_native_global_graph_command() {
+        let vault = tempfile::tempdir().expect("temporary vault");
+        let name =
+            obsidian_vault_name(vault.path().to_str().expect("utf-8 vault")).expect("vault name");
+        assert!(!name.is_empty());
+        let args = obsidian_graph_args(&name);
+        assert_eq!(args[0], format!("vault={name}"));
+        assert_eq!(args[1], "command");
+        assert_eq!(args[2], "id=graph:open");
+    }
+
+    #[test]
+    fn graph_vault_uri_encodes_special_vault_names() {
+        let uri = obsidian_vault_uri("算法 Vault + 图谱").expect("valid URI");
+        assert!(uri.contains("%E7%AE%97%E6%B3%95%20Vault%20%2B%20%E5%9B%BE%E8%B0%B1"));
     }
 
     #[test]

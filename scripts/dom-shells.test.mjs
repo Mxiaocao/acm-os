@@ -2610,6 +2610,43 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
   } finally { await view.cleanup(); }
 });
 
+test("Knowledge opens the configured Vault's native Obsidian Graph command", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") { calls.push([command, args]); return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
+    assert.ok(openGraph);
+    await act(async () => openGraph.click()); await settle();
+    assert.deepEqual(calls, [["open_obsidian_graph", {}]]);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge reports an Obsidian Graph open failure without hiding the page", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") throw "obsidian_graph_open_failed";
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
+    await act(async () => openGraph.click()); await settle();
+    assert.match(view.document.body.textContent, /Obsidian 图谱无法打开/);
+    assert.match(view.document.body.textContent, /知识库索引/);
+  } finally { await view.cleanup(); }
+});
+
 test("Knowledge location anomaly requires explicit candidate selection before rebind", {
   concurrency: false,
 }, async () => {

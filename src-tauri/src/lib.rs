@@ -151,6 +151,7 @@ pub fn run() {
             ipc::accept_existing_knowledge_candidate,
             ipc::accept_existing_knowledge_candidate_by_id,
             ipc::open_knowledge_in_obsidian,
+            ipc::open_obsidian_graph,
             ipc::statement_assets,
             ipc::workspace_status,
             ipc::preview_manual_backup,

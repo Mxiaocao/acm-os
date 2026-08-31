@@ -99,6 +99,8 @@ export const confirmKnowledgeUnderstanding = (
 export const openKnowledgeInObsidian = (knowledgeNodeId: string) =>
   invoke<void>("open_knowledge_in_obsidian", { input: { knowledgeNodeId } });
 
+export const openObsidianGraph = () => invoke<void>("open_obsidian_graph");
+
 export const loadKnowledgeCandidates = (contestId: number, index: string) =>
   invoke<KnowledgeCandidateDto[]>("knowledge_candidates", { input: { contestId, index } });
 

@@ -31,6 +31,7 @@ import {
   loadKnowledgeCandidates,
   loadKnowledgeCandidatesById,
   loadKnowledgeReevaluationSuggestion,
+  openObsidianGraph,
   openKnowledgeInObsidian,
   rebindKnowledgeNode,
   resolveKnowledgeIdentityConflict,
@@ -1227,6 +1228,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const [confirmingDeletedNodeId, setConfirmingDeletedNodeId] = useState<string | null>(null);
   const [deletePreviewNodeId, setDeletePreviewNodeId] = useState<string | null>(null);
   const [resolvingConflict, setResolvingConflict] = useState(false);
+  const [openingGraph, setOpeningGraph] = useState(false);
 
   const refresh = useCallback(async (nextQuery = query) => {
     setLoading(true);
@@ -1338,11 +1340,24 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
     }
   };
 
+  const openGraph = async () => {
+    setOpeningGraph(true);
+    setError(null);
+    try {
+      await openObsidianGraph();
+    } catch {
+      setError(t("knowledge.graphOpenError"));
+    } finally {
+      setOpeningGraph(false);
+    }
+  };
+
   return (
     <>
       <PageHeader eyebrow="Markdown 权威来源" headingRef={headingRef} title="知识库" />
       <section aria-labelledby="knowledge-index-title" className="content-panel knowledge-index">
         <div className="knowledge-toolbar">
+          <button className="secondary-action" disabled={openingGraph} onClick={() => void openGraph()} type="button">{openingGraph ? t("knowledge.openingGraph") : t("knowledge.openGraph")}</button>
           <div><h2 id="knowledge-index-title">知识库索引</h2><p>这里只显示知识库目录中当前找到的 Markdown 文件。</p></div>
           <button className="secondary-action" disabled={loading} onClick={() => void refresh(query)} type="button">{loading ? "正在重新索引…" : "重新索引"}</button>
         </div>
