@@ -2711,6 +2711,73 @@ test("Knowledge discovers Markdown, loads Fresh detail, and changes understandin
   } finally { await view.cleanup(); }
 });
 
+test("Knowledge opens the configured Vault's native Obsidian Graph command", {
+  concurrency: false,
+}, async () => {
+  const calls = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") { calls.push([command, args]); return "confirmedSuccess"; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
+    assert.ok(openGraph);
+    await act(async () => openGraph.click()); await settle();
+    assert.deepEqual(calls, [["open_obsidian_graph", {}]]);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge reports an Obsidian Graph open failure without hiding the page", {
+  concurrency: false,
+}, async () => {
+  let attempts = 0;
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") {
+      attempts += 1;
+      if (attempts === 1) throw "obsidian_graph_open_failed";
+      return "submittedUnconfirmed";
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
+    await act(async () => openGraph.click()); await settle();
+    assert.match(view.document.body.textContent, /Obsidian 图谱无法打开/);
+    assert.match(view.document.body.textContent, /知识库索引/);
+    await act(async () => openGraph.click()); await settle();
+    const notice = view.document.querySelector(".safe-note");
+    assert.ok(notice);
+    assert.match(notice.textContent, /尚未收到完成确认/);
+    assert.equal(view.document.querySelector(".error-copy"), null);
+  } finally { await view.cleanup(); }
+});
+
+test("Knowledge reports disabled Obsidian CLI with actionable guidance", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") throw "obsidian_cli_disabled";
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
+    await act(async () => openGraph.click()); await settle();
+    assert.match(view.document.body.textContent, /Obsidian/);
+    assert.match(view.document.body.textContent, /命令行界面/);
+    assert.match(view.document.body.textContent, /设置/);
+    assert.match(view.document.body.textContent, /重试/);
+  } finally { await view.cleanup(); }
+});
+
 test("Knowledge location anomaly requires explicit candidate selection before rebind", {
   concurrency: false,
 }, async () => {

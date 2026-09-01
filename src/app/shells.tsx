@@ -31,6 +31,8 @@ import {
   loadKnowledgeCandidates,
   loadKnowledgeCandidatesById,
   loadKnowledgeReevaluationSuggestion,
+  openObsidianGraph,
+  type ObsidianGraphOpenResult,
   openKnowledgeInObsidian,
   rebindKnowledgeNode,
   resolveKnowledgeIdentityConflict,
@@ -1234,6 +1236,8 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const [confirmingDeletedNodeId, setConfirmingDeletedNodeId] = useState<string | null>(null);
   const [deletePreviewNodeId, setDeletePreviewNodeId] = useState<string | null>(null);
   const [resolvingConflict, setResolvingConflict] = useState(false);
+  const [openingGraph, setOpeningGraph] = useState(false);
+  const [graphNotice, setGraphNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async (nextQuery = query) => {
     setLoading(true);
@@ -1345,11 +1349,26 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
     }
   };
 
+  const openGraph = async () => {
+    setOpeningGraph(true);
+    setError(null);
+    setGraphNotice(null);
+    try {
+      const result: ObsidianGraphOpenResult = await openObsidianGraph();
+      if (result === "submittedUnconfirmed") setGraphNotice(t("knowledge.graphSubmittedUnconfirmed"));
+    } catch (error) {
+      setError(error === "obsidian_cli_disabled" ? t("knowledge.graphCliDisabled") : t("knowledge.graphOpenError"));
+    } finally {
+      setOpeningGraph(false);
+    }
+  };
+
   return (
     <>
       <PageHeader eyebrow="Markdown 权威来源" headingRef={headingRef} title="知识库" />
       <section aria-labelledby="knowledge-index-title" className="content-panel knowledge-index">
         <div className="knowledge-toolbar">
+          <button className="secondary-action" disabled={openingGraph} onClick={() => void openGraph()} type="button">{openingGraph ? t("knowledge.openingGraph") : t("knowledge.openGraph")}</button>
           <div><h2 id="knowledge-index-title">知识库索引</h2><p>这里只显示知识库目录中当前找到的 Markdown 文件。</p></div>
           <button className="secondary-action" disabled={loading} onClick={() => void refresh(query)} type="button">{loading ? "正在重新索引…" : "重新索引"}</button>
         </div>
@@ -1358,6 +1377,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
           <div><input id="knowledge-search" onChange={(event) => setQuery(event.currentTarget.value)} value={query} /><button type="submit">搜索</button></div>
         </form>
         {error ? <p aria-live="polite" className="error-copy">{error}</p> : null}
+        {graphNotice ? <p aria-live="polite" className="safe-note">{graphNotice}</p> : null}
         {!loading && !error && nodes.length === 0 ? <p className="safe-note">没有找到匹配的 Markdown 文件。</p> : null}
         <ul className="knowledge-node-list">
           {nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void openDetail(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}

@@ -2861,6 +2861,52 @@ pub async fn open_knowledge_in_obsidian(
 }
 
 #[tauri::command]
+pub async fn open_obsidian_graph(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    app: tauri::AppHandle,
+) -> Result<ObsidianGraphOpenResult, &'static str> {
+    use acm_os_application::WorkspaceConfigurationPort;
+    use tauri_plugin_opener::OpenerExt;
+
+    let workspace = database
+        .load_workspace_configuration()
+        .await
+        .map_err(|_| "workspace_unavailable")?
+        .ok_or("workspace_unavailable")?;
+    let vault_name = obsidian_vault_name(workspace.active_vault_path())?;
+    let first_attempt = run_obsidian_graph_command(&vault_name);
+    match first_attempt {
+        Ok(()) => return Ok(ObsidianGraphOpenResult::ConfirmedSuccess),
+        Err(ObsidianGraphCommandError::SubmittedUnconfirmed) => {
+            return Ok(ObsidianGraphOpenResult::SubmittedUnconfirmed)
+        }
+        Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
+        Err(_) => {}
+    }
+
+    // The CLI talks to an already-running Obsidian instance. Open the configured
+    // vault through the registered protocol, then make a bounded number of attempts
+    // while its command bridge becomes ready.
+    let uri = obsidian_vault_uri(&vault_name)?;
+    app.opener()
+        .open_url(uri, None::<&str>)
+        .map_err(|_| "obsidian_graph_open_failed")?;
+    for _ in 0..OBSIDIAN_STARTUP_RETRY_COUNT {
+        std::thread::sleep(OBSIDIAN_STARTUP_RETRY_INTERVAL);
+        let result = run_obsidian_graph_command(&vault_name);
+        match result {
+            Ok(()) => return Ok(ObsidianGraphOpenResult::ConfirmedSuccess),
+            Err(ObsidianGraphCommandError::SubmittedUnconfirmed) => {
+                return Ok(ObsidianGraphOpenResult::SubmittedUnconfirmed)
+            }
+            Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
+            Err(_) => {}
+        }
+    }
+    Err("obsidian_graph_open_failed")
+}
+
+#[tauri::command]
 pub async fn knowledge_index(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: KnowledgeSearchInput,
@@ -3399,6 +3445,295 @@ fn obsidian_open_uri(active_vault: &str, relative_path: &str) -> Result<String, 
     // Obsidian treats `+` as a literal filename character in `path`; use URI
     // percent encoding for spaces instead of form-url-encoded spaces.
     Ok(String::from(uri).replace('+', "%20"))
+}
+
+fn obsidian_vault_name(active_vault: &str) -> Result<String, &'static str> {
+    let vault = std::fs::canonicalize(active_vault).map_err(|_| "vault_unavailable")?;
+    let name = vault
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or("vault_unavailable")?;
+    Ok(name.to_owned())
+}
+
+const OBSIDIAN_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const OBSIDIAN_STARTUP_RETRY_COUNT: usize = 8;
+const OBSIDIAN_STARTUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObsidianGraphCommandError {
+    Unavailable,
+    SubmittedUnconfirmed,
+    CliDisabled,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ObsidianGraphOpenResult {
+    ConfirmedSuccess,
+    SubmittedUnconfirmed,
+}
+
+fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphCommandError> {
+    let args = obsidian_graph_args(vault_name);
+    for candidate in obsidian_cli_candidates() {
+        match command_output_with_timeout(&candidate, &args, OBSIDIAN_CLI_TIMEOUT) {
+            Ok(output)
+                if classify_obsidian_cli_failure(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &String::from_utf8_lossy(&output.stderr),
+                ) == Some(ObsidianGraphCommandError::CliDisabled) =>
+            {
+                return Err(ObsidianGraphCommandError::CliDisabled);
+            }
+            Ok(output)
+                if obsidian_cli_response_is_success(
+                    output.status.success(),
+                    &String::from_utf8_lossy(&output.stdout),
+                    &String::from_utf8_lossy(&output.stderr),
+                ) =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {
+                continue;
+            }
+            Err(CommandOutputError::NotFound) => continue,
+            Err(error) => {
+                return Err(map_obsidian_command_error(error));
+            }
+        }
+    }
+    Err(ObsidianGraphCommandError::Unavailable)
+}
+
+fn map_obsidian_command_error(error: CommandOutputError) -> ObsidianGraphCommandError {
+    match error {
+        CommandOutputError::NotFound => ObsidianGraphCommandError::Unavailable,
+        CommandOutputError::TimedOut => ObsidianGraphCommandError::SubmittedUnconfirmed,
+        CommandOutputError::Failed => ObsidianGraphCommandError::Failed,
+    }
+}
+
+fn obsidian_graph_args(vault_name: &str) -> [String; 3] {
+    [
+        format!("vault={vault_name}"),
+        "command".to_owned(),
+        "id=graph:open".to_owned(),
+    ]
+}
+
+fn obsidian_vault_uri(vault_name: &str) -> Result<String, &'static str> {
+    let mut uri = url::Url::parse("obsidian://open").map_err(|_| "obsidian_graph_open_failed")?;
+    uri.query_pairs_mut().append_pair("vault", vault_name);
+    Ok(String::from(uri).replace('+', "%20"))
+}
+
+fn obsidian_cli_candidates() -> Vec<std::path::PathBuf> {
+    let path_directories = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    #[cfg(windows)]
+    {
+        return obsidian_cli_candidates_from_sources(
+            path_directories,
+            running_obsidian_executable_paths(),
+            obsidian_standard_installation_roots(),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        obsidian_cli_candidates_from_sources(path_directories, Vec::new(), Vec::new())
+    }
+}
+
+fn obsidian_cli_candidates_from_sources(
+    path_directories: Vec<std::path::PathBuf>,
+    running_executables: Vec<std::path::PathBuf>,
+    installation_roots: Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    for directory in path_directories {
+        push_obsidian_com_candidate(&mut candidates, directory.join("Obsidian.com"));
+    }
+    for executable in running_executables {
+        if executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.exe"))
+        {
+            if let Some(parent) = executable.parent() {
+                push_obsidian_com_candidate(&mut candidates, parent.join("Obsidian.com"));
+            }
+        }
+    }
+    for root in installation_roots {
+        push_obsidian_com_candidate(&mut candidates, root.join("Obsidian/Obsidian.com"));
+    }
+    candidates
+}
+
+fn push_obsidian_com_candidate(
+    candidates: &mut Vec<std::path::PathBuf>,
+    candidate: std::path::PathBuf,
+) {
+    if !candidate.is_absolute()
+        || !candidate.is_file()
+        || !candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.com"))
+        || candidates.iter().any(|existing| existing == &candidate)
+    {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+#[cfg(windows)]
+fn obsidian_standard_installation_roots() -> Vec<std::path::PathBuf> {
+    ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+#[cfg(windows)]
+fn running_obsidian_executable_paths() -> Vec<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_ID_CAPACITY: usize = 4096;
+
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn EnumProcesses(process_ids: *mut u32, bytes: u32, bytes_returned: *mut u32) -> i32;
+        fn GetModuleFileNameExW(
+            process: *mut std::ffi::c_void,
+            module: *mut std::ffi::c_void,
+            filename: *mut u16,
+            size: u32,
+        ) -> u32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    let mut process_ids = vec![0_u32; PROCESS_ID_CAPACITY];
+    let mut bytes_returned = 0_u32;
+    let enumerated = unsafe {
+        EnumProcesses(
+            process_ids.as_mut_ptr(),
+            (process_ids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut bytes_returned,
+        )
+    };
+    if enumerated == 0 {
+        return Vec::new();
+    }
+
+    let count = (bytes_returned as usize / std::mem::size_of::<u32>()).min(process_ids.len());
+    let mut paths = Vec::new();
+    for process_id in process_ids.into_iter().take(count).filter(|id| *id != 0) {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                0,
+                process_id,
+            )
+        };
+        if process.is_null() {
+            continue;
+        }
+        let mut buffer = [0_u16; 1024];
+        let length = unsafe {
+            GetModuleFileNameExW(
+                process,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+        unsafe { CloseHandle(process) };
+        if length == 0 {
+            continue;
+        }
+        let path = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+        let path = std::path::PathBuf::from(path);
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.exe"))
+        {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandOutputError {
+    NotFound,
+    TimedOut,
+    Failed,
+}
+
+fn command_output_with_timeout(
+    program: &std::path::Path,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, CommandOutputError> {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => CommandOutputError::NotFound,
+            _ => CommandOutputError::Failed,
+        })?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| CommandOutputError::Failed)?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map_err(|_| CommandOutputError::Failed);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CommandOutputError::TimedOut);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn obsidian_cli_response_is_success(exit_success: bool, stdout: &str, stderr: &str) -> bool {
+    exit_success && classify_obsidian_cli_failure(stdout, stderr).is_none()
+}
+
+fn classify_obsidian_cli_failure(stdout: &str, stderr: &str) -> Option<ObsidianGraphCommandError> {
+    let output = format!("{stdout}\n{stderr}").trim().to_ascii_lowercase();
+    if (output.contains("command line interface")
+        && ["not enabled", "disabled", "enable"]
+            .iter()
+            .any(|marker| output.contains(marker)))
+        || (output.contains("cli") && output.contains("not enabled"))
+    {
+        Some(ObsidianGraphCommandError::CliDisabled)
+    } else {
+        None
+    }
 }
 
 fn obsidian_external_path(path: &std::path::Path) -> Result<String, &'static str> {
@@ -5393,18 +5728,25 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        app_shell_status_dto, contest_library_error_code, contest_library_placement_dto,
+        app_shell_status_dto, classify_obsidian_cli_failure, command_output_with_timeout,
+        contest_library_error_code, contest_library_placement_dto,
         contest_library_scope, contest_library_series_filter, contest_shelf_item_dto,
         knowledge_index_error_code, knowledge_understanding_dto, knowledge_understanding_level,
-        normalize_windows_verbatim_path, obsidian_open_uri, parse_review_completion_input,
+        map_obsidian_command_error, normalize_windows_verbatim_path,
+        obsidian_cli_candidates_from_sources, obsidian_cli_response_is_success,
+        obsidian_graph_args, obsidian_open_uri, obsidian_vault_name, obsidian_vault_uri,
+        parse_review_completion_input,
         personal_note_read_state_dto, problem_lifecycle_state_dto, redemption_disposition,
         redemption_history_item_dto, redemption_result_dto, refund_disposition, refund_result_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
         reward_account_summary_dto, startup_status_dto, validate_reward_intent_id,
-        workspace_error_dto, workspace_status_dto, CanonicalProblemDetailDto, CompleteReviewInput,
+        workspace_error_dto, workspace_status_dto, CanonicalProblemDetailDto, CommandOutputError,
+        CompleteReviewInput,
         ContestLibraryScopeDto, ContestLibrarySeriesFilterDto, LightweightProblemDetailDto,
-        PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
+        ObsidianGraphCommandError, ObsidianGraphOpenResult, PersonalNoteRelocationCandidateDto,
+        ProblemLifecycleStateDto, ReviewFailureReasonInput,
         StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
+        TodayReplanPreviewDto,
     };
 
     #[test]
@@ -6247,6 +6589,138 @@ mod tests {
             obsidian_open_uri(vault.to_str().expect("utf-8 vault"), "../outside.md"),
             Err("note_open_failed")
         );
+    }
+
+    #[test]
+    fn graph_command_targets_the_native_global_graph_command() {
+        let vault = tempfile::tempdir().expect("temporary vault");
+        let name =
+            obsidian_vault_name(vault.path().to_str().expect("utf-8 vault")).expect("vault name");
+        assert!(!name.is_empty());
+        let args = obsidian_graph_args(&name);
+        assert_eq!(args[0], format!("vault={name}"));
+        assert_eq!(args[1], "command");
+        assert_eq!(args[2], "id=graph:open");
+    }
+
+    #[test]
+    fn graph_vault_uri_encodes_special_vault_names() {
+        let uri = obsidian_vault_uri("算法 Vault + 图谱").expect("valid URI");
+        assert!(uri.contains("%E7%AE%97%E6%B3%95%20Vault%20%2B%20%E5%9B%BE%E8%B0%B1"));
+    }
+
+    #[test]
+    fn graph_cli_rejects_disabled_cli_output_even_with_a_zero_exit_code() {
+        assert!(obsidian_cli_response_is_success(true, "graph opened", ""));
+        assert!(!obsidian_cli_response_is_success(
+            true,
+            "Command line interface is not enabled. Please turn it on in Settings.",
+            ""
+        ));
+        assert!(!obsidian_cli_response_is_success(false, "", "graph failed"));
+    }
+
+    #[test]
+    fn graph_cli_candidates_are_absolute_com_and_preserve_source_precedence() {
+        let sandbox = tempfile::tempdir().expect("temporary executable directory");
+        let path_directory = sandbox.path().join("path");
+        let running_directory = sandbox.path().join("running");
+        let install_root = sandbox.path().join("localappdata");
+        std::fs::create_dir_all(&path_directory).expect("path directory");
+        std::fs::create_dir_all(&running_directory).expect("running directory");
+        std::fs::create_dir_all(install_root.join("Obsidian")).expect("install directory");
+        let path_cli = path_directory.join("Obsidian.com");
+        let running_cli = running_directory.join("Obsidian.com");
+        let installed_cli = install_root.join("Obsidian/Obsidian.com");
+        std::fs::write(&path_cli, []).expect("path cli");
+        std::fs::write(&running_cli, []).expect("running cli");
+        std::fs::write(&installed_cli, []).expect("installed cli");
+
+        let candidates = obsidian_cli_candidates_from_sources(
+            vec![path_directory],
+            vec![running_directory.join("Obsidian.exe")],
+            vec![install_root],
+        );
+
+        assert_eq!(candidates, vec![path_cli, running_cli, installed_cli]);
+        assert!(candidates.iter().all(|candidate| candidate.is_absolute()));
+        assert!(candidates.iter().all(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.com"))
+        }));
+    }
+
+    #[test]
+    fn graph_cli_command_timeout_terminates_stalled_process() {
+        let (program, args) = stalled_process_command();
+        let started = std::time::Instant::now();
+        let result = command_output_with_timeout(
+            std::path::Path::new(&program),
+            &args,
+            std::time::Duration::from_millis(100),
+        );
+
+        assert_eq!(result, Err(CommandOutputError::TimedOut));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn graph_cli_timeout_is_an_unconfirmed_submission_for_runtime_flow() {
+        assert_eq!(
+            map_obsidian_command_error(CommandOutputError::TimedOut),
+            ObsidianGraphCommandError::SubmittedUnconfirmed
+        );
+        assert_eq!(
+            map_obsidian_command_error(CommandOutputError::Failed),
+            ObsidianGraphCommandError::Failed
+        );
+    }
+
+    #[test]
+    fn graph_open_results_keep_confirmed_and_unconfirmed_states_distinct() {
+        assert_eq!(
+            serde_json::to_value(ObsidianGraphOpenResult::ConfirmedSuccess).unwrap(),
+            serde_json::json!("confirmedSuccess")
+        );
+        assert_eq!(
+            serde_json::to_value(ObsidianGraphOpenResult::SubmittedUnconfirmed).unwrap(),
+            serde_json::json!("submittedUnconfirmed")
+        );
+    }
+
+    #[test]
+    fn graph_cli_disabled_classifier_accepts_stdout_stderr_case_and_semantic_variants() {
+        assert_eq!(
+            classify_obsidian_cli_failure("Command line interface is not enabled", ""),
+            Some(ObsidianGraphCommandError::CliDisabled)
+        );
+        assert_eq!(
+            classify_obsidian_cli_failure("", "COMMAND LINE INTERFACE disabled in settings"),
+            Some(ObsidianGraphCommandError::CliDisabled)
+        );
+        assert_eq!(
+            classify_obsidian_cli_failure("CLI is not enabled", ""),
+            Some(ObsidianGraphCommandError::CliDisabled)
+        );
+        assert_eq!(
+            classify_obsidian_cli_failure("graph command failed", ""),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    fn stalled_process_command() -> (String, Vec<String>) {
+        (
+            "ping.exe".to_owned(),
+            vec!["127.0.0.1".to_owned(), "-n".to_owned(), "6".to_owned()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn stalled_process_command() -> (String, Vec<String>) {
+        ("sh".to_owned(), vec!["-c".to_owned(), "sleep 5".to_owned()])
     }
 
     #[test]

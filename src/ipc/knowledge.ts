@@ -47,6 +47,7 @@ export interface KnowledgeDetailDto {
   outgoing: KnowledgeNodeDto[];
   relatedProblems: RelatedKnowledgeProblemDto[];
 }
+export type ObsidianGraphOpenResult = "confirmedSuccess" | "submittedUnconfirmed";
 export interface KnowledgeReevaluationSuggestionDto { knowledgeNodeId: string; shouldSuggest: boolean; qualifyingProblemCount: number; }
 export const loadKnowledgeReevaluationSuggestion = (knowledgeNodeId: string) => invoke<KnowledgeReevaluationSuggestionDto>("knowledge_reevaluation_suggestion", { input: { knowledgeNodeId } });
 
@@ -98,6 +99,8 @@ export const confirmKnowledgeUnderstanding = (
 
 export const openKnowledgeInObsidian = (knowledgeNodeId: string) =>
   invoke<void>("open_knowledge_in_obsidian", { input: { knowledgeNodeId } });
+
+export const openObsidianGraph = () => invoke<ObsidianGraphOpenResult>("open_obsidian_graph");
 
 export const loadKnowledgeCandidates = (contestId: number, index: string) =>
   invoke<KnowledgeCandidateDto[]>("knowledge_candidates", { input: { contestId, index } });
