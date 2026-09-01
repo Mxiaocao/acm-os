@@ -19,7 +19,7 @@ use acm_os_application::{
     ContestLibrarySeriesFilter, ContestLibraryYearFilter, ContestManagementError,
     ContestManagementPort, ContestPlacement, ContestProblemCorrectionInput,
     ContestProblemDetailItem, ContestProblemFactInput, ContestReadError, ContestReadPort,
-    ContestSeries, ContestShelfItem, CreateContestPlacement, CreatedPersonalNoteFile,
+    ContestSeries, ContestShelfItem, ContestYear, CreateContestPlacement, CreatedPersonalNoteFile,
     ExtraProblemLinkTarget, KnowledgeBindingRepairError, KnowledgeBindingRepairPort,
     KnowledgeCandidateDisposition, KnowledgeCandidateError, KnowledgeCandidatePort,
     KnowledgeDetailPort, KnowledgeDetailProjection, KnowledgeIndexError, KnowledgeIndexPort,
@@ -7657,6 +7657,19 @@ impl ContestImportPort for DatabaseRuntime {
                 .map_err(|_| ContestImportPersistenceError::Unavailable)?;
                 let id = result.last_insert_rowid();
                 sqlx::query(
+                    "INSERT INTO contest_years (value) \
+                     SELECT CAST(substr(?1, 1, 4) AS INTEGER) \
+                     WHERE length(?1) = 20 \
+                       AND ?1 GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' \
+                       AND CAST(substr(?1, 1, 4) AS INTEGER) > 0 \
+                       AND strftime('%Y-%m-%dT%H:%M:%SZ', ?1, '+0 seconds') = ?1 \
+                     ON CONFLICT(value) DO NOTHING",
+                )
+                .bind(&draft.starts_at_utc)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ContestImportPersistenceError::Unavailable)?;
+                sqlx::query(
                     "INSERT INTO contest_external_identities \
                      (contest_id, platform, external_contest_key) \
                      VALUES (?1, 'codeforces', ?2)",
@@ -8210,6 +8223,17 @@ async fn contest_library_series_family(
         .map_err(|_| ContestLibraryError::PersistenceUnavailable)
 }
 
+async fn contest_library_year_exists(
+    pool: &SqlitePool,
+    year_id: i64,
+) -> Result<bool, ContestLibraryError> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contest_years WHERE id = ?1)")
+        .bind(year_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ContestLibraryError::PersistenceUnavailable)
+}
+
 async fn contest_library_contest_row_id(
     pool: &SqlitePool,
     contest: &acm_os_domain::CodeforcesContestIdentity,
@@ -8236,22 +8260,6 @@ fn contest_library_constraint_error(
     }
 }
 
-fn authoritative_contest_year_sql(starts_at: &str, legacy_year: &str) -> String {
-    format!(
-        "CASE \
-         WHEN length({starts_at}) = 20 \
-          AND {starts_at} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' \
-          AND CAST(substr({starts_at}, 1, 4) AS INTEGER) > 0 \
-          AND strftime('%Y-%m-%dT%H:%M:%SZ', {starts_at}, '+0 seconds') = {starts_at} \
-         THEN CAST(substr({starts_at}, 1, 4) AS INTEGER) \
-         WHEN {legacy_year} IS NOT NULL \
-          AND typeof({legacy_year}) = 'integer' \
-          AND {legacy_year} > 0 \
-         THEN {legacy_year} \
-         ELSE NULL END"
-    )
-}
-
 async fn load_contest_library_placement(
     pool: &SqlitePool,
     placement_id: i64,
@@ -8264,21 +8272,21 @@ async fn load_contest_library_placement(
         Option<String>,
         Option<i64>,
         Option<i64>,
-    )> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT cp.id, cp.family_id, f.display_name, cp.series_id, s.display_name, \
-                {}, cp.ordinal \
+        Option<i64>,
+    )> = sqlx::query_as(sqlx::AssertSqlSafe(
+        "SELECT cp.id, cp.family_id, f.display_name, cp.series_id, s.display_name, cp.year_id, \
+                y.value, cp.ordinal \
          FROM contest_placements cp \
          JOIN contest_families f ON f.id = cp.family_id \
-         JOIN contests c ON c.id = cp.contest_id \
+         LEFT JOIN contest_years y ON y.id = cp.year_id \
          LEFT JOIN contest_series s ON s.id = cp.series_id AND s.family_id = cp.family_id \
          WHERE cp.id = ?1",
-        authoritative_contest_year_sql("c.starts_at_utc", "cp.year")
-    )))
+    ))
     .bind(placement_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-    let (placement_id, family_id, family_name, series_id, series_name, year, ordinal) =
+    let (placement_id, family_id, family_name, series_id, series_name, year_id, year, ordinal) =
         row.ok_or(ContestLibraryError::PlacementNotFound)?;
     Ok(ContestPlacement {
         placement_id,
@@ -8286,6 +8294,7 @@ async fn load_contest_library_placement(
         family_name,
         series_id,
         series_name,
+        year_id,
         year: year
             .map(u32::try_from)
             .transpose()
@@ -8295,24 +8304,6 @@ async fn load_contest_library_placement(
             .transpose()
             .map_err(|_| ContestLibraryError::IntegrityViolation)?,
     })
-}
-
-async fn authoritative_contest_year(
-    pool: &SqlitePool,
-    contest_id: i64,
-) -> Result<Option<u32>, ContestLibraryError> {
-    let sql = format!(
-        "SELECT {} FROM contests c WHERE c.id = ?1",
-        authoritative_contest_year_sql("c.starts_at_utc", "NULL")
-    );
-    let year: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-        .bind(contest_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-    year.map(u32::try_from)
-        .transpose()
-        .map_err(|_| ContestLibraryError::IntegrityViolation)
 }
 
 impl ContestLibraryPort for DatabaseRuntime {
@@ -8453,6 +8444,25 @@ impl ContestLibraryPort for DatabaseRuntime {
         if used > 0 && replacement_family_id.is_none() {
             return Err(ContestLibraryError::FamilyInUse);
         }
+        if let Some(replacement) = replacement_family_id {
+            let series_collision: bool = sqlx::query_scalar(
+                "SELECT EXISTS(\
+                    SELECT 1 FROM contest_series source \
+                    JOIN contest_series target \
+                      ON target.family_id = ?1 \
+                     AND target.display_name = source.display_name COLLATE NOCASE \
+                    WHERE source.family_id = ?2\
+                )",
+            )
+            .bind(replacement)
+            .bind(family_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+            if series_collision {
+                return Err(ContestLibraryError::FamilyInUse);
+            }
+        }
         let local_date =
             crate::current_local_date().map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
         self.ensure_daily_backup(local_date)
@@ -8462,16 +8472,45 @@ impl ContestLibraryPort for DatabaseRuntime {
             .begin()
             .await
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
-        if let Some(replacement) = replacement_family_id {
-            sqlx::query("UPDATE contest_placements SET family_id = ?1, series_id = NULL WHERE family_id = ?2")
-                .bind(replacement).bind(family_id).execute(&mut *transaction).await
+        if replacement_family_id.is_some() {
+            sqlx::query("PRAGMA defer_foreign_keys = ON")
+                .execute(&mut *transaction)
+                .await
                 .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
         }
-        sqlx::query("DELETE FROM contest_series WHERE family_id = ?1")
+        if let Some(replacement) = replacement_family_id {
+            let old_series: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT id, display_name FROM contest_series WHERE family_id = ?1 ORDER BY id",
+            )
             .bind(family_id)
-            .execute(&mut *transaction)
+            .fetch_all(&mut *transaction)
             .await
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+            for (old_id, _) in old_series {
+                sqlx::query("UPDATE contest_series SET family_id = ?1 WHERE id = ?2")
+                    .bind(replacement)
+                    .bind(old_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestLibraryError::FamilyInUse)?;
+                sqlx::query("UPDATE contest_placements SET family_id = ?1 WHERE family_id = ?2 AND series_id = ?3")
+                    .bind(replacement)
+                    .bind(family_id)
+                    .bind(old_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| ContestLibraryError::FamilyInUse)?;
+            }
+            sqlx::query("UPDATE contest_placements SET family_id = ?1 WHERE family_id = ?2 AND series_id IS NULL")
+                .bind(replacement).bind(family_id).execute(&mut *transaction).await
+                .map_err(|_| ContestLibraryError::FamilyInUse)?;
+        } else {
+            sqlx::query("DELETE FROM contest_series WHERE family_id = ?1")
+                .bind(family_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        }
         let result = sqlx::query("DELETE FROM contest_families WHERE id = ?1")
             .bind(family_id)
             .execute(&mut *transaction)
@@ -8634,6 +8673,16 @@ impl ContestLibraryPort for DatabaseRuntime {
                 .await
                 .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
         let family_id = family_id.ok_or(ContestLibraryError::SeriesNotFound)?;
+        let used: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM contest_placements WHERE series_id = ?1)",
+        )
+        .bind(series_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if used && replacement_series_id.is_none() {
+            return Err(ContestLibraryError::SeriesInUse);
+        }
         if let Some(replacement) = replacement_series_id {
             let replacement_family: Option<i64> =
                 sqlx::query_scalar("SELECT family_id FROM contest_series WHERE id = ?1")
@@ -8678,11 +8727,144 @@ impl ContestLibraryPort for DatabaseRuntime {
             .map_err(|_| ContestLibraryError::PersistenceUnavailable)
     }
 
+    async fn list_year_entities(&self) -> Result<Vec<ContestYear>, ContestLibraryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestLibraryError::PersistenceUnavailable)?;
+        let rows: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT id, value FROM contest_years ORDER BY value DESC, id ASC")
+                .fetch_all(pool)
+                .await
+                .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        rows.into_iter()
+            .map(|(year_id, value)| {
+                Ok(ContestYear {
+                    year_id,
+                    value: u32::try_from(value)
+                        .map_err(|_| ContestLibraryError::IntegrityViolation)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn create_year(&self, value: u32) -> Result<ContestYear, ContestLibraryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestLibraryError::PersistenceUnavailable)?;
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        let result = sqlx::query("INSERT INTO contest_years (value) VALUES (?1)")
+            .bind(i64::from(value))
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                contest_library_constraint_error(error, ContestLibraryError::DuplicateYearValue)
+            })?;
+        Ok(ContestYear {
+            year_id: result.last_insert_rowid(),
+            value,
+        })
+    }
+
+    async fn rename_year(
+        &self,
+        year_id: i64,
+        value: u32,
+    ) -> Result<ContestYear, ContestLibraryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestLibraryError::PersistenceUnavailable)?;
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        let result = sqlx::query("UPDATE contest_years SET value = ?1 WHERE id = ?2")
+            .bind(i64::from(value))
+            .bind(year_id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                contest_library_constraint_error(error, ContestLibraryError::DuplicateYearValue)
+            })?;
+        if result.rows_affected() != 1 {
+            return Err(ContestLibraryError::YearNotFound);
+        }
+        Ok(ContestYear { year_id, value })
+    }
+
+    async fn delete_year(
+        &self,
+        year_id: i64,
+        replacement_year_id: Option<i64>,
+    ) -> Result<(), ContestLibraryError> {
+        let pool = self
+            ._pool
+            .as_ref()
+            .ok_or(ContestLibraryError::PersistenceUnavailable)?;
+        let used: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM contest_placements WHERE year_id = ?1)",
+        )
+        .bind(year_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if used && replacement_year_id.is_none() {
+            return Err(ContestLibraryError::YearInUse);
+        }
+        if let Some(replacement) = replacement_year_id {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contest_years WHERE id = ?1)")
+                    .bind(replacement)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+            if !exists {
+                return Err(ContestLibraryError::YearNotFound);
+            }
+        }
+        let local_date =
+            crate::current_local_date().map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        self.ensure_daily_backup(local_date)
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if let Some(replacement) = replacement_year_id {
+            sqlx::query("UPDATE contest_placements SET year_id = ?1 WHERE year_id = ?2")
+                .bind(replacement)
+                .bind(year_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        }
+        let result = sqlx::query("DELETE FROM contest_years WHERE id = ?1")
+            .bind(year_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if result.rows_affected() != 1 {
+            return Err(ContestLibraryError::YearNotFound);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContestLibraryError::PersistenceUnavailable)
+    }
+
     async fn list_years(
         &self,
         family_id: i64,
         series: ContestLibrarySeriesFilter,
-    ) -> Result<Vec<Option<u32>>, ContestLibraryError> {
+    ) -> Result<Vec<ContestYear>, ContestLibraryError> {
         let pool = self
             ._pool
             .as_ref()
@@ -8699,36 +8881,15 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
-        let year_sql = authoritative_contest_year_sql("c.starts_at_utc", "p.year");
-        let rows: Vec<Option<i64>> = match series {
+        let rows: Vec<(i64, i64)> = match series {
             ContestLibrarySeriesFilter::Any => {
-                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT DISTINCT {year_sql} AS year \
-                 FROM contest_placements p JOIN contests c ON c.id = p.contest_id WHERE p.family_id = ?1 \
-                 ORDER BY year IS NULL, year DESC"
-                )))
-                .bind(family_id)
-                .fetch_all(pool)
-                .await
-            }
-            ContestLibrarySeriesFilter::Unassigned => {
-                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT DISTINCT {year_sql} AS year \
-                 FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
-                 WHERE p.family_id = ?1 AND p.series_id IS NULL \
-                 ORDER BY year IS NULL, year DESC"
-                )))
+                sqlx::query_as("SELECT DISTINCT y.id, y.value FROM contest_placements p JOIN contest_years y ON y.id = p.year_id WHERE p.family_id = ?1 ORDER BY y.value DESC")
                 .bind(family_id)
                 .fetch_all(pool)
                 .await
             }
             ContestLibrarySeriesFilter::Exact(series_id) => {
-                sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT DISTINCT {year_sql} AS year \
-                 FROM contest_placements p JOIN contests c ON c.id = p.contest_id \
-                 WHERE p.family_id = ?1 AND p.series_id = ?2 \
-                 ORDER BY year IS NULL, year DESC"
-                )))
+                sqlx::query_as("SELECT DISTINCT y.id, y.value FROM contest_placements p JOIN contest_years y ON y.id = p.year_id WHERE p.family_id = ?1 AND p.series_id = ?2 ORDER BY y.value DESC")
                 .bind(family_id)
                 .bind(series_id)
                 .fetch_all(pool)
@@ -8737,10 +8898,12 @@ impl ContestLibraryPort for DatabaseRuntime {
         }
         .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
         rows.into_iter()
-            .map(|year| {
-                year.map(u32::try_from)
-                    .transpose()
-                    .map_err(|_| ContestLibraryError::IntegrityViolation)
+            .map(|(year_id, value)| {
+                Ok(ContestYear {
+                    year_id,
+                    value: u32::try_from(value)
+                        .map_err(|_| ContestLibraryError::IntegrityViolation)?,
+                })
             })
             .collect()
     }
@@ -8757,7 +8920,7 @@ impl ContestLibraryPort for DatabaseRuntime {
         let placement_ids: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM contest_placements WHERE contest_id = ?1 \
              ORDER BY family_id ASC, series_id IS NOT NULL, series_id ASC, \
-                      year IS NULL, year DESC, ordinal IS NULL, ordinal ASC, id ASC",
+                      year_id IS NULL, year_id DESC, ordinal IS NULL, ordinal ASC, id ASC",
         )
         .bind(contest_id)
         .fetch_all(pool)
@@ -8791,21 +8954,22 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
+        let year_id = input.year_id.ok_or(ContestLibraryError::YearNotFound)?;
+        if !contest_library_year_exists(pool, year_id).await? {
+            return Err(ContestLibraryError::YearNotFound);
+        }
         let contest_id = contest_library_contest_row_id(pool, &input.contest).await?;
-        let effective_year = authoritative_contest_year(pool, contest_id)
-            .await?
-            .or(input.year);
         let duplicate: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM contest_placements \
              WHERE contest_id = ?1 AND family_id = ?2 \
                AND COALESCE(series_id, 0) = COALESCE(?3, 0) \
-               AND COALESCE(year, 0) = COALESCE(?4, 0) \
+               AND COALESCE(year_id, 0) = COALESCE(?4, 0) \
                AND COALESCE(ordinal, 0) = COALESCE(?5, 0))",
         )
         .bind(contest_id)
         .bind(input.family_id)
         .bind(input.series_id)
-        .bind(effective_year.map(i64::from))
+        .bind(year_id)
         .bind(input.ordinal.map(i64::from))
         .fetch_one(pool)
         .await
@@ -8855,14 +9019,23 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
+        let year_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contest_years WHERE id = ?1)")
+                .bind(year_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if !year_exists {
+            return Err(ContestLibraryError::YearNotFound);
+        }
         let placement_id = sqlx::query(
-            "INSERT INTO contest_placements (contest_id, family_id, series_id, year, ordinal) \
+            "INSERT INTO contest_placements (contest_id, family_id, series_id, year_id, ordinal) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(contest_id)
         .bind(input.family_id)
         .bind(input.series_id)
-        .bind(effective_year.map(i64::from))
+        .bind(year_id)
         .bind(input.ordinal.map(i64::from))
         .execute(&mut *transaction)
         .await
@@ -8906,6 +9079,10 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
+        let year_id = input.year_id.ok_or(ContestLibraryError::YearNotFound)?;
+        if !contest_library_year_exists(pool, year_id).await? {
+            return Err(ContestLibraryError::YearNotFound);
+        }
         let contest_id: i64 =
             sqlx::query_scalar("SELECT contest_id FROM contest_placements WHERE id = ?1")
                 .bind(input.placement_id)
@@ -8913,21 +9090,18 @@ impl ContestLibraryPort for DatabaseRuntime {
                 .await
                 .map_err(|_| ContestLibraryError::PersistenceUnavailable)?
                 .ok_or(ContestLibraryError::PlacementNotFound)?;
-        let effective_year = authoritative_contest_year(pool, contest_id)
-            .await?
-            .or(input.year);
         let duplicate: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM contest_placements \
              WHERE id != ?1 AND contest_id = ?2 AND family_id = ?3 \
                AND COALESCE(series_id, 0) = COALESCE(?4, 0) \
-               AND COALESCE(year, 0) = COALESCE(?5, 0) \
+               AND COALESCE(year_id, 0) = COALESCE(?5, 0) \
                AND COALESCE(ordinal, 0) = COALESCE(?6, 0))",
         )
         .bind(input.placement_id)
         .bind(contest_id)
         .bind(input.family_id)
         .bind(input.series_id)
-        .bind(effective_year.map(i64::from))
+        .bind(year_id)
         .bind(input.ordinal.map(i64::from))
         .fetch_one(pool)
         .await
@@ -8977,13 +9151,22 @@ impl ContestLibraryPort for DatabaseRuntime {
                 Some(_) => {}
             }
         }
+        let year_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contest_years WHERE id = ?1)")
+                .bind(year_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| ContestLibraryError::PersistenceUnavailable)?;
+        if !year_exists {
+            return Err(ContestLibraryError::YearNotFound);
+        }
         let result = sqlx::query(
-            "UPDATE contest_placements SET family_id = ?1, series_id = ?2, year = ?3, ordinal = ?4 \
+            "UPDATE contest_placements SET family_id = ?1, series_id = ?2, year_id = ?3, ordinal = ?4 \
              WHERE id = ?5",
         )
         .bind(input.family_id)
         .bind(input.series_id)
-        .bind(effective_year.map(i64::from))
+        .bind(year_id)
         .bind(input.ordinal.map(i64::from))
         .bind(input.placement_id)
         .execute(&mut *transaction)
@@ -9083,30 +9266,14 @@ impl ContestLibraryPort for DatabaseRuntime {
             );
             match series {
                 ContestLibrarySeriesFilter::Any => {}
-                ContestLibrarySeriesFilter::Unassigned => {
-                    sql.push_str(" AND placement.series_id IS NULL");
-                }
                 ContestLibrarySeriesFilter::Exact(_) => {
                     sql.push_str(" AND placement.series_id = ?");
                 }
             }
             match year {
                 ContestLibraryYearFilter::Any => {}
-                ContestLibraryYearFilter::Unassigned => {
-                    sql.push_str(" AND ");
-                    sql.push_str(&authoritative_contest_year_sql(
-                        "c.starts_at_utc",
-                        "placement.year",
-                    ));
-                    sql.push_str(" IS NULL");
-                }
                 ContestLibraryYearFilter::Exact(_) => {
-                    sql.push_str(" AND ");
-                    sql.push_str(&authoritative_contest_year_sql(
-                        "c.starts_at_utc",
-                        "placement.year",
-                    ));
-                    sql.push_str(" = ?");
+                    sql.push_str(" AND placement.year_id = ?");
                 }
             }
             sql.push(')');
@@ -9125,8 +9292,8 @@ impl ContestLibraryPort for DatabaseRuntime {
             if let ContestLibrarySeriesFilter::Exact(series_id) = series {
                 query = query.bind(series_id);
             }
-            if let ContestLibraryYearFilter::Exact(year) = year {
-                query = query.bind(i64::from(year));
+            if let ContestLibraryYearFilter::Exact(year_id) = year {
+                query = query.bind(year_id);
             }
         }
         let rows = query
@@ -11022,6 +11189,7 @@ async fn validate_schema_contract(
             | 31
             | 32
             | 33
+            | 34
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -11152,7 +11320,7 @@ async fn validate_schema_contract(
         validate_contest_collections_contract(pool).await?;
     }
     if schema_version >= 25 {
-        validate_contest_library_contract(pool).await?;
+        validate_contest_library_contract(pool, schema_version).await?;
     }
     if schema_version >= 26 {
         validate_external_identity_contract(pool, schema_version).await?;
@@ -11500,6 +11668,21 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "table".to_owned(),
                 "contest_series".to_owned(),
                 "contest_series".to_owned(),
+            ),
+        ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 34 {
+        expected_objects.extend([
+            (
+                "index".to_owned(),
+                "contest_placements_by_year".to_owned(),
+                "contest_placements".to_owned(),
+            ),
+            (
+                "table".to_owned(),
+                "contest_years".to_owned(),
+                "contest_years".to_owned(),
             ),
         ]);
         expected_objects.sort();
@@ -11982,22 +12165,44 @@ async fn validate_contest_collections_contract(
     Ok(())
 }
 
-async fn validate_contest_library_contract(pool: &SqlitePool) -> Result<(), StartupRecoveryReason> {
+async fn validate_contest_library_contract(
+    pool: &SqlitePool,
+    schema_version: i64,
+) -> Result<(), StartupRecoveryReason> {
     validate_table_columns(pool, "contest_families", &["id", "display_name"]).await?;
     validate_table_columns(pool, "contest_series", &["id", "family_id", "display_name"]).await?;
-    validate_table_columns(
-        pool,
-        "contest_placements",
-        &[
-            "id",
-            "contest_id",
-            "family_id",
-            "series_id",
-            "year",
-            "ordinal",
-        ],
-    )
-    .await
+    if schema_version >= 34 {
+        validate_table_columns(pool, "contest_years", &["id", "value"]).await?;
+        validate_table_columns(
+            pool,
+            "contest_placements",
+            &[
+                "id",
+                "contest_id",
+                "family_id",
+                "series_id",
+                "year",
+                "ordinal",
+                "year_id",
+            ],
+        )
+        .await?;
+    } else {
+        validate_table_columns(
+            pool,
+            "contest_placements",
+            &[
+                "id",
+                "contest_id",
+                "family_id",
+                "series_id",
+                "year",
+                "ordinal",
+            ],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn validate_critical_operations_contract(
@@ -12887,6 +13092,7 @@ async fn validate_table_columns(
         "contest_collection_memberships" => "PRAGMA table_xinfo('contest_collection_memberships')",
         "contest_families" => "PRAGMA table_xinfo('contest_families')",
         "contest_series" => "PRAGMA table_xinfo('contest_series')",
+        "contest_years" => "PRAGMA table_xinfo('contest_years')",
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
@@ -13694,7 +13900,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
     }
 
@@ -16783,24 +16989,153 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 33);
+        assert_eq!(ledger_count, 34);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 33);
-        validate_schema_contract(pool, 33)
+        assert_eq!(schema_generation, 34);
+        validate_schema_contract(pool, 34)
             .await
-            .expect("generation 33 schema contract");
+            .expect("generation 34 schema contract");
         verify_integrity(pool).await.expect("database integrity");
+    }
+
+    #[tokio::test]
+    async fn schema_33_to_34_contest_year_migration_uses_evidence_without_guessing() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool").clone();
+        let family_id: i64 =
+            sqlx::query_scalar("SELECT id FROM contest_families WHERE display_name = 'Codeforces'")
+                .fetch_one(&pool)
+                .await
+                .expect("Codeforces family");
+        drop(runtime);
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys for schema 33 fixture");
+        sqlx::raw_sql(
+            "DROP INDEX contest_placements_by_year; \
+             DROP INDEX contest_placements_unique_identity; \
+             ALTER TABLE contest_placements DROP COLUMN year_id; \
+             DROP TABLE contest_years; \
+             CREATE UNIQUE INDEX contest_placements_unique_identity \
+             ON contest_placements ( \
+                 contest_id, family_id, COALESCE(series_id, 0), \
+                 COALESCE(year, 0), COALESCE(ordinal, 0) \
+             ); \
+             DELETE FROM _sqlx_migrations WHERE version = 34; \
+             UPDATE app_metadata SET schema_generation = 33 WHERE singleton = 1;",
+        )
+        .execute(&pool)
+        .await
+        .expect("downgrade isolated fixture to schema 33");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("restore foreign keys after schema 33 fixture");
+
+        let timestamp_contest = insert_contest_row(&pool, 3401).await;
+        let legacy_contest = insert_contest_row(&pool, 3402).await;
+        let missing_contest = insert_contest_row(&pool, 3403).await;
+        sqlx::query("UPDATE contests SET starts_at_utc = ?1 WHERE id = ?2")
+            .bind("2026-05-06T07:08:09Z")
+            .bind(timestamp_contest)
+            .execute(&pool)
+            .await
+            .expect("set canonical timestamp");
+        sqlx::query("UPDATE contests SET starts_at_utc = ?1 WHERE id = ?2")
+            .bind("not-a-timestamp")
+            .bind(legacy_contest)
+            .execute(&pool)
+            .await
+            .expect("set malformed timestamp");
+        for (contest_id, legacy_year) in [
+            (timestamp_contest, Some(2025_i64)),
+            (legacy_contest, Some(2025_i64)),
+            (missing_contest, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, ?3)",
+            )
+            .bind(contest_id)
+            .bind(family_id)
+            .bind(legacy_year)
+            .execute(&pool)
+            .await
+            .expect("insert schema 33 placement");
+        }
+        validate_schema_contract(&pool, 33)
+            .await
+            .expect("valid schema 33 fixture");
+        verify_integrity(&pool)
+            .await
+            .expect("schema 33 fixture integrity");
+        pool.close().await;
+
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(
+            upgraded.status(),
+            &StartupGateStatus::Ready { schema_version: 34 }
+        );
+        let pool = upgraded._pool.as_ref().expect("upgraded pool");
+        validate_schema_contract(pool, 34)
+            .await
+            .expect("schema 34 contract");
+        let years: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT identities.external_contest_key, p.year_id, y.value \
+             FROM contest_placements p \
+             JOIN contest_external_identities identities \
+               ON identities.contest_id = p.contest_id AND identities.platform = 'codeforces' \
+             LEFT JOIN contest_years y ON y.id = p.year_id \
+             WHERE identities.external_contest_key IN ('3401', '3402', '3403') \
+             ORDER BY identities.external_contest_key",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("migrated placement years");
+        assert_eq!(
+            years
+                .iter()
+                .map(|(key, _, value)| (key.as_str(), *value))
+                .collect::<Vec<_>>(),
+            vec![("3401", Some(2026)), ("3402", Some(2025)), ("3403", None)]
+        );
+        assert!(years[0].1.is_some());
+        assert!(years[1].1.is_some());
+        assert_eq!(years[2].1, None);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_years")
+                .fetch_one(pool)
+                .await
+                .expect("year entity count"),
+            2
+        );
+        assert!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'contest_placements_unique_identity'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("placement identity index")
+            .contains("year_id")
+        );
+        assert!(sqlx::query_scalar::<_, String>("PRAGMA foreign_key_check")
+            .fetch_all(pool)
+            .await
+            .expect("foreign key check")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -16920,7 +17255,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
         let ids_after: (i64, i64, String, String) = sqlx::query_as(
@@ -17014,13 +17349,13 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
-        validate_schema_contract(pool, 33)
+        validate_schema_contract(pool, 34)
             .await
-            .expect("schema 33 contract after migration");
+            .expect("schema 34 contract after migration");
         drop(upgraded);
         assert_eq!(
             start_database(directory.path()).await.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
     }
 
@@ -17317,7 +17652,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -17449,12 +17784,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 33)
+        validate_schema_contract(pool, 34)
             .await
-            .expect("schema 33 contract");
+            .expect("schema 34 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
         let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), \
@@ -17607,6 +17942,111 @@ mod tests {
                 .execute(pool)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn contest_library_v2_requires_stable_taxonomy_and_fails_closed_on_used_delete() {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        let source = acm_os_application::create_family(&runtime, "V2 source")
+            .await
+            .expect("source family");
+        let target = acm_os_application::create_family(&runtime, "V2 target")
+            .await
+            .expect("target family");
+        let series = acm_os_application::create_series(&runtime, source.family_id, "Regional")
+            .await
+            .expect("series");
+        let colliding_target_series =
+            acm_os_application::create_series(&runtime, target.family_id, "Regional")
+                .await
+                .expect("colliding target series");
+        let year = acm_os_application::create_year(&runtime, 2027)
+            .await
+            .expect("year");
+        let other_year = acm_os_application::create_year(&runtime, 2028)
+            .await
+            .expect("other year");
+        let _contest_id = insert_contest_row(pool, 9301).await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(9301).expect("identity");
+        let placement = acm_os_application::create_placement(
+            &runtime,
+            acm_os_application::CreateContestPlacement {
+                contest: contest.clone(),
+                family_id: source.family_id,
+                series_id: Some(series.series_id),
+                year_id: Some(year.year_id),
+                year: None,
+                ordinal: Some(1),
+            },
+        )
+        .await
+        .expect("complete placement");
+        assert_eq!(placement.year_id, Some(year.year_id));
+        assert_eq!(placement.year, Some(2027));
+        acm_os_application::create_placement(
+            &runtime,
+            acm_os_application::CreateContestPlacement {
+                contest: contest.clone(),
+                family_id: source.family_id,
+                series_id: Some(series.series_id),
+                year_id: Some(other_year.year_id),
+                year: None,
+                ordinal: Some(1),
+            },
+        )
+        .await
+        .expect("same path in another stable year");
+        assert_eq!(
+            acm_os_application::create_placement(
+                &runtime,
+                acm_os_application::CreateContestPlacement {
+                    contest,
+                    family_id: source.family_id,
+                    series_id: Some(series.series_id),
+                    year_id: None,
+                    year: None,
+                    ordinal: Some(2),
+                },
+            )
+            .await,
+            Err(acm_os_application::ContestLibraryError::YearNotFound)
+        );
+        assert_eq!(
+            acm_os_application::delete_series(&runtime, series.series_id, None).await,
+            Err(acm_os_application::ContestLibraryError::SeriesInUse)
+        );
+        assert_eq!(
+            acm_os_application::delete_year(&runtime, year.year_id, None).await,
+            Err(acm_os_application::ContestLibraryError::YearInUse)
+        );
+        assert_eq!(
+            acm_os_application::delete_family(&runtime, source.family_id, Some(target.family_id))
+                .await,
+            Err(acm_os_application::ContestLibraryError::FamilyInUse)
+        );
+        acm_os_application::delete_series(&runtime, colliding_target_series.series_id, None)
+            .await
+            .expect("remove unused collision");
+        acm_os_application::delete_family(&runtime, source.family_id, Some(target.family_id))
+            .await
+            .expect("family replacement");
+        let moved: (i64, i64) =
+            sqlx::query_as("SELECT family_id, series_id FROM contest_placements WHERE id = ?1")
+                .bind(placement.placement_id)
+                .fetch_one(pool)
+                .await
+                .expect("moved placement");
+        assert_eq!(moved, (target.family_id, series.series_id));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT family_id FROM contest_series WHERE id = ?1")
+                .bind(series.series_id)
+                .fetch_one(pool)
+                .await
+                .expect("moved series"),
+            target.family_id
         );
     }
 
@@ -17773,926 +18213,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contest_library_starts_at_year_overrides_legacy_placement_year_in_archive_queries() {
-        let directory = TempDir::new().expect("temporary app data");
-        let runtime = start_database(directory.path()).await;
-        let pool = runtime._pool.as_ref().expect("ready database pool");
-        let family = acm_os_application::create_family(&runtime, "Year authority family")
-            .await
-            .expect("family");
-        let contest_id = insert_contest_row(pool, 3201).await;
-        sqlx::query("UPDATE contests SET starts_at_utc = '2026-08-17T01:02:03Z' WHERE id = ?1")
-            .bind(contest_id)
-            .execute(pool)
-            .await
-            .expect("authoritative contest timestamp");
-        let placement_id = sqlx::query(
-            "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, 2025)",
-        )
-        .bind(contest_id)
-        .bind(family.family_id)
-        .execute(pool)
-        .await
-        .expect("legacy placement year conflict")
-        .last_insert_rowid();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT year FROM contest_placements WHERE id = ?1")
-                .bind(placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("stored legacy year"),
-            2025
-        );
-        let contest =
-            acm_os_domain::CodeforcesContestIdentity::new(3201).expect("contest identity");
-        assert_eq!(
-            acm_os_application::list_contest_placements(&runtime, &contest)
-                .await
-                .expect("archive placement query")
-                .into_iter()
-                .map(|item| item.year)
-                .collect::<Vec<_>>(),
-            vec![Some(2026)]
-        );
-        let year_2026 = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: family.family_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                year: acm_os_application::ContestLibraryYearFilter::Exact(2026),
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("2026 archive query");
-        assert_eq!(year_2026.len(), 1);
-        assert_eq!(year_2026[0].placements[0].year, Some(2026));
-        let year_2025 = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: family.family_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                year: acm_os_application::ContestLibraryYearFilter::Exact(2025),
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("2025 archive query");
-        assert!(year_2025.is_empty());
-    }
-
-    #[tokio::test]
-    async fn contest_library_timestamp_authority_matrix_keeps_display_and_filters_consistent() {
-        let directory = TempDir::new().expect("temporary database");
-        let runtime = start_database(directory.path()).await;
-        let pool = runtime._pool.as_ref().expect("ready database pool");
-        let family = acm_os_application::create_family(&runtime, "Timestamp authority family")
-            .await
-            .expect("family");
-        let cases = [
-            (3202, None, Some(2025), Some(2025), "missing"),
-            (
-                3203,
-                Some("2026-not-a-date"),
-                Some(2025),
-                Some(2025),
-                "malformed",
-            ),
-            (
-                3204,
-                Some("2026-01-01"),
-                Some(2025),
-                Some(2025),
-                "date-only",
-            ),
-            (
-                3205,
-                Some("2026-01-01 12:00:00"),
-                Some(2025),
-                Some(2025),
-                "space-separated",
-            ),
-            (
-                3206,
-                Some("0000-01-01T00:00:00Z"),
-                Some(2025),
-                Some(2025),
-                "year-zero-fallback",
-            ),
-            (
-                3207,
-                Some("0000-01-01T00:00:00Z"),
-                None,
-                None,
-                "year-zero-unknown",
-            ),
-            (
-                3208,
-                Some("2026-99-99T00:00:00Z"),
-                Some(2025),
-                Some(2025),
-                "invalid-date",
-            ),
-        ];
-
-        for (external_key, starts_at, legacy_year, expected_year, label) in cases {
-            let contest_id = insert_contest_row(pool, external_key).await;
-            sqlx::query("UPDATE contests SET starts_at_utc = ?1 WHERE id = ?2")
-                .bind(starts_at)
-                .bind(contest_id)
-                .execute(pool)
-                .await
-                .expect("legacy timestamp fixture");
-            sqlx::query(
-                "INSERT INTO contest_placements (contest_id, family_id, year) VALUES (?1, ?2, ?3)",
-            )
-            .bind(contest_id)
-            .bind(family.family_id)
-            .bind(legacy_year)
-            .execute(pool)
-            .await
-            .expect("legacy placement fixture");
-
-            let contest = acm_os_domain::CodeforcesContestIdentity::new(external_key as u64)
-                .expect("contest identity");
-            let placements = acm_os_application::list_contest_placements(&runtime, &contest)
-                .await
-                .expect("placement projection");
-            assert_eq!(placements[0].year, expected_year, "display: {label}");
-
-            let matching_year = expected_year
-                .map(acm_os_application::ContestLibraryYearFilter::Exact)
-                .unwrap_or(acm_os_application::ContestLibraryYearFilter::Unassigned);
-            let matching = acm_os_application::list_library_contests(
-                &runtime,
-                acm_os_application::ContestLibraryScope::Family {
-                    family_id: family.family_id,
-                    series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                    year: matching_year,
-                },
-                acm_os_application::ContestLibraryArchiveFilter::All,
-            )
-            .await
-            .expect("matching year filter");
-            assert!(
-                matching
-                    .iter()
-                    .any(|item| item.contest.contest_id() == external_key as u64),
-                "matching filter: {label}"
-            );
-
-            let conflicting_year = if expected_year == Some(2026) {
-                2025
-            } else {
-                2026
-            };
-            let conflicting = acm_os_application::list_library_contests(
-                &runtime,
-                acm_os_application::ContestLibraryScope::Family {
-                    family_id: family.family_id,
-                    series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                    year: acm_os_application::ContestLibraryYearFilter::Exact(conflicting_year),
-                },
-                acm_os_application::ContestLibraryArchiveFilter::All,
-            )
-            .await
-            .expect("conflicting year filter");
-            assert!(
-                conflicting
-                    .iter()
-                    .all(|item| item.contest.contest_id() != external_key as u64),
-                "conflicting filter: {label}"
-            );
-        }
-
-        assert_eq!(
-            acm_os_application::list_years(
-                &runtime,
-                family.family_id,
-                acm_os_application::ContestLibrarySeriesFilter::Any,
-            )
-            .await
-            .expect("authoritative years"),
-            vec![Some(2025), None]
-        );
-    }
-
-    #[tokio::test]
-    async fn contest_library_backend_round_trip_covers_mutations_filters_and_authority() {
-        let directory = TempDir::new().expect("temporary app data");
-        let runtime = start_database(directory.path()).await;
-        let pool = runtime._pool.as_ref().expect("ready database pool");
-        let hdu_id: i64 =
-            sqlx::query_scalar("SELECT id FROM contest_families WHERE display_name = '杭电'")
-                .fetch_one(pool)
-                .await
-                .expect("HDU family");
-        let nowcoder_id: i64 =
-            sqlx::query_scalar("SELECT id FROM contest_families WHERE display_name = '牛客'")
-                .fetch_one(pool)
-                .await
-                .expect("Nowcoder family");
-        let seeded = acm_os_application::list_families(&runtime)
-            .await
-            .expect("seeded families");
-        assert_eq!(
-            seeded
-                .iter()
-                .take(5)
-                .map(|family| family.display_name.as_str())
-                .collect::<Vec<_>>(),
-            ["杭电", "牛客", "Codeforces", "XCPC", "周赛"]
-        );
-        let codeforces_family = seeded
-            .iter()
-            .find(|family| family.display_name == "Codeforces")
-            .expect("Codeforces family");
-        assert_eq!(
-            acm_os_application::rename_family(&runtime, codeforces_family.family_id, "codeforces",)
-                .await
-                .expect("case-only family rename")
-                .display_name,
-            "codeforces"
-        );
-
-        let user_family = acm_os_application::create_family(&runtime, "  蓝桥杯 ")
-            .await
-            .expect("normalized family");
-        assert_eq!(user_family.display_name, "蓝桥杯");
-        assert_eq!(
-            acm_os_application::create_family(&runtime, "\u{0007}bad").await,
-            Err(acm_os_application::ContestLibraryError::InvalidName)
-        );
-        assert_eq!(
-            acm_os_application::create_family(&runtime, "蓝桥杯").await,
-            Err(acm_os_application::ContestLibraryError::DuplicateFamilyName)
-        );
-        let renamed = acm_os_application::rename_family(&runtime, user_family.family_id, "蓝桥杯")
-            .await
-            .expect("idempotent rename");
-        assert_eq!(renamed.display_name, "蓝桥杯");
-        let case_renamed =
-            acm_os_application::rename_family(&runtime, user_family.family_id, "蓝桥杯竞赛")
-                .await
-                .expect("rename family");
-        assert_eq!(case_renamed.display_name, "蓝桥杯竞赛");
-        assert_eq!(
-            acm_os_application::rename_family(&runtime, 999_999, "不存在").await,
-            Err(acm_os_application::ContestLibraryError::FamilyNotFound)
-        );
-        assert_eq!(
-            acm_os_application::rename_family(&runtime, user_family.family_id, "牛客").await,
-            Err(acm_os_application::ContestLibraryError::DuplicateFamilyName)
-        );
-
-        let hdu_series = acm_os_application::list_series(&runtime, hdu_id)
-            .await
-            .expect("HDU series list")
-            .into_iter()
-            .find(|series| series.display_name == "暑期多校")
-            .expect("seeded HDU series");
-        let nowcoder_series = acm_os_application::list_series(&runtime, nowcoder_id)
-            .await
-            .expect("Nowcoder series list")
-            .into_iter()
-            .find(|series| series.display_name == "暑期多校")
-            .expect("seeded Nowcoder series");
-        assert_ne!(hdu_series.series_id, nowcoder_series.series_id);
-        assert_eq!(
-            acm_os_application::create_series(&runtime, hdu_id, "暑期多校").await,
-            Err(acm_os_application::ContestLibraryError::DuplicateSeriesName)
-        );
-        assert_eq!(
-            acm_os_application::list_series(&runtime, hdu_id)
-                .await
-                .expect("series list")
-                .len(),
-            2
-        );
-        let empty_series = acm_os_application::create_series(&runtime, hdu_id, "空系列")
-            .await
-            .expect("empty series");
-        assert_eq!(
-            acm_os_application::list_series(&runtime, hdu_id)
-                .await
-                .expect("series list with empty series")
-                .iter()
-                .filter(|series| series.series_id == empty_series.series_id)
-                .count(),
-            1
-        );
-        assert_eq!(
-            acm_os_application::rename_series(&runtime, empty_series.series_id, "暑期多校").await,
-            Err(acm_os_application::ContestLibraryError::DuplicateSeriesName)
-        );
-        let renamed_series =
-            acm_os_application::rename_series(&runtime, empty_series.series_id, "空系列重命名")
-                .await
-                .expect("rename series");
-        assert_eq!(renamed_series.display_name, "空系列重命名");
-        assert_eq!(
-            acm_os_application::rename_series(&runtime, hdu_series.series_id, "暑期多校")
-                .await
-                .expect("idempotent series rename")
-                .display_name,
-            "暑期多校"
-        );
-        assert_eq!(
-            acm_os_application::rename_series(&runtime, hdu_series.series_id, "暑期多校A")
-                .await
-                .expect("rename series casing source")
-                .display_name,
-            "暑期多校A"
-        );
-        assert_eq!(
-            acm_os_application::rename_series(&runtime, hdu_series.series_id, "暑期多校a")
-                .await
-                .expect("case-only series rename")
-                .display_name,
-            "暑期多校a"
-        );
-        assert_eq!(
-            acm_os_application::list_series(&runtime, 999_999).await,
-            Err(acm_os_application::ContestLibraryError::FamilyNotFound)
-        );
-        assert_eq!(
-            acm_os_application::rename_series(&runtime, 999_999, "不存在").await,
-            Err(acm_os_application::ContestLibraryError::SeriesNotFound)
-        );
-
-        let contest_internal = insert_contest_row(pool, 5001).await;
-        let no_placement_contest = insert_contest_row(pool, 5002).await;
-        sqlx::query(
-            "INSERT INTO problems (id, title, source_url, identity_type) \
-             VALUES (601, 'A', 'https://codeforces.com/contest/5001/problem/A', 'lightweight'), \
-                    (602, 'B', 'https://codeforces.com/contest/5001/problem/B', 'lightweight')",
-        )
-        .execute(pool)
-        .await
-        .expect("problem rows");
-        sqlx::query(
-            "INSERT INTO problem_external_identities \
-             (problem_id, platform, external_contest_key, external_problem_key) \
-             VALUES (601, 'codeforces', '5001', 'A'), (602, 'codeforces', '5001', 'B')",
-        )
-        .execute(pool)
-        .await
-        .expect("problem identities");
-        sqlx::query(
-            "INSERT INTO problem_learning_states (problem_id, learning_status, learning_status_since_utc) \
-             VALUES (601, 'unstarted', '2026-08-15T00:00:00Z'), (602, 'unstarted', '2026-08-15T00:00:00Z')",
-        )
-        .execute(pool)
-        .await
-        .expect("learning rows");
-        sqlx::query(
-            "INSERT INTO contest_problems (contest_id, problem_id, ordinal, import_state) \
-             VALUES (?1, 601, 1, 'ready'), (?1, 602, 2, 'pending_snapshot')",
-        )
-        .bind(contest_internal)
-        .execute(pool)
-        .await
-        .expect("contest problem rows");
-
-        let contest =
-            acm_os_domain::CodeforcesContestIdentity::new(5001).expect("contest identity");
-        let first = acm_os_application::create_placement(
-            &runtime,
-            acm_os_application::CreateContestPlacement {
-                contest: contest.clone(),
-                family_id: hdu_id,
-                series_id: None,
-                year: None,
-                ordinal: None,
-            },
-        )
-        .await
-        .expect("unassigned placement");
-        let second = acm_os_application::create_placement(
-            &runtime,
-            acm_os_application::CreateContestPlacement {
-                contest: contest.clone(),
-                family_id: hdu_id,
-                series_id: Some(hdu_series.series_id),
-                year: Some(2026),
-                ordinal: Some(2),
-            },
-        )
-        .await
-        .expect("series placement");
-        assert_eq!(
-            acm_os_application::create_placement(
-                &runtime,
-                acm_os_application::CreateContestPlacement {
-                    contest: contest.clone(),
-                    family_id: hdu_id,
-                    series_id: None,
-                    year: None,
-                    ordinal: None,
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::DuplicatePlacement)
-        );
-        assert_eq!(
-            acm_os_application::create_placement(
-                &runtime,
-                acm_os_application::CreateContestPlacement {
-                    contest: contest.clone(),
-                    family_id: nowcoder_id,
-                    series_id: Some(hdu_series.series_id),
-                    year: Some(2026),
-                    ordinal: Some(1),
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::SeriesFamilyMismatch)
-        );
-        assert_eq!(
-            acm_os_application::create_placement(
-                &runtime,
-                acm_os_application::CreateContestPlacement {
-                    contest: acm_os_domain::CodeforcesContestIdentity::new(999_999)
-                        .expect("missing contest identity"),
-                    family_id: hdu_id,
-                    series_id: None,
-                    year: None,
-                    ordinal: None,
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::ContestNotFound)
-        );
-        assert_eq!(
-            acm_os_application::create_placement(
-                &runtime,
-                acm_os_application::CreateContestPlacement {
-                    contest: contest.clone(),
-                    family_id: hdu_id,
-                    series_id: None,
-                    year: Some(0),
-                    ordinal: None,
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::InvalidYear)
-        );
-        assert_eq!(
-            acm_os_application::create_placement(
-                &runtime,
-                acm_os_application::CreateContestPlacement {
-                    contest: contest.clone(),
-                    family_id: hdu_id,
-                    series_id: None,
-                    year: None,
-                    ordinal: Some(0),
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::InvalidOrdinal)
-        );
-
-        let years_any = acm_os_application::list_years(
-            &runtime,
-            hdu_id,
-            acm_os_application::ContestLibrarySeriesFilter::Any,
-        )
-        .await
-        .expect("years any");
-        assert_eq!(years_any, vec![Some(2026), None]);
-        let years_unassigned = acm_os_application::list_years(
-            &runtime,
-            hdu_id,
-            acm_os_application::ContestLibrarySeriesFilter::Unassigned,
-        )
-        .await
-        .expect("years unassigned");
-        assert_eq!(years_unassigned, vec![None]);
-        let years_exact = acm_os_application::list_years(
-            &runtime,
-            hdu_id,
-            acm_os_application::ContestLibrarySeriesFilter::Exact(hdu_series.series_id),
-        )
-        .await
-        .expect("years exact");
-        assert_eq!(years_exact, vec![Some(2026)]);
-        assert_eq!(
-            acm_os_application::list_years(
-                &runtime,
-                nowcoder_id,
-                acm_os_application::ContestLibrarySeriesFilter::Exact(hdu_series.series_id),
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::SeriesFamilyMismatch)
-        );
-
-        let all = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::All,
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("all contests");
-        assert_eq!(
-            all.iter()
-                .filter(|item| item.contest.contest_id() == 5001)
-                .count(),
-            1
-        );
-        assert!(all.iter().any(|item| item.contest.contest_id() == 5002));
-        let family_all = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: hdu_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Any,
-                year: acm_os_application::ContestLibraryYearFilter::Any,
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("family contests");
-        assert_eq!(family_all.len(), 1);
-        assert_eq!(family_all[0].problem_count, 2);
-        assert_eq!(family_all[0].missing_snapshot_count, 1);
-        for series in [
-            acm_os_application::ContestLibrarySeriesFilter::Unassigned,
-            acm_os_application::ContestLibrarySeriesFilter::Exact(hdu_series.series_id),
-        ] {
-            let scoped = acm_os_application::list_library_contests(
-                &runtime,
-                acm_os_application::ContestLibraryScope::Family {
-                    family_id: hdu_id,
-                    series,
-                    year: acm_os_application::ContestLibraryYearFilter::Any,
-                },
-                acm_os_application::ContestLibraryArchiveFilter::All,
-            )
-            .await
-            .expect("series scoped contests");
-            assert_eq!(scoped.len(), 1);
-        }
-        let year_scoped = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: hdu_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Exact(hdu_series.series_id),
-                year: acm_os_application::ContestLibraryYearFilter::Exact(2026),
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("year scoped contests");
-        assert_eq!(year_scoped.len(), 1);
-        let unassigned_year_scoped = acm_os_application::list_library_contests(
-            &runtime,
-            acm_os_application::ContestLibraryScope::Family {
-                family_id: hdu_id,
-                series: acm_os_application::ContestLibrarySeriesFilter::Unassigned,
-                year: acm_os_application::ContestLibraryYearFilter::Unassigned,
-            },
-            acm_os_application::ContestLibraryArchiveFilter::All,
-        )
-        .await
-        .expect("unassigned year scoped contests");
-        assert_eq!(unassigned_year_scoped.len(), 1);
-
-        sqlx::query("UPDATE contests SET archived_at_utc = '2026-08-15T00:00:00Z' WHERE id = ?1")
-            .bind(contest_internal)
-            .execute(pool)
-            .await
-            .expect("archive contest");
-        assert_eq!(
-            acm_os_application::list_library_contests(
-                &runtime,
-                acm_os_application::ContestLibraryScope::All,
-                acm_os_application::ContestLibraryArchiveFilter::Active,
-            )
-            .await
-            .expect("active contests")
-            .iter()
-            .filter(|item| item.contest.contest_id() == 5001)
-            .count(),
-            0
-        );
-        assert_eq!(
-            acm_os_application::list_library_contests(
-                &runtime,
-                acm_os_application::ContestLibraryScope::All,
-                acm_os_application::ContestLibraryArchiveFilter::Archived,
-            )
-            .await
-            .expect("archived contests")
-            .iter()
-            .filter(|item| item.contest.contest_id() == 5001)
-            .count(),
-            1
-        );
-
-        let moved = acm_os_application::update_placement(
-            &runtime,
-            acm_os_application::UpdateContestPlacement {
-                placement_id: first.placement_id,
-                family_id: nowcoder_id,
-                series_id: Some(nowcoder_series.series_id),
-                year: Some(2025),
-                ordinal: Some(3),
-            },
-        )
-        .await
-        .expect("move placement");
-        assert_eq!(
-            (moved.family_id, moved.series_id, moved.year, moved.ordinal),
-            (
-                nowcoder_id,
-                Some(nowcoder_series.series_id),
-                Some(2025),
-                Some(3)
-            )
-        );
-        assert_eq!(
-            acm_os_application::update_placement(
-                &runtime,
-                acm_os_application::UpdateContestPlacement {
-                    placement_id: second.placement_id,
-                    family_id: nowcoder_id,
-                    series_id: Some(nowcoder_series.series_id),
-                    year: Some(2025),
-                    ordinal: Some(3),
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::DuplicatePlacement)
-        );
-        assert_eq!(
-            acm_os_application::update_placement(
-                &runtime,
-                acm_os_application::UpdateContestPlacement {
-                    placement_id: 999_999,
-                    family_id: hdu_id,
-                    series_id: None,
-                    year: None,
-                    ordinal: None,
-                },
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::PlacementNotFound)
-        );
-        acm_os_application::remove_placement(&runtime, first.placement_id)
-            .await
-            .expect("remove one placement");
-        acm_os_application::remove_placement(&runtime, second.placement_id)
-            .await
-            .expect("remove last placement");
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contests WHERE id = ?1")
-                .bind(contest_internal)
-                .fetch_one(pool)
-                .await
-                .expect("contest remains"),
-            1
-        );
-        assert_eq!(
-            acm_os_application::remove_placement(&runtime, second.placement_id).await,
-            Err(acm_os_application::ContestLibraryError::PlacementNotFound)
-        );
-        assert_eq!(no_placement_contest > 0, true);
-    }
-
-    #[tokio::test]
-    async fn contest_library_delete_contracts_preserve_atomic_taxonomy_boundaries() {
-        let directory = TempDir::new().expect("temporary app data");
-        let runtime = start_database(directory.path()).await;
-        let pool = runtime._pool.as_ref().expect("ready database pool");
-        let source = acm_os_application::create_family(&runtime, "Delete source")
-            .await
-            .expect("source family");
-        let replacement = acm_os_application::create_family(&runtime, "Delete replacement")
-            .await
-            .expect("replacement family");
-        let source_series =
-            acm_os_application::create_series(&runtime, source.family_id, "Source series")
-                .await
-                .expect("source series");
-        let replacement_series = acm_os_application::create_series(
-            &runtime,
-            replacement.family_id,
-            "Replacement series",
-        )
-        .await
-        .expect("replacement series");
-        let contest_row = insert_contest_row(pool, 7001).await;
-        let contest =
-            acm_os_domain::CodeforcesContestIdentity::new(7001).expect("contest identity");
-        let placement = acm_os_application::create_placement(
-            &runtime,
-            acm_os_application::CreateContestPlacement {
-                contest: contest.clone(),
-                family_id: source.family_id,
-                series_id: Some(source_series.series_id),
-                year: None,
-                ordinal: None,
-            },
-        )
-        .await
-        .expect("source placement");
-
-        assert_eq!(
-            acm_os_application::delete_family(&runtime, source.family_id, Some(999_999)).await,
-            Err(acm_os_application::ContestLibraryError::FamilyNotFound)
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT family_id FROM contest_placements WHERE id = ?1")
-                .bind(placement.placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("source placement after invalid family replacement"),
-            source.family_id
-        );
-
-        assert_eq!(
-            acm_os_application::delete_family(&runtime, source.family_id, None).await,
-            Err(acm_os_application::ContestLibraryError::FamilyInUse)
-        );
-        assert_eq!(
-            acm_os_application::delete_family(&runtime, source.family_id, Some(source.family_id))
-                .await,
-            Err(acm_os_application::ContestLibraryError::FamilyInUse)
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT family_id FROM contest_placements WHERE id = ?1")
-                .bind(placement.placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("source placement remains"),
-            source.family_id
-        );
-
-        acm_os_application::delete_family(&runtime, source.family_id, Some(replacement.family_id))
-            .await
-            .expect("replace and delete source family");
-        let moved: (i64, Option<i64>) =
-            sqlx::query_as("SELECT family_id, series_id FROM contest_placements WHERE id = ?1")
-                .bind(placement.placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("moved placement");
-        assert_eq!(moved, (replacement.family_id, None));
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM contest_series WHERE family_id = ?1"
-            )
-            .bind(source.family_id)
-            .fetch_one(pool)
-            .await
-            .expect("source series removed"),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_families WHERE id = ?1")
-                .bind(source.family_id)
-                .fetch_one(pool)
-                .await
-                .expect("source family removed"),
-            0
-        );
-
-        let unused_family = acm_os_application::create_family(&runtime, "Unused family")
-            .await
-            .expect("unused family");
-        let unused_series =
-            acm_os_application::create_series(&runtime, unused_family.family_id, "Unused series")
-                .await
-                .expect("unused series");
-        acm_os_application::delete_series(&runtime, unused_series.series_id, None)
-            .await
-            .expect("delete unused series");
-        acm_os_application::delete_family(&runtime, unused_family.family_id, None)
-            .await
-            .expect("delete unused family");
-
-        let series_placement = acm_os_application::create_placement(
-            &runtime,
-            acm_os_application::CreateContestPlacement {
-                contest,
-                family_id: replacement.family_id,
-                series_id: Some(replacement_series.series_id),
-                year: None,
-                ordinal: Some(2),
-            },
-        )
-        .await
-        .expect("replacement series placement");
-        assert_eq!(
-            acm_os_application::delete_series(
-                &runtime,
-                replacement_series.series_id,
-                Some(999_999)
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::SeriesNotFound)
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT series_id FROM contest_placements WHERE id = ?1")
-                .bind(series_placement.placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("source series after invalid replacement"),
-            replacement_series.series_id
-        );
-        assert_eq!(
-            acm_os_application::delete_series(
-                &runtime,
-                replacement_series.series_id,
-                Some(replacement_series.series_id)
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::SeriesInUse)
-        );
-        acm_os_application::delete_series(&runtime, replacement_series.series_id, None)
-            .await
-            .expect("unassign and delete series");
-        let series_after: Option<i64> =
-            sqlx::query_scalar("SELECT series_id FROM contest_placements WHERE id = ?1")
-                .bind(series_placement.placement_id)
-                .fetch_one(pool)
-                .await
-                .expect("series placement remains");
-        assert_eq!(series_after, None);
-
-        let migrate_source =
-            acm_os_application::create_series(&runtime, replacement.family_id, "Migrate source")
-                .await
-                .expect("migrate source series");
-        let migrate_target =
-            acm_os_application::create_series(&runtime, replacement.family_id, "Migrate target")
-                .await
-                .expect("migrate target series");
-        let migrate_placement = acm_os_application::create_placement(
-            &runtime,
-            acm_os_application::CreateContestPlacement {
-                contest: acm_os_domain::CodeforcesContestIdentity::new(7001)
-                    .expect("contest identity"),
-                family_id: replacement.family_id,
-                series_id: Some(migrate_source.series_id),
-                year: None,
-                ordinal: Some(3),
-            },
-        )
-        .await
-        .expect("migrate placement");
-        acm_os_application::delete_series(
-            &runtime,
-            migrate_source.series_id,
-            Some(migrate_target.series_id),
-        )
-        .await
-        .expect("migrate and delete series");
-        assert_eq!(
-            sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT series_id FROM contest_placements WHERE id = ?1"
-            )
-            .bind(migrate_placement.placement_id)
-            .fetch_one(pool)
-            .await
-            .expect("migrated series placement"),
-            Some(migrate_target.series_id)
-        );
-
-        let other = acm_os_application::create_family(&runtime, "Other family")
-            .await
-            .expect("other family");
-        let other_series =
-            acm_os_application::create_series(&runtime, other.family_id, "Other series")
-                .await
-                .expect("other series");
-        let replacement_series = acm_os_application::create_series(
-            &runtime,
-            replacement.family_id,
-            "Replacement series 2",
-        )
-        .await
-        .expect("replacement series 2");
-        assert_eq!(
-            acm_os_application::delete_series(
-                &runtime,
-                replacement_series.series_id,
-                Some(other_series.series_id)
-            )
-            .await,
-            Err(acm_os_application::ContestLibraryError::SeriesFamilyMismatch)
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_series WHERE id = ?1")
-                .bind(replacement_series.series_id)
-                .fetch_one(pool)
-                .await
-                .expect("failed delete is atomic"),
-            1
-        );
-        let _ = contest_row;
-    }
-
-    #[tokio::test]
     async fn known_legacy_m5_schema_upgrades_without_losing_today_or_learning_facts() {
         let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
         let day = acm_os_domain::LocalDate::parse_iso("2026-08-12").expect("day");
@@ -18716,7 +18236,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -19897,6 +19417,50 @@ mod tests {
         .await
         .expect("stored first snapshot");
         assert_eq!(stored, "<img src=\"acm-os-asset://fixture\">");
+    }
+
+    #[tokio::test]
+    async fn codeforces_import_creates_only_evidence_backed_year_entities_without_guessing_series()
+    {
+        let directory = TempDir::new().expect("temporary app data");
+        let runtime = start_database(directory.path()).await;
+        let contest = acm_os_domain::CodeforcesContestIdentity::new(3410).expect("contest");
+        let draft = ContestImportDraft::validated(
+            contest.clone(),
+            "Imported contest".to_owned(),
+            "https://codeforces.com/contest/3410".to_owned(),
+            Some("2027-03-04T05:06:07Z".to_owned()),
+            vec![ContestProblemSlotDraft {
+                ordinal: 1,
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(contest, "A")
+                    .expect("problem"),
+                title: "A".to_owned(),
+                rating: None,
+                source_url: "https://codeforces.com/contest/3410/problem/A".to_owned(),
+            }],
+        )
+        .expect("valid import draft");
+        runtime
+            .persist_manifest(&draft)
+            .await
+            .expect("persist manifest");
+        let pool = runtime._pool.as_ref().expect("ready database pool");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_years WHERE value = 2027",)
+                .fetch_one(pool)
+                .await
+                .expect("import-created year"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM contest_placements WHERE contest_id = (SELECT contest_id FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '3410')",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("no guessed placement"),
+            0
+        );
     }
 
     async fn seed_shared_import_problem(runtime: &DatabaseRuntime) {
@@ -23951,7 +23515,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
     }
 
@@ -24021,7 +23585,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -24054,7 +23618,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -24099,7 +23663,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -24264,7 +23828,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
     }
 
@@ -24958,7 +24522,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -25310,7 +24874,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -25344,7 +24908,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -26161,7 +25725,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -26592,7 +26156,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 33 }
+            &StartupGateStatus::Ready { schema_version: 34 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(

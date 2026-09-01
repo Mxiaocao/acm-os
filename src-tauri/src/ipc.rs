@@ -373,12 +373,20 @@ pub struct ContestLibrarySeriesDto {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContestLibraryYearDto {
+    year_id: i64,
+    value: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContestLibraryPlacementDto {
     placement_id: i64,
     family_id: i64,
     family_name: String,
     series_id: Option<i64>,
     series_name: Option<String>,
+    year_id: Option<i64>,
     year: Option<u32>,
     ordinal: Option<u32>,
 }
@@ -387,7 +395,6 @@ pub struct ContestLibraryPlacementDto {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ContestLibrarySeriesFilterDto {
     Any,
-    Unassigned,
     Exact {
         #[serde(rename = "seriesId")]
         series_id: i64,
@@ -398,8 +405,10 @@ pub enum ContestLibrarySeriesFilterDto {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ContestLibraryYearFilterDto {
     Any,
-    Unassigned,
-    Exact { year: u32 },
+    Exact {
+        #[serde(rename = "yearId")]
+        year_id: i64,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -478,11 +487,31 @@ pub struct ContestLibraryYearsInput {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContestLibraryYearInput {
+    value: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryYearRenameInput {
+    year_id: i64,
+    value: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContestLibraryYearDeleteInput {
+    year_id: i64,
+    replacement_year_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContestLibraryPlacementInput {
     contest_id: u64,
     family_id: i64,
     series_id: Option<i64>,
-    year: Option<u32>,
+    year_id: Option<i64>,
     ordinal: Option<u32>,
 }
 
@@ -492,7 +521,7 @@ pub struct ContestLibraryPlacementUpdateInput {
     placement_id: i64,
     family_id: i64,
     series_id: Option<i64>,
-    year: Option<u32>,
+    year_id: Option<i64>,
     ordinal: Option<u32>,
 }
 
@@ -1758,13 +1787,78 @@ pub async fn contest_library_delete_series(
 }
 
 #[tauri::command]
+pub async fn contest_library_list_year_entities(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+) -> Result<Vec<ContestLibraryYearDto>, &'static str> {
+    acm_os_application::list_year_entities(database.inner())
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| ContestLibraryYearDto {
+                    year_id: item.year_id,
+                    value: item.value,
+                })
+                .collect()
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_create_year(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryYearInput,
+) -> Result<ContestLibraryYearDto, &'static str> {
+    acm_os_application::create_year(database.inner(), input.value)
+        .await
+        .map(|item| ContestLibraryYearDto {
+            year_id: item.year_id,
+            value: item.value,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_rename_year(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryYearRenameInput,
+) -> Result<ContestLibraryYearDto, &'static str> {
+    acm_os_application::rename_year(database.inner(), input.year_id, input.value)
+        .await
+        .map(|item| ContestLibraryYearDto {
+            year_id: item.year_id,
+            value: item.value,
+        })
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
+pub async fn contest_library_delete_year(
+    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    input: ContestLibraryYearDeleteInput,
+) -> Result<(), &'static str> {
+    acm_os_application::delete_year(database.inner(), input.year_id, input.replacement_year_id)
+        .await
+        .map_err(contest_library_error_code)
+}
+
+#[tauri::command]
 pub async fn contest_library_list_years(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     input: ContestLibraryYearsInput,
-) -> Result<Vec<Option<u32>>, &'static str> {
+) -> Result<Vec<ContestLibraryYearDto>, &'static str> {
     let series = contest_library_series_filter(input.series)?;
     acm_os_application::list_years(database.inner(), input.family_id, series)
         .await
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| ContestLibraryYearDto {
+                    year_id: item.year_id,
+                    value: item.value,
+                })
+                .collect()
+        })
         .map_err(contest_library_error_code)
 }
 
@@ -1786,6 +1880,7 @@ pub async fn contest_library_list_contest_placements(
                     family_name: item.family_name,
                     series_id: item.series_id,
                     series_name: item.series_name,
+                    year_id: item.year_id,
                     year: item.year,
                     ordinal: item.ordinal,
                 })
@@ -1807,7 +1902,8 @@ pub async fn contest_library_create_placement(
             contest,
             family_id: input.family_id,
             series_id: input.series_id,
-            year: input.year,
+            year_id: input.year_id,
+            year: None,
             ordinal: input.ordinal,
         },
     )
@@ -1827,7 +1923,8 @@ pub async fn contest_library_update_placement(
             placement_id: input.placement_id,
             family_id: input.family_id,
             series_id: input.series_id,
-            year: input.year,
+            year_id: input.year_id,
+            year: None,
             ordinal: input.ordinal,
         },
     )
@@ -3482,9 +3579,6 @@ fn contest_library_series_filter(
 ) -> Result<acm_os_application::ContestLibrarySeriesFilter, &'static str> {
     Ok(match value {
         ContestLibrarySeriesFilterDto::Any => acm_os_application::ContestLibrarySeriesFilter::Any,
-        ContestLibrarySeriesFilterDto::Unassigned => {
-            acm_os_application::ContestLibrarySeriesFilter::Unassigned
-        }
         ContestLibrarySeriesFilterDto::Exact { series_id } => {
             if series_id <= 0 {
                 return Err("invalid_contest_library_id");
@@ -3499,14 +3593,11 @@ fn contest_library_year_filter(
 ) -> Result<acm_os_application::ContestLibraryYearFilter, &'static str> {
     Ok(match value {
         ContestLibraryYearFilterDto::Any => acm_os_application::ContestLibraryYearFilter::Any,
-        ContestLibraryYearFilterDto::Unassigned => {
-            acm_os_application::ContestLibraryYearFilter::Unassigned
-        }
-        ContestLibraryYearFilterDto::Exact { year } => {
-            if year == 0 {
+        ContestLibraryYearFilterDto::Exact { year_id } => {
+            if year_id <= 0 {
                 return Err("invalid_year");
             }
-            acm_os_application::ContestLibraryYearFilter::Exact(year)
+            acm_os_application::ContestLibraryYearFilter::Exact(year_id)
         }
     })
 }
@@ -3556,6 +3647,7 @@ fn contest_library_placement_dto(
         family_name: item.family_name,
         series_id: item.series_id,
         series_name: item.series_name,
+        year_id: item.year_id,
         year: item.year,
         ordinal: item.ordinal,
     }
@@ -3577,6 +3669,9 @@ fn contest_library_error_code(error: acm_os_application::ContestLibraryError) ->
         acm_os_application::ContestLibraryError::SeriesFamilyMismatch => "series_family_mismatch",
         acm_os_application::ContestLibraryError::FamilyInUse => "family_in_use",
         acm_os_application::ContestLibraryError::SeriesInUse => "series_in_use",
+        acm_os_application::ContestLibraryError::YearNotFound => "year_not_found",
+        acm_os_application::ContestLibraryError::DuplicateYearValue => "duplicate_year_value",
+        acm_os_application::ContestLibraryError::YearInUse => "year_in_use",
         acm_os_application::ContestLibraryError::PersistenceUnavailable => {
             "contest_library_persistence_unavailable"
         }
@@ -5471,16 +5566,16 @@ mod tests {
         let scope: ContestLibraryScopeDto = serde_json::from_value(json!({
             "kind": "family",
             "familyId": 3,
-            "series": { "kind": "unassigned" },
-            "year": { "kind": "exact", "year": 2026 }
+            "series": { "kind": "exact", "seriesId": 42 },
+            "year": { "kind": "exact", "yearId": 17 }
         }))
         .expect("deserialize family scope");
         assert_eq!(
             contest_library_scope(scope),
             Ok(acm_os_application::ContestLibraryScope::Family {
                 family_id: 3,
-                series: acm_os_application::ContestLibrarySeriesFilter::Unassigned,
-                year: acm_os_application::ContestLibraryYearFilter::Exact(2026),
+                series: acm_os_application::ContestLibrarySeriesFilter::Exact(42),
+                year: acm_os_application::ContestLibraryYearFilter::Exact(17),
             })
         );
 
@@ -5490,6 +5585,7 @@ mod tests {
             family_name: "Codeforces".to_owned(),
             series_id: None,
             series_name: None,
+            year_id: Some(17),
             year: Some(2026),
             ordinal: None,
         });
@@ -5501,6 +5597,7 @@ mod tests {
                 "familyName": "Codeforces",
                 "seriesId": null,
                 "seriesName": null,
+                "yearId": 17,
                 "year": 2026,
                 "ordinal": null
             })
@@ -5516,6 +5613,7 @@ mod tests {
                     family_name: "Codeforces".to_owned(),
                     series_id: Some(7),
                     series_name: Some("Summer".to_owned()),
+                    year_id: None,
                     year: None,
                     ordinal: Some(1),
                 },
@@ -5525,6 +5623,7 @@ mod tests {
                     family_name: "XCPC".to_owned(),
                     series_id: None,
                     series_name: None,
+                    year_id: Some(17),
                     year: Some(2026),
                     ordinal: None,
                 },
@@ -5546,6 +5645,7 @@ mod tests {
                         "familyName": "Codeforces",
                         "seriesId": 7,
                         "seriesName": "Summer",
+                        "yearId": null,
                         "year": null,
                         "ordinal": 1
                     },
@@ -5555,6 +5655,7 @@ mod tests {
                         "familyName": "XCPC",
                         "seriesId": null,
                         "seriesName": null,
+                        "yearId": 17,
                         "year": 2026,
                         "ordinal": null
                     }
