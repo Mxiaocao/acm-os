@@ -32,6 +32,7 @@ import {
   loadKnowledgeCandidatesById,
   loadKnowledgeReevaluationSuggestion,
   openObsidianGraph,
+  type ObsidianGraphOpenResult,
   openKnowledgeInObsidian,
   rebindKnowledgeNode,
   resolveKnowledgeIdentityConflict,
@@ -1229,6 +1230,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const [deletePreviewNodeId, setDeletePreviewNodeId] = useState<string | null>(null);
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [openingGraph, setOpeningGraph] = useState(false);
+  const [graphNotice, setGraphNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async (nextQuery = query) => {
     setLoading(true);
@@ -1343,8 +1345,10 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
   const openGraph = async () => {
     setOpeningGraph(true);
     setError(null);
+    setGraphNotice(null);
     try {
-      await openObsidianGraph();
+      const result: ObsidianGraphOpenResult = await openObsidianGraph();
+      if (result === "submittedUnconfirmed") setGraphNotice(t("knowledge.graphSubmittedUnconfirmed"));
     } catch (error) {
       setError(error === "obsidian_cli_disabled" ? t("knowledge.graphCliDisabled") : t("knowledge.graphOpenError"));
     } finally {
@@ -1366,6 +1370,7 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
           <div><input id="knowledge-search" onChange={(event) => setQuery(event.currentTarget.value)} value={query} /><button type="submit">搜索</button></div>
         </form>
         {error ? <p aria-live="polite" className="error-copy">{error}</p> : null}
+        {graphNotice ? <p aria-live="polite" className="safe-note">{graphNotice}</p> : null}
         {!loading && !error && nodes.length === 0 ? <p className="safe-note">没有找到匹配的 Markdown 文件。</p> : null}
         <ul className="knowledge-node-list">
           {nodes.map((node) => <li key={node.knowledgeNodeId}><button className="list-link" onClick={() => void openDetail(node)} type="button"><strong>{node.displayName}</strong><span>{node.vaultRelativePath}</span></button></li>)}

@@ -2724,7 +2724,7 @@ pub async fn open_knowledge_in_obsidian(
 pub async fn open_obsidian_graph(
     database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
     app: tauri::AppHandle,
-) -> Result<(), &'static str> {
+) -> Result<ObsidianGraphOpenResult, &'static str> {
     use acm_os_application::WorkspaceConfigurationPort;
     use tauri_plugin_opener::OpenerExt;
 
@@ -2735,17 +2735,13 @@ pub async fn open_obsidian_graph(
         .ok_or("workspace_unavailable")?;
     let vault_name = obsidian_vault_name(workspace.active_vault_path())?;
     let first_attempt = run_obsidian_graph_command(&vault_name);
-    if first_attempt.is_ok() {
-        return Ok(());
-    }
-    if matches!(
-        first_attempt,
-        Err(ObsidianGraphCommandError::AcceptedAfterTimeout)
-    ) {
-        return Ok(());
-    }
-    if matches!(first_attempt, Err(ObsidianGraphCommandError::CliDisabled)) {
-        return Err("obsidian_cli_disabled");
+    match first_attempt {
+        Ok(()) => return Ok(ObsidianGraphOpenResult::ConfirmedSuccess),
+        Err(ObsidianGraphCommandError::SubmittedUnconfirmed) => {
+            return Ok(ObsidianGraphOpenResult::SubmittedUnconfirmed)
+        }
+        Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
+        Err(_) => {}
     }
 
     // The CLI talks to an already-running Obsidian instance. Open the configured
@@ -2759,7 +2755,10 @@ pub async fn open_obsidian_graph(
         std::thread::sleep(OBSIDIAN_STARTUP_RETRY_INTERVAL);
         let result = run_obsidian_graph_command(&vault_name);
         match result {
-            Ok(()) | Err(ObsidianGraphCommandError::AcceptedAfterTimeout) => return Ok(()),
+            Ok(()) => return Ok(ObsidianGraphOpenResult::ConfirmedSuccess),
+            Err(ObsidianGraphCommandError::SubmittedUnconfirmed) => {
+                return Ok(ObsidianGraphOpenResult::SubmittedUnconfirmed)
+            }
             Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
             Err(_) => {}
         }
@@ -3325,9 +3324,16 @@ const OBSIDIAN_STARTUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObsidianGraphCommandError {
     Unavailable,
-    AcceptedAfterTimeout,
+    SubmittedUnconfirmed,
     CliDisabled,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ObsidianGraphOpenResult {
+    ConfirmedSuccess,
+    SubmittedUnconfirmed,
 }
 
 fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphCommandError> {
@@ -3366,7 +3372,7 @@ fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphComma
 fn map_obsidian_command_error(error: CommandOutputError) -> ObsidianGraphCommandError {
     match error {
         CommandOutputError::NotFound => ObsidianGraphCommandError::Unavailable,
-        CommandOutputError::TimedOut => ObsidianGraphCommandError::AcceptedAfterTimeout,
+        CommandOutputError::TimedOut => ObsidianGraphCommandError::SubmittedUnconfirmed,
         CommandOutputError::Failed => ObsidianGraphCommandError::Failed,
     }
 }
@@ -5590,8 +5596,9 @@ mod tests {
         validate_reward_intent_id, workspace_error_dto, workspace_status_dto,
         CanonicalProblemDetailDto, CommandOutputError, CompleteReviewInput, ContestLibraryScopeDto,
         ContestLibrarySeriesFilterDto, LightweightProblemDetailDto, ObsidianGraphCommandError,
-        PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
-        StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
+        ObsidianGraphOpenResult, PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto,
+        ReviewFailureReasonInput, StatementReadStateDto, TodayExtraSuggestionsPreviewDto,
+        TodayReplanPreviewDto,
     };
 
     #[test]
@@ -6446,14 +6453,26 @@ mod tests {
     }
 
     #[test]
-    fn graph_cli_timeout_is_an_accepted_submission_for_runtime_flow() {
+    fn graph_cli_timeout_is_an_unconfirmed_submission_for_runtime_flow() {
         assert_eq!(
             map_obsidian_command_error(CommandOutputError::TimedOut),
-            ObsidianGraphCommandError::AcceptedAfterTimeout
+            ObsidianGraphCommandError::SubmittedUnconfirmed
         );
         assert_eq!(
             map_obsidian_command_error(CommandOutputError::Failed),
             ObsidianGraphCommandError::Failed
+        );
+    }
+
+    #[test]
+    fn graph_open_results_keep_confirmed_and_unconfirmed_states_distinct() {
+        assert_eq!(
+            serde_json::to_value(ObsidianGraphOpenResult::ConfirmedSuccess).unwrap(),
+            serde_json::json!("confirmedSuccess")
+        );
+        assert_eq!(
+            serde_json::to_value(ObsidianGraphOpenResult::SubmittedUnconfirmed).unwrap(),
+            serde_json::json!("submittedUnconfirmed")
         );
     }
 
