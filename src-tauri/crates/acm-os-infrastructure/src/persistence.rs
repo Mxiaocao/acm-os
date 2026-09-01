@@ -13672,7 +13672,7 @@ mod tests {
 
     #[test]
     fn production_migrator_embeds_the_special_version() {
-        assert_eq!(supported_schema_version(), 33);
+        assert_eq!(supported_schema_version(), 34);
         assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
@@ -13880,11 +13880,11 @@ mod tests {
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            33
+            34
         );
-        validate_schema_contract(&runtime_pool, 33)
+        validate_schema_contract(&runtime_pool, 34)
             .await
-            .expect("schema 33 contract");
+            .expect("schema 34 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -16754,6 +16754,10 @@ mod tests {
              DROP TABLE scheduled_review_ordinal_facts;\
              DROP TABLE scheduled_review_ordinal_states;\
              DROP TABLE problem_completion_occurrences;\
+             DROP INDEX contest_placements_by_year;\
+             DROP INDEX contest_placements_unique_identity;\
+             ALTER TABLE contest_placements DROP COLUMN year_id;\
+             DROP TABLE contest_years;\
              CREATE TABLE _contests_schema_25 (\
                  id INTEGER PRIMARY KEY,\
                  platform TEXT NOT NULL CHECK (platform = 'codeforces'),\
@@ -16795,12 +16799,19 @@ mod tests {
              ALTER TABLE _contests_schema_25 RENAME TO contests;\
              DROP TABLE problems;\
              ALTER TABLE _problems_schema_25 RENAME TO problems;\
-             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 33;\
+             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 34;\
              UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
         )
         .execute(&mut *transaction)
         .await
         .expect("rewrite schema 25 fixture");
+        sqlx::query(
+            "CREATE UNIQUE INDEX contest_placements_unique_identity ON contest_placements \
+             (contest_id, family_id, COALESCE(series_id, 0), COALESCE(year, 0), COALESCE(ordinal, 0))",
+        )
+        .execute(&mut *transaction)
+        .await
+        .expect("restore schema 25 placement identity index");
         transaction
             .commit()
             .await
@@ -17317,7 +17328,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("highest successful migration"),
-            33
+            34
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -18271,7 +18282,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-33-"));
+            .starts_with("schema-10-to-34-"));
     }
 
     #[tokio::test]
@@ -24040,7 +24051,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 33);
+        assert_eq!(preview.supported_schema_version, 34);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -24614,7 +24625,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-33-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-34-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -24747,7 +24758,7 @@ mod tests {
             .await
             .expect("recreate metadata with hidden constraint");
             pool.execute(
-                "INSERT INTO app_metadata SELECT singleton, schema_generation, created_at_utc \
+                "INSERT INTO app_metadata SELECT singleton, 33, created_at_utc \
                  FROM app_metadata_old",
             )
             .await
