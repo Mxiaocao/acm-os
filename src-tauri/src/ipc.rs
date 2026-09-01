@@ -5729,24 +5729,21 @@ mod tests {
 
     use super::{
         app_shell_status_dto, classify_obsidian_cli_failure, command_output_with_timeout,
-        contest_library_error_code, contest_library_placement_dto,
-        contest_library_scope, contest_library_series_filter, contest_shelf_item_dto,
-        knowledge_index_error_code, knowledge_understanding_dto, knowledge_understanding_level,
-        map_obsidian_command_error, normalize_windows_verbatim_path,
-        obsidian_cli_candidates_from_sources, obsidian_cli_response_is_success,
-        obsidian_graph_args, obsidian_open_uri, obsidian_vault_name, obsidian_vault_uri,
-        parse_review_completion_input,
+        contest_library_error_code, contest_library_placement_dto, contest_library_scope,
+        contest_library_series_filter, contest_shelf_item_dto, knowledge_index_error_code,
+        knowledge_understanding_dto, knowledge_understanding_level, map_obsidian_command_error,
+        normalize_windows_verbatim_path, obsidian_cli_candidates_from_sources,
+        obsidian_cli_response_is_success, obsidian_graph_args, obsidian_open_uri,
+        obsidian_vault_name, obsidian_vault_uri, parse_review_completion_input,
         personal_note_read_state_dto, problem_lifecycle_state_dto, redemption_disposition,
         redemption_history_item_dto, redemption_result_dto, refund_disposition, refund_result_dto,
         revealed_review_help_dto, review_action_dto, review_focus_dto, review_help_drawer_dto,
         reward_account_summary_dto, startup_status_dto, validate_reward_intent_id,
         workspace_error_dto, workspace_status_dto, CanonicalProblemDetailDto, CommandOutputError,
-        CompleteReviewInput,
-        ContestLibraryScopeDto, ContestLibrarySeriesFilterDto, LightweightProblemDetailDto,
-        ObsidianGraphCommandError, ObsidianGraphOpenResult, PersonalNoteRelocationCandidateDto,
-        ProblemLifecycleStateDto, ReviewFailureReasonInput,
+        CompleteReviewInput, ContestLibraryScopeDto, ContestLibrarySeriesFilterDto,
+        LightweightProblemDetailDto, ObsidianGraphCommandError, ObsidianGraphOpenResult,
+        PersonalNoteRelocationCandidateDto, ProblemLifecycleStateDto, ReviewFailureReasonInput,
         StatementReadStateDto, TodayExtraSuggestionsPreviewDto, TodayReplanPreviewDto,
-        TodayReplanPreviewDto,
     };
 
     #[test]
