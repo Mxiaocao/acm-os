@@ -2739,8 +2739,11 @@ pub async fn open_obsidian_graph(
     if first_attempt.is_ok() {
         return Ok(());
     }
-    if matches!(first_attempt, Err(ObsidianGraphCommandError::TimedOut)) {
-        return Err("obsidian_graph_open_failed");
+    if matches!(
+        first_attempt,
+        Err(ObsidianGraphCommandError::AcceptedAfterTimeout)
+    ) {
+        return Ok(());
     }
     if matches!(first_attempt, Err(ObsidianGraphCommandError::CliDisabled)) {
         return Err("obsidian_cli_disabled");
@@ -2757,7 +2760,7 @@ pub async fn open_obsidian_graph(
         std::thread::sleep(OBSIDIAN_STARTUP_RETRY_INTERVAL);
         match run_obsidian_graph_command(&vault_name) {
             Ok(()) => return Ok(()),
-            Err(ObsidianGraphCommandError::TimedOut) => break,
+            Err(ObsidianGraphCommandError::AcceptedAfterTimeout) => return Ok(()),
             Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
             Err(_) => {}
         }
@@ -3323,7 +3326,7 @@ const OBSIDIAN_STARTUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObsidianGraphCommandError {
     Unavailable,
-    TimedOut,
+    AcceptedAfterTimeout,
     CliDisabled,
     Failed,
 }
@@ -3351,11 +3354,18 @@ fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphComma
             }
             Ok(_) => continue,
             Err(CommandOutputError::NotFound) => continue,
-            Err(CommandOutputError::TimedOut) => return Err(ObsidianGraphCommandError::TimedOut),
-            Err(CommandOutputError::Failed) => return Err(ObsidianGraphCommandError::Failed),
+            Err(error) => return Err(map_obsidian_command_error(error)),
         }
     }
     Err(ObsidianGraphCommandError::Unavailable)
+}
+
+fn map_obsidian_command_error(error: CommandOutputError) -> ObsidianGraphCommandError {
+    match error {
+        CommandOutputError::NotFound => ObsidianGraphCommandError::Unavailable,
+        CommandOutputError::TimedOut => ObsidianGraphCommandError::AcceptedAfterTimeout,
+        CommandOutputError::Failed => ObsidianGraphCommandError::Failed,
+    }
 }
 
 fn obsidian_graph_args(vault_name: &str) -> [String; 3] {
@@ -5478,7 +5488,7 @@ mod tests {
         app_shell_status_dto, classify_obsidian_cli_failure, command_output_with_timeout,
         contest_library_error_code, contest_library_placement_dto, contest_library_scope,
         contest_library_series_filter, knowledge_index_error_code, knowledge_understanding_dto,
-        knowledge_understanding_level, normalize_windows_verbatim_path,
+        knowledge_understanding_level, map_obsidian_command_error, normalize_windows_verbatim_path,
         obsidian_cli_candidates_from_sources, obsidian_cli_response_is_success,
         obsidian_graph_args, obsidian_open_uri, obsidian_vault_name, obsidian_vault_uri,
         parse_review_completion_input, personal_note_read_state_dto, problem_lifecycle_state_dto,
@@ -6334,6 +6344,18 @@ mod tests {
 
         assert_eq!(result, Err(CommandOutputError::TimedOut));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn graph_cli_timeout_is_an_accepted_submission_for_runtime_flow() {
+        assert_eq!(
+            map_obsidian_command_error(CommandOutputError::TimedOut),
+            ObsidianGraphCommandError::AcceptedAfterTimeout
+        );
+        assert_eq!(
+            map_obsidian_command_error(CommandOutputError::Failed),
+            ObsidianGraphCommandError::Failed
+        );
     }
 
     #[test]
