@@ -2647,6 +2647,26 @@ test("Knowledge reports an Obsidian Graph open failure without hiding the page",
   } finally { await view.cleanup(); }
 });
 
+test("Knowledge reports disabled Obsidian CLI with actionable guidance", {
+  concurrency: false,
+}, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "knowledge_index") return { nodes: [], locationAnomalies: [], identityConflicts: [] };
+    if (command === "open_obsidian_graph") throw "obsidian_cli_disabled";
+    throw new Error(`unexpected command ${command}`);
+  }, "/knowledge");
+  try {
+    const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "鎵撳紑 Obsidian 鍥捐氨");
+    await act(async () => openGraph.click()); await settle();
+    assert.match(view.document.body.textContent, /Obsidian/);
+    assert.match(view.document.body.textContent, /鍛戒护琛岀晫闈?/);
+    assert.match(view.document.body.textContent, /璁剧疆/);
+    assert.match(view.document.body.textContent, /閲嶈瘯/);
+  } finally { await view.cleanup(); }
+});
+
 test("Knowledge location anomaly requires explicit candidate selection before rebind", {
   concurrency: false,
 }, async () => {

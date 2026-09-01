@@ -1345,8 +1345,8 @@ function KnowledgePage({ navigate }: { navigate: Navigate }) {
     setError(null);
     try {
       await openObsidianGraph();
-    } catch {
-      setError(t("knowledge.graphOpenError"));
+    } catch (error) {
+      setError(error === "obsidian_cli_disabled" ? t("knowledge.graphCliDisabled") : t("knowledge.graphOpenError"));
     } finally {
       setOpeningGraph(false);
     }
