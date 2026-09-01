@@ -21,25 +21,29 @@ export interface ContestLibrarySeriesDto {
   displayName: string;
 }
 
+export interface ContestLibraryYearDto {
+  yearId: number;
+  value: number;
+}
+
 export interface ContestLibraryPlacementDto {
   placementId: number;
   familyId: number;
   familyName: string;
   seriesId: number | null;
   seriesName: string | null;
+  yearId: number | null;
   year: number | null;
   ordinal: number | null;
 }
 
 export type ContestLibrarySeriesFilterDto =
   | { kind: "any" }
-  | { kind: "unassigned" }
   | { kind: "exact"; seriesId: number };
 
 export type ContestLibraryYearFilterDto =
   | { kind: "any" }
-  | { kind: "unassigned" }
-  | { kind: "exact"; year: number };
+  | { kind: "exact"; yearId: number };
 
 export type ContestLibraryScopeDto =
   | { kind: "all" }
@@ -415,11 +419,24 @@ export function deleteContestLibrarySeries(seriesId: number, replacementSeriesId
   return invoke<void>("contest_library_delete_series", { input: { seriesId, replacementSeriesId } });
 }
 
+export function listContestLibraryYearEntities(): Promise<ContestLibraryYearDto[]> {
+  return invoke<ContestLibraryYearDto[]>("contest_library_list_year_entities");
+}
+export function createContestLibraryYear(value: number): Promise<ContestLibraryYearDto> {
+  return invoke<ContestLibraryYearDto>("contest_library_create_year", { input: { value } });
+}
+export function renameContestLibraryYear(yearId: number, value: number): Promise<ContestLibraryYearDto> {
+  return invoke<ContestLibraryYearDto>("contest_library_rename_year", { input: { yearId, value } });
+}
+export function deleteContestLibraryYear(yearId: number, replacementYearId: number | null): Promise<void> {
+  return invoke<void>("contest_library_delete_year", { input: { yearId, replacementYearId } });
+}
+
 export function listContestLibraryYears(
   familyId: number,
   series: ContestLibrarySeriesFilterDto,
-): Promise<Array<number | null>> {
-  return invoke<Array<number | null>>("contest_library_list_years", {
+): Promise<ContestLibraryYearDto[]> {
+  return invoke<ContestLibraryYearDto[]>("contest_library_list_years", {
     input: { familyId, series },
   });
 }
@@ -436,7 +453,7 @@ export function createContestLibraryPlacement(input: {
   contestId: number;
   familyId: number;
   seriesId: number | null;
-  year: number | null;
+  yearId: number | null;
   ordinal: number | null;
 }): Promise<ContestLibraryPlacementDto> {
   return invoke<ContestLibraryPlacementDto>("contest_library_create_placement", { input });
@@ -446,7 +463,7 @@ export function updateContestLibraryPlacement(input: {
   placementId: number;
   familyId: number;
   seriesId: number | null;
-  year: number | null;
+  yearId: number | null;
   ordinal: number | null;
 }): Promise<ContestLibraryPlacementDto> {
   return invoke<ContestLibraryPlacementDto>("contest_library_update_placement", { input });
