@@ -2734,7 +2734,6 @@ pub async fn open_obsidian_graph(
         .map_err(|_| "workspace_unavailable")?
         .ok_or("workspace_unavailable")?;
     let vault_name = obsidian_vault_name(workspace.active_vault_path())?;
-
     let first_attempt = run_obsidian_graph_command(&vault_name);
     if first_attempt.is_ok() {
         return Ok(());
@@ -2758,9 +2757,9 @@ pub async fn open_obsidian_graph(
         .map_err(|_| "obsidian_graph_open_failed")?;
     for _ in 0..OBSIDIAN_STARTUP_RETRY_COUNT {
         std::thread::sleep(OBSIDIAN_STARTUP_RETRY_INTERVAL);
-        match run_obsidian_graph_command(&vault_name) {
-            Ok(()) => return Ok(()),
-            Err(ObsidianGraphCommandError::AcceptedAfterTimeout) => return Ok(()),
+        let result = run_obsidian_graph_command(&vault_name);
+        match result {
+            Ok(()) | Err(ObsidianGraphCommandError::AcceptedAfterTimeout) => return Ok(()),
             Err(ObsidianGraphCommandError::CliDisabled) => return Err("obsidian_cli_disabled"),
             Err(_) => {}
         }
@@ -3341,7 +3340,7 @@ fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphComma
                     &String::from_utf8_lossy(&output.stderr),
                 ) == Some(ObsidianGraphCommandError::CliDisabled) =>
             {
-                return Err(ObsidianGraphCommandError::CliDisabled)
+                return Err(ObsidianGraphCommandError::CliDisabled);
             }
             Ok(output)
                 if obsidian_cli_response_is_success(
@@ -3350,11 +3349,15 @@ fn run_obsidian_graph_command(vault_name: &str) -> Result<(), ObsidianGraphComma
                     &String::from_utf8_lossy(&output.stderr),
                 ) =>
             {
-                return Ok(())
+                return Ok(());
             }
-            Ok(_) => continue,
+            Ok(_) => {
+                continue;
+            }
             Err(CommandOutputError::NotFound) => continue,
-            Err(error) => return Err(map_obsidian_command_error(error)),
+            Err(error) => {
+                return Err(map_obsidian_command_error(error));
+            }
         }
     }
     Err(ObsidianGraphCommandError::Unavailable)
@@ -3390,22 +3393,35 @@ fn obsidian_cli_candidates() -> Vec<std::path::PathBuf> {
     {
         return obsidian_cli_candidates_from_sources(
             path_directories,
+            running_obsidian_executable_paths(),
             obsidian_standard_installation_roots(),
         );
     }
     #[cfg(not(windows))]
     {
-        obsidian_cli_candidates_from_sources(path_directories, Vec::new())
+        obsidian_cli_candidates_from_sources(path_directories, Vec::new(), Vec::new())
     }
 }
 
 fn obsidian_cli_candidates_from_sources(
     path_directories: Vec<std::path::PathBuf>,
+    running_executables: Vec<std::path::PathBuf>,
     installation_roots: Vec<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
     for directory in path_directories {
         push_obsidian_com_candidate(&mut candidates, directory.join("Obsidian.com"));
+    }
+    for executable in running_executables {
+        if executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.exe"))
+        {
+            if let Some(parent) = executable.parent() {
+                push_obsidian_com_candidate(&mut candidates, parent.join("Obsidian.com"));
+            }
+        }
     }
     for root in installation_roots {
         push_obsidian_com_candidate(&mut candidates, root.join("Obsidian/Obsidian.com"));
@@ -3437,6 +3453,82 @@ fn obsidian_standard_installation_roots() -> Vec<std::path::PathBuf> {
         .filter_map(std::env::var_os)
         .map(std::path::PathBuf::from)
         .collect()
+}
+
+#[cfg(windows)]
+fn running_obsidian_executable_paths() -> Vec<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const PROCESS_ID_CAPACITY: usize = 4096;
+
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn EnumProcesses(process_ids: *mut u32, bytes: u32, bytes_returned: *mut u32) -> i32;
+        fn GetModuleFileNameExW(
+            process: *mut std::ffi::c_void,
+            module: *mut std::ffi::c_void,
+            filename: *mut u16,
+            size: u32,
+        ) -> u32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    let mut process_ids = vec![0_u32; PROCESS_ID_CAPACITY];
+    let mut bytes_returned = 0_u32;
+    let enumerated = unsafe {
+        EnumProcesses(
+            process_ids.as_mut_ptr(),
+            (process_ids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut bytes_returned,
+        )
+    };
+    if enumerated == 0 {
+        return Vec::new();
+    }
+
+    let count = (bytes_returned as usize / std::mem::size_of::<u32>()).min(process_ids.len());
+    let mut paths = Vec::new();
+    for process_id in process_ids.into_iter().take(count).filter(|id| *id != 0) {
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                0,
+                process_id,
+            )
+        };
+        if process.is_null() {
+            continue;
+        }
+        let mut buffer = [0_u16; 1024];
+        let length = unsafe {
+            GetModuleFileNameExW(
+                process,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+        unsafe { CloseHandle(process) };
+        if length == 0 {
+            continue;
+        }
+        let path = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+        let path = std::path::PathBuf::from(path);
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("obsidian.exe"))
+        {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6311,18 +6403,25 @@ mod tests {
     fn graph_cli_candidates_are_absolute_com_and_preserve_source_precedence() {
         let sandbox = tempfile::tempdir().expect("temporary executable directory");
         let path_directory = sandbox.path().join("path");
+        let running_directory = sandbox.path().join("running");
         let install_root = sandbox.path().join("localappdata");
         std::fs::create_dir_all(&path_directory).expect("path directory");
+        std::fs::create_dir_all(&running_directory).expect("running directory");
         std::fs::create_dir_all(install_root.join("Obsidian")).expect("install directory");
         let path_cli = path_directory.join("Obsidian.com");
+        let running_cli = running_directory.join("Obsidian.com");
         let installed_cli = install_root.join("Obsidian/Obsidian.com");
         std::fs::write(&path_cli, []).expect("path cli");
+        std::fs::write(&running_cli, []).expect("running cli");
         std::fs::write(&installed_cli, []).expect("installed cli");
 
-        let candidates =
-            obsidian_cli_candidates_from_sources(vec![path_directory], vec![install_root]);
+        let candidates = obsidian_cli_candidates_from_sources(
+            vec![path_directory],
+            vec![running_directory.join("Obsidian.exe")],
+            vec![install_root],
+        );
 
-        assert_eq!(candidates, vec![path_cli, installed_cli]);
+        assert_eq!(candidates, vec![path_cli, running_cli, installed_cli]);
         assert!(candidates.iter().all(|candidate| candidate.is_absolute()));
         assert!(candidates.iter().all(|candidate| {
             candidate
