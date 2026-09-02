@@ -52,6 +52,15 @@ test("Contest taxonomy destructive workflow exposes labelled dialog and containe
   assert.match(shells, /aria-live="assertive"[\s\S]*?role="alert"/);
 });
 
+test("Contest Add panel keeps native disclosure and one labelled live status region", async () => {
+  const shells = await readFile(new URL("../src/app/shells.tsx", import.meta.url), "utf8");
+  assert.match(shells, /<section aria-labelledby="contest-add-heading" className="content-panel contest-add-panel">/);
+  assert.match(shells, /<h2 id="contest-add-heading">\{t\("contest\.addContest"\)\}<\/h2>/);
+  assert.match(shells, /<label>\{t\("contest\.url"\)\}<input[^>]*disabled=\{importing\}/);
+  assert.match(shells, /<details className="manual-import-panel"><summary>\{t\("contest\.manualImport"\)\}<\/summary>/);
+  assert.match(shells, /aria-live="polite" className="system-caption contest-add-panel__status"/);
+});
+
 test("Tauri runtime configurations keep a restrictive content security policy", async () => {
   const config = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   const e2eConfig = JSON.parse(await readFile(new URL("../src-tauri/tauri.e2e.conf.json", import.meta.url), "utf8"));

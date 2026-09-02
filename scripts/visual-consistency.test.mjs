@@ -51,7 +51,7 @@ test("fullscreen normal pages share one centered content rail", async () => {
   const css = await readFile(cssUrl, "utf8");
   assert.match(css, /\.normal-content\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*1280px;[\s\S]*?justify-self:\s*center;/);
   assert.match(css, /\.content-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
-  assert.match(css, /\.contest-import-form,\s*\.manual-import-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
+  assert.match(css, /\.contest-add-panel\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/);
 });
 
 test("semantic detail lists keep definition grids separate from full-width item lists", async () => {
@@ -104,6 +104,17 @@ test("Contest safe-delete dialogs use one structured destructive hierarchy", asy
   assert.match(css, /\.taxonomy-delete-footer\s*\{[^}]*justify-content:\s*flex-end;/);
   assert.match(css, /\.taxonomy-delete-risk\s*\{[^}]*border-left:\s*3px solid var\(--danger\);/);
   assert.doesNotMatch(shells, /deleteFamilyTarget !== null \? <div className="modal-backdrop"><div className="content-panel"/);
+});
+
+test("Contest Add panel consolidates quick and manual import without touching the cabinet", async () => {
+  const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
+  assert.equal(shells.match(/className="content-panel contest-add-panel"/g)?.length, 1);
+  assert.equal(shells.match(/className="manual-import-panel"/g)?.length, 1);
+  assert.match(shells, /<section aria-labelledby="contest-add-heading"[\s\S]*?<form className="contest-import-form"[\s\S]*?<details className="manual-import-panel"/);
+  assert.match(shells, /<ContestCabinet items=\{items\.slice\(0, CONTEST_CABINET_CAPACITY\)\} navigate=\{navigate\} totalCount=\{items\.length\} \/>/);
+  assert.match(css, /\.contest-import-form\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
+  assert.match(css, /@media\s*\(max-width:\s*560px\)[\s\S]*?\.contest-import-form\s*\{\s*grid-template-columns:\s*1fr;/);
+  assert.match(css, /\.contest-add-panel \.manual-import-panel\s*\{[^}]*border-top:\s*1px solid var\(--line\);[^}]*box-shadow:\s*none;/);
 });
 
 test("Contest cabinet switches only between full and compact column presentation", async () => {

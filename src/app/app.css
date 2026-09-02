@@ -385,6 +385,20 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
 
 .contest-import-form .system-caption { grid-column: 1 / -1; margin: 2px 0 0; }
 
+.contest-add-panel {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  margin-top: 20px;
+  padding: 0;
+  overflow: hidden;
+}
+.contest-add-panel__header { padding: 20px 24px 12px; }
+.contest-add-panel__header h2 { margin: 0; font-size: 1.08rem; }
+.contest-add-panel .contest-import-form { margin: 0; padding: 0 24px 20px; box-shadow: none; }
+.contest-add-panel__status { margin: -6px 24px 18px; }
+.contest-add-panel .manual-import-panel { margin: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+
 .manual-import-panel {
   padding: 0;
   overflow: clip;
@@ -462,8 +476,8 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
 .contest-library-navigation__header select,
 .placement-form select,
 .placement-form input { min-height: 42px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); color: inherit; }
-.contest-library-navigation__levels { display: grid; gap: 16px; }
-.contest-library-navigation__levels > div { display: grid; gap: 8px; }
+.contest-library-navigation__levels { display: grid; gap: 18px; }
+.contest-library-navigation__levels > div { display: grid; gap: 9px; }
 .taxonomy-filter-group { min-width: 0; }
 .taxonomy-filter-group__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .taxonomy-manage-trigger { min-height: 32px; padding: 4px 2px; }
@@ -1550,6 +1564,10 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
   .backup-inventory span { text-align: left; }
   .contest-facts-list li { grid-template-columns: 1fr; align-items: stretch; }
   .contest-facts-list li > button { justify-self: start; }
+  .contest-add-panel { padding: 0; }
+  .contest-add-panel__header { padding: 18px 18px 11px; }
+  .contest-add-panel .contest-import-form { padding: 0 18px 18px; }
+  .contest-add-panel__status { margin: -4px 18px 16px; }
   .contest-import-form { grid-template-columns: 1fr; }
   .manual-import-form { grid-template-columns: 1fr; padding: 22px 18px 24px; }
   .manual-import-panel > summary { padding: 18px; }

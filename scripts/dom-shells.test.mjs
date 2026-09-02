@@ -124,7 +124,17 @@ test("Manual Contest submits explicit identities and statement text through one 
   }, "/contests");
   try {
     await settle();
-    const details = [...view.document.querySelectorAll("details")].find((item) => item.textContent.includes("手动")); details.open = true;
+    const addPanel = view.document.querySelector(".contest-add-panel");
+    assert.ok(addPanel);
+    assert.equal(view.document.querySelectorAll(".contest-add-panel").length, 1);
+    assert.equal(view.document.querySelector(".content-panel.contest-import-form"), null);
+    assert.equal(view.document.querySelector(".content-panel.manual-import-panel"), null);
+    assert.match(addPanel.querySelector("h2").textContent, /添加比赛/);
+    assert.ok(addPanel.querySelector('.contest-import-form input[placeholder="https://codeforces.com/contest/1979"]'));
+    const details = addPanel.querySelector("details.manual-import-panel");
+    assert.equal(details.open, false);
+    await act(async () => { details.open = true; details.dispatchEvent(new view.window.Event("toggle")); });
+    assert.equal(details.open, true);
     const inputs = [...details.querySelectorAll("input")];
     const values = ["1979", "Manual Round", "2026-08-13", "A", "Manual A", "https://codeforces.com/contest/1979/problem/A"];
     await act(async () => { inputs.forEach((input, index) => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, values[index]); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); }); const textarea = details.querySelector("textarea"); Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "x < y"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
@@ -683,6 +693,45 @@ test("Contest Library peer groups expose accessible create dialogs and explicit 
     last.focus();
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
     assert.equal(view.document.activeElement, dialog.querySelector("input"));
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Add panel keeps quick import visible, guarded, and refreshes through the existing payload", { concurrency: false }, async () => {
+  const importCalls = [];
+  let listCalls = 0;
+  let finishImport;
+  const pendingImport = new Promise((resolve) => { finishImport = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_contests") { listCalls += 1; return []; }
+    if (command === "import_codeforces_contest") { importCalls.push(args.input); return pendingImport; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const baselineListCalls = listCalls;
+    const panel = view.document.querySelector(".contest-add-panel");
+    const form = panel.querySelector(".contest-import-form");
+    const input = form.querySelector("input");
+    const submit = form.querySelector('button[type="submit"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "https://codeforces.com/contest/2256");
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    assert.equal(importCalls.length, 1);
+    assert.deepEqual(importCalls[0], { contestUrl: "https://codeforces.com/contest/2256" });
+    assert.equal(submit.disabled, true);
+    assert.equal(submit.textContent, "正在导入…");
+    await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    assert.equal(importCalls.length, 1);
+    await act(async () => finishImport({ importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] })); await settle();
+    assert.match(panel.querySelector('[aria-live="polite"]').textContent, /比赛已导入/);
+    assert.ok(listCalls > baselineListCalls);
+    assert.equal(panel.querySelectorAll('[aria-live="polite"]').length, 1);
   } finally { await view.cleanup(); }
 });
 
