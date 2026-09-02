@@ -551,7 +551,7 @@ test("Contest Library D2-A preserves all three tiers for an empty filtered resul
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library creates and renames persisted Family and Series without changing IDs", { concurrency: false }, async () => {
+test("Contest Library creates taxonomy from peer-level chips and preserves persisted IDs", { concurrency: false }, async () => {
   const calls = [];
   let families = [{ familyId: 1, displayName: "Codeforces" }];
   let series = [];
@@ -570,28 +570,35 @@ test("Contest Library creates and renames persisted Family and Series without ch
   }, "/contests");
   try {
     await settle();
-    const createFamilyButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "创建分类");
+    const createFamilyButton = view.document.querySelector('button.filter-option--create[aria-label="创建分类"]');
     await act(async () => createFamilyButton.click()); await settle();
-    const familyForm = view.document.querySelector(".contest-library-create-panel");
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
+    const familyDialog = view.document.querySelector('[role="dialog"][aria-modal="true"]');
+    const familyForm = familyDialog.querySelector(".contest-taxonomy-create-form");
+    assert.equal(view.document.querySelectorAll(".contest-taxonomy-create-form").length, 1);
+    assert.equal(view.document.activeElement, familyForm.querySelector("input"));
     const familyInput = familyForm.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(familyInput, " User Family "); familyInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await settle();
     await act(async () => familyForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
     await settle();
+    assert.equal(view.document.querySelector('[role="dialog"]'), null);
+    assert.equal(view.document.activeElement, createFamilyButton);
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "User Family"));
     assert.equal(calls.find(([name]) => name === "contest_library_create_family")[1].displayName, " User Family ");
     const selected = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "User Family");
     await act(async () => selected.click()); await settle();
-    const createSeriesButton = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "创建系列");
+    const createSeriesButton = view.document.querySelector('button.filter-option--create[aria-label="创建系列"]');
     await act(async () => createSeriesButton.click()); await settle();
-    const seriesForm = view.document.querySelector(".contest-library-create-panel");
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
+    const seriesForm = view.document.querySelector(".contest-taxonomy-create-form");
+    assert.equal(view.document.querySelectorAll(".contest-taxonomy-create-form").length, 1);
+    assert.equal(seriesForm.querySelector("select").value, "2");
+    assert.equal(view.document.activeElement, seriesForm.querySelector("select"));
     const seriesInput = seriesForm.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(seriesInput, "Rounds"); seriesInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await settle();
     await act(async () => seriesForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
     await settle();
+    assert.equal(view.document.activeElement, createSeriesButton);
     assert.ok(calls.some(([name]) => name === "contest_library_create_series"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
     const familyRename = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "重命名");
@@ -613,7 +620,7 @@ test("Contest Library creates and renames persisted Family and Series without ch
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library creation panel switches and closes with at most one form", { concurrency: false }, async () => {
+test("Contest Library peer groups expose accessible create dialogs and explicit Series context", { concurrency: false }, async () => {
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
@@ -625,23 +632,74 @@ test("Contest Library creation panel switches and closes with at most one form",
   }, "/contests");
   try {
     await settle();
-    const managementActions = view.document.querySelector(".contest-library-navigation > .action-row");
-    const [createFamilyButton, createSeriesButton, createYearButton] = [...managementActions.querySelectorAll("button")];
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
-    await act(async () => createFamilyButton.click()); await settle();
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
-    assert.equal(view.document.querySelector(".contest-library-create-panel input")?.getAttribute("type"), null);
+    const groups = [...view.document.querySelectorAll(".taxonomy-filter-group")];
+    const [createFamilyButton, createSeriesButton, createYearButton] = [...view.document.querySelectorAll("button.filter-option--create")];
+    assert.equal(groups.length, 3);
+    assert.deepEqual([createFamilyButton, createSeriesButton, createYearButton].map((button) => button.getAttribute("aria-label")), ["创建分类", "创建系列", "创建年份"]);
+    assert.equal(view.document.querySelector(".contest-library-create-panel"), null);
+
     await act(async () => createSeriesButton.click()); await settle();
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel input").length, 1);
-    await act(async () => createYearButton.click()); await settle();
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 1);
-    assert.equal(view.document.querySelector(".contest-library-create-panel input")?.getAttribute("type"), "number");
-    await act(async () => createYearButton.click()); await settle();
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
+    let dialog = view.document.querySelector('[role="dialog"]');
+    const familySelect = dialog.querySelector("select");
+    assert.equal(familySelect.value, "");
+    assert.equal(view.document.activeElement, familySelect);
+    assert.equal(dialog.querySelector('button[type="submit"]').disabled, true);
+    const cancel = dialog.querySelector("button.secondary-action");
+    await act(async () => cancel.click()); await settle();
+    assert.equal(view.document.querySelector('[role="dialog"]'), null);
+    assert.equal(view.document.activeElement, createSeriesButton);
+
     await act(async () => createFamilyButton.click()); await settle();
-    await act(async () => createFamilyButton.click()); await settle();
-    assert.equal(view.document.querySelectorAll(".contest-library-create-panel").length, 0);
+    dialog = view.document.querySelector('[role="dialog"]');
+    assert.equal(view.document.activeElement, dialog.querySelector("input"));
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await settle();
+    assert.equal(view.document.querySelector('[role="dialog"]'), null);
+    assert.equal(view.document.activeElement, createFamilyButton);
+
+    await act(async () => createYearButton.click()); await settle();
+    dialog = view.document.querySelector('[role="dialog"]');
+    assert.equal(dialog.querySelector("input")?.getAttribute("type"), "number");
+    const last = dialog.querySelector('button[type="submit"]');
+    last.focus();
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
+    assert.equal(view.document.activeElement, dialog.querySelector("input"));
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library create dialog blocks duplicate submits and preserves failed input", { concurrency: false }, async () => {
+  let rejectCreate;
+  let createCalls = 0;
+  const pendingCreate = new Promise((_resolve, reject) => { rejectCreate = reject; });
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_create_family") { createCalls += 1; return pendingCreate; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const trigger = view.document.querySelector('button.filter-option--create[aria-label="创建分类"]');
+    await act(async () => trigger.click()); await settle();
+    const form = view.document.querySelector(".contest-taxonomy-create-form");
+    const input = form.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "Persistent category");
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    assert.equal(createCalls, 1);
+    assert.equal(input.disabled, true);
+    await act(async () => rejectCreate(new Error("duplicate_family_name")));
+    await settle();
+    assert.equal(view.document.querySelector(".contest-taxonomy-create-form input").value, "Persistent category");
+    assert.ok(view.document.querySelector(".contest-taxonomy-create-form .error-message"));
   } finally { await view.cleanup(); }
 });
 
@@ -744,9 +802,9 @@ test("Contest Library manages Year entities through stable IDs", { concurrency: 
   }, "/contests");
   try {
     await settle();
-    const create = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "\u521b\u5efa\u5e74\u4efd");
+    const create = view.document.querySelector('button.filter-option--create[aria-label="\u521b\u5efa\u5e74\u4efd"]');
     await act(async () => create.click()); await settle();
-    const createForm = view.document.querySelector(".contest-library-create-panel");
+    const createForm = view.document.querySelector(".contest-taxonomy-create-form");
     const createInput = createForm.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(createInput, "2027"); createInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await act(async () => createForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();

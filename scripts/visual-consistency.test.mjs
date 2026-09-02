@@ -70,6 +70,17 @@ test("sanitized Codeforces statements retain readable metadata and section hiera
   assert.match(css, /\.statement-view \.problem-statement \.time-limit,[\s\S]*?grid-template-columns:\s*minmax\(150px,\s*\.4fr\)\s+minmax\(0,\s*1fr\);/);
   assert.match(css, /\.statement-view \.problem-statement \.section-title\s*\{[\s\S]*?font-weight:\s*760;/);
 });
+
+test("Contest taxonomy filters stay peer-level and create chips wrap with their options", async () => {
+  const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
+  assert.equal(shells.match(/className="taxonomy-filter-group"/g)?.length, 3);
+  assert.equal(shells.match(/className="filter-option filter-option--create"/g)?.length, 3);
+  assert.doesNotMatch(shells, /contest-library-create-panel/);
+  assert.match(css, /\.filter-options\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.filter-option--create\s*\{[\s\S]*?min-width:\s*40px;[\s\S]*?border-style:\s*dashed;/);
+  assert.doesNotMatch(css, /\.filter-options\s*\{[^}]*overflow-x:/);
+});
+
 test("Contest cabinet switches only between full and compact column presentation", async () => {
   const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
   assert.match(css, /\.contest-cabinet-prototype\s*\{[\s\S]*?container-name:\s*contest-cabinet-presentation;[\s\S]*?container-type:\s*inline-size;/);

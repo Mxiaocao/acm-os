@@ -465,10 +465,20 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
 .inline-form input { min-height: 42px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); color: inherit; }
 .contest-library-navigation__levels { display: grid; gap: 16px; }
 .contest-library-navigation__levels > div { display: grid; gap: 8px; }
+.taxonomy-filter-group { min-width: 0; }
 .filter-label { color: var(--ink-muted); font-size: .78rem; font-weight: 780; text-transform: uppercase; letter-spacing: .08em; }
 .filter-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .filter-option { min-height: 40px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-muted); color: inherit; cursor: pointer; }
 .filter-option:hover, .filter-option--selected { border-color: var(--accent); background: var(--surface); color: var(--accent); }
+.filter-option--create { min-width: 40px; padding-inline: 10px; border-style: dashed; background: transparent; color: var(--accent); font-size: 1.15rem; font-weight: 760; line-height: 1; }
+.filter-option--create:hover { border-style: solid; background: var(--surface-muted); }
+.contest-taxonomy-create-dialog { width: min(480px, 100%); }
+.contest-taxonomy-create-form { display: grid; gap: 18px; }
+.contest-taxonomy-create-form h2 { margin: 0; }
+.contest-taxonomy-create-form label { display: grid; gap: 7px; color: var(--ink-muted); font-size: .84rem; font-weight: 720; }
+.contest-taxonomy-create-form input,
+.contest-taxonomy-create-form select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: inherit; }
+.contest-taxonomy-create-form__actions { justify-content: flex-end; padding-top: 4px; }
 .contest-library-navigation details { min-width: 0; }
 .contest-library-navigation summary.secondary-action { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; list-style: none; }
 .contest-library-navigation summary.secondary-action::-webkit-details-marker { display: none; }
