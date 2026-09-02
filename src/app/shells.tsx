@@ -1880,6 +1880,12 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const [retryNonce, setRetryNonce] = useState(0);
   const [managementMessage, setManagementMessage] = useState<string | null>(null);
   const [managementBusy, setManagementBusy] = useState(false);
+  const [managementMode, setManagementMode] = useState<"category" | "series" | "year" | null>(null);
+  const [managedFamilyId, setManagedFamilyId] = useState<number | null>(null);
+  const [managedSeriesFamilyId, setManagedSeriesFamilyId] = useState<number | null>(null);
+  const [managedSeriesId, setManagedSeriesId] = useState<number | null>(null);
+  const [managedSeries, setManagedSeries] = useState<ContestLibrarySeriesDto[]>([]);
+  const [managedYearId, setManagedYearId] = useState<number | null>(null);
   const [familyDraft, setFamilyDraft] = useState("");
   const [seriesDraft, setSeriesDraft] = useState("");
   const [editingFamily, setEditingFamily] = useState<number | null>(null);
@@ -1897,13 +1903,24 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const [deleteSeriesReplacement, setDeleteSeriesReplacement] = useState<number | null>(null);
   const [deleteYearTarget, setDeleteYearTarget] = useState<number | null>(null);
   const [deleteYearReplacement, setDeleteYearReplacement] = useState<number | null>(null);
+  const [deleteFamilySeriesCount, setDeleteFamilySeriesCount] = useState(0);
   const familyRequest = useRef(0);
   const libraryRequest = useRef(0);
+  const managementSeriesRequest = useRef(0);
   const creationPendingRef = useRef(false);
+  const managementPendingRef = useRef(false);
+  const managementSubviewReturnRef = useRef(false);
   const creationDialogRef = useRef<HTMLDivElement>(null);
+  const managementDialogRef = useRef<HTMLDivElement>(null);
   const categoryCreateTriggerRef = useRef<HTMLButtonElement>(null);
   const seriesCreateTriggerRef = useRef<HTMLButtonElement>(null);
   const yearCreateTriggerRef = useRef<HTMLButtonElement>(null);
+  const categoryManageTriggerRef = useRef<HTMLButtonElement>(null);
+  const seriesManageTriggerRef = useRef<HTMLButtonElement>(null);
+  const yearManageTriggerRef = useRef<HTMLButtonElement>(null);
+  const managementInitialRef = useRef<HTMLButtonElement | HTMLSelectElement>(null);
+  const managementRenameActionRef = useRef<HTMLButtonElement>(null);
+  const managementRenameInputRef = useRef<HTMLInputElement>(null);
   const categoryCreateInputRef = useRef<HTMLInputElement>(null);
   const seriesCreateFamilyRef = useRef<HTMLSelectElement>(null);
   const yearCreateInputRef = useRef<HTMLInputElement>(null);
@@ -1958,6 +1975,62 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [creationMode, closeCreationDialog]);
+  const restoreManagementFocus = useCallback((mode: "category" | "series" | "year") => {
+    const trigger = mode === "category" ? categoryManageTriggerRef : mode === "series" ? seriesManageTriggerRef : yearManageTriggerRef;
+    queueMicrotask(() => trigger.current?.focus());
+  }, []);
+  const closeManagementDialog = useCallback(() => {
+    if (managementPendingRef.current || managementMode === null) return;
+    const mode = managementMode;
+    setManagementMode(null); setEditingFamily(null); setEditingSeries(null); setEditingYear(null); setManagementMessage(null);
+    restoreManagementFocus(mode);
+  }, [managementMode, restoreManagementFocus]);
+  const loadManagedSeries = async (nextFamilyId: number) => {
+    const request = ++managementSeriesRequest.current;
+    const next = await listContestLibrarySeries(nextFamilyId);
+    if (request === managementSeriesRequest.current) setManagedSeries(next);
+    return next;
+  };
+  const openManagementDialog = (mode: "category" | "series" | "year") => {
+    setManagementMessage(null); setEditingFamily(null); setEditingSeries(null); setEditingYear(null);
+    managementSubviewReturnRef.current = false;
+    if (mode === "category") setManagedFamilyId(familyId !== null && families?.some((item) => item.familyId === familyId) ? familyId : null);
+    if (mode === "year") setManagedYearId(yearFilter.kind === "exact" && yearEntities.some((item) => item.yearId === yearFilter.yearId) ? yearFilter.yearId : null);
+    if (mode === "series") {
+      managementSeriesRequest.current += 1;
+      setManagedSeriesFamilyId(familyId); setManagedSeries(familyId === null ? [] : series);
+      setManagedSeriesId(familyId !== null && seriesFilter.kind === "exact" && series.some((item) => item.seriesId === seriesFilter.seriesId) ? seriesFilter.seriesId : null);
+    }
+    setManagementMode(mode);
+  };
+  const cancelRenameSubview = useCallback(() => {
+    if (managementPendingRef.current) return;
+    managementSubviewReturnRef.current = true;
+    setEditingFamily(null); setEditingSeries(null); setEditingYear(null); setManagementMessage(null);
+  }, []);
+  useEffect(() => {
+    if (managementMode === null) return;
+    const editing = editingFamily !== null || editingSeries !== null || editingYear !== null;
+    if (editing) managementRenameInputRef.current?.focus();
+    else if (managementSubviewReturnRef.current) { managementSubviewReturnRef.current = false; managementRenameActionRef.current?.focus(); }
+    else (managementInitialRef.current ?? managementDialogRef.current)?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!managementPendingRef.current) { event.preventDefault(); if (editing) cancelRenameSubview(); else closeManagementDialog(); }
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = managementDialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('input:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [managementMode, editingFamily, editingSeries, editingYear, cancelRenameSubview, closeManagementDialog]);
   const reloadArchive = async (
     nextFamilyId: number | null,
     nextSeriesFilter: ContestLibrarySeriesFilterDto,
@@ -2024,11 +2097,14 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     finally { creationPendingRef.current = false; setManagementBusy(false); }
   };
   const renameFamily = async (event: FormEvent<HTMLFormElement>, id: number) => {
-    event.preventDefault(); if (managementBusy) return;
-    setManagementBusy(true); setManagementMessage(null);
-    try { await renameContestLibraryFamily(id, familyDraft); await refreshFamilies(id); setFamilyDraft(""); setEditingFamily(null); }
+    event.preventDefault(); if (managementPendingRef.current) return;
+    managementPendingRef.current = true; setManagementBusy(true); setManagementMessage(null);
+    try {
+      await renameContestLibraryFamily(id, familyDraft);
+      await refreshFamilies(familyId); setFamilyDraft(""); managementSubviewReturnRef.current = true; setEditingFamily(null);
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
-    finally { setManagementBusy(false); }
+    finally { managementPendingRef.current = false; setManagementBusy(false); }
   };
   const createSeries = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (creationPendingRef.current || createSeriesFamilyId === null) return;
@@ -2050,25 +2126,39 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     finally { creationPendingRef.current = false; setManagementBusy(false); }
   };
   const renameSeries = async (event: FormEvent<HTMLFormElement>, id: number) => {
-    event.preventDefault(); if (managementBusy) return;
-    setManagementBusy(true); setManagementMessage(null);
-    try { await renameContestLibrarySeries(id, seriesDraft); setSeriesDraft(""); setEditingSeries(null); if (familyId !== null) setSeries(await listContestLibrarySeries(familyId)); }
+    event.preventDefault(); if (managementPendingRef.current || managedSeriesFamilyId === null) return;
+    managementPendingRef.current = true; setManagementBusy(true); setManagementMessage(null);
+    try {
+      await renameContestLibrarySeries(id, seriesDraft);
+      const next = await loadManagedSeries(managedSeriesFamilyId);
+      if (familyId === managedSeriesFamilyId) setSeries(next);
+      setSeriesDraft(""); managementSubviewReturnRef.current = true; setEditingSeries(null);
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
-    finally { setManagementBusy(false); }
+    finally { managementPendingRef.current = false; setManagementBusy(false); }
   };
   const renameYear = async (event: FormEvent<HTMLFormElement>, id: number) => {
-    event.preventDefault(); if (managementBusy) return;
-    setManagementBusy(true); setManagementMessage(null);
+    event.preventDefault(); if (managementPendingRef.current) return;
+    managementPendingRef.current = true; setManagementBusy(true); setManagementMessage(null);
     try {
       await renameContestLibraryYear(id, Number(yearDraft));
       const nextYears = await listContestLibraryYearEntities();
-      setYearEntities(nextYears); setYearDraft(""); setEditingYear(null);
+      setYearEntities(nextYears); setYearDraft(""); managementSubviewReturnRef.current = true; setEditingYear(null);
       if (familyId !== null) {
         const available = await listContestLibraryYears(familyId, seriesFilter);
         setYears(available); setYearFilter(reconcileYearFilter(yearFilter, available));
       }
     }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
+    finally { managementPendingRef.current = false; setManagementBusy(false); }
+  };
+  const openFamilyDelete = async (id: number) => {
+    if (managementBusy) return;
+    setManagementBusy(true); setManagementMessage(null);
+    try {
+      const ownedSeries = await listContestLibrarySeries(id);
+      setDeleteFamilySeriesCount(ownedSeries.length); setDeleteFamilyReplacement(null); setManagementMode(null); setDeleteFamilyTarget(id);
+    } catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { setManagementBusy(false); }
   };
   const deleteYear = async (id: number, replacementYearId: number | null) => {
@@ -2180,6 +2270,22 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     } finally { setImporting(false); }
   };
   const updateManualProblem = (position: number, patch: Partial<(typeof manualProblems)[number]>) => setManualProblems((current) => current.map((item, index) => index === position ? { ...item, ...patch } : item));
+  const managedFamily = families?.find((item) => item.familyId === managedFamilyId) ?? null;
+  const managedSeriesItem = managedSeries.find((item) => item.seriesId === managedSeriesId) ?? null;
+  const managedYear = yearEntities.find((item) => item.yearId === managedYearId) ?? null;
+  const managementIsRenaming = editingFamily !== null || editingSeries !== null || editingYear !== null;
+  const managementHasSelection = managementMode === "category" ? managedFamily !== null : managementMode === "series" ? managedSeriesItem !== null : managedYear !== null;
+  const startRenameSubview = () => {
+    setManagementMessage(null); managementSubviewReturnRef.current = false;
+    if (managementMode === "category" && managedFamily) { setEditingFamily(managedFamily.familyId); setFamilyDraft(managedFamily.displayName); }
+    if (managementMode === "series" && managedSeriesItem) { setEditingSeries(managedSeriesItem.seriesId); setSeriesDraft(managedSeriesItem.displayName); }
+    if (managementMode === "year" && managedYear) { setEditingYear(managedYear.yearId); setYearDraft(String(managedYear.value)); }
+  };
+  const openManagedDelete = () => {
+    if (managementMode === "category" && managedFamily) { void openFamilyDelete(managedFamily.familyId); }
+    if (managementMode === "series" && managedSeriesItem) { setDeleteSeriesReplacement(null); setManagementMode(null); setDeleteSeriesTarget(managedSeriesItem.seriesId); }
+    if (managementMode === "year" && managedYear) { setDeleteYearReplacement(null); setManagementMode(null); setDeleteYearTarget(managedYear.yearId); }
+  };
 
   return (
     <>
@@ -2187,9 +2293,18 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       <section className="content-panel contest-library-navigation" aria-label={t("contest.libraryNav")}>
         <div className="contest-library-navigation__header"><div><p className="eyebrow">{t("contest.browse")}</p><h2>{t("contest.archiveEyebrow")}</h2></div><label>{t("contest.archiveStatus")}<select value={archiveFilter} onChange={(event) => setArchiveFilter(event.currentTarget.value as ContestLibraryArchiveFilterDto)}><option value="active">{t("contest.activeContests")}</option><option value="archived">{t("contest.archivedContests")}</option><option value="all">{t("contest.allContests")}</option></select></label></div>
         <div className="contest-library-navigation__levels">
-          <div className="taxonomy-filter-group"><span className="filter-label">{t("contest.family")}</span><div className="filter-options"><button className={familyId === null ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectFamily(null)} type="button">{t("contest.allContests")}</button>{families?.map((family) => <button className={familyId === family.familyId ? "filter-option filter-option--selected" : "filter-option"} key={family.familyId} onClick={() => selectFamily(family.familyId)} type="button">{family.displayName}</button>)}<button aria-label={t("contest.createFamily")} className="filter-option filter-option--create" onClick={() => openCreationDialog("category")} ref={categoryCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div></div>
-          <div className="taxonomy-filter-group"><span className="filter-label">{t("contest.series")}</span><div className="filter-options"><button className={seriesFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectSeries({ kind: "any" })} type="button">{t("contest.allSeries")}</button>{series.map((item) => <button className={seriesFilter.kind === "exact" && seriesFilter.seriesId === item.seriesId ? "filter-option filter-option--selected" : "filter-option"} key={item.seriesId} onClick={() => selectSeries({ kind: "exact", seriesId: item.seriesId })} type="button">{item.displayName}</button>)}<button aria-label={t("contest.createSeries")} className="filter-option filter-option--create" onClick={() => openCreationDialog("series")} ref={seriesCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div></div>
-          <div className="taxonomy-filter-group"><span className="filter-label">{t("contest.year")}</span><div className="filter-options"><button className={yearFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "any" })} type="button">全部年份</button>{years.map((year) => <button className={yearFilter.kind === "exact" && yearFilter.yearId === year.yearId ? "filter-option filter-option--selected" : "filter-option"} key={year.yearId} onClick={() => setYearFilter({ kind: "exact", yearId: year.yearId })} type="button">{year.value}</button>)}<button aria-label={t("contest.createYear")} className="filter-option filter-option--create" onClick={() => openCreationDialog("year")} ref={yearCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div></div>
+          <div className="taxonomy-filter-group">
+            <div className="taxonomy-filter-group__header"><span className="filter-label">{t("contest.family")}</span><button aria-label={t("contest.manageFamily")} className="text-button taxonomy-manage-trigger" onClick={() => openManagementDialog("category")} ref={categoryManageTriggerRef} type="button">{t("contest.edit")}</button></div>
+            <div className="filter-options"><button className={familyId === null ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectFamily(null)} type="button">{t("contest.allContests")}</button>{families?.map((family) => <button className={familyId === family.familyId ? "filter-option filter-option--selected" : "filter-option"} key={family.familyId} onClick={() => selectFamily(family.familyId)} type="button">{family.displayName}</button>)}<button aria-label={t("contest.createFamily")} className="filter-option filter-option--create" onClick={() => openCreationDialog("category")} ref={categoryCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div>
+          </div>
+          <div className="taxonomy-filter-group">
+            <div className="taxonomy-filter-group__header"><span className="filter-label">{t("contest.series")}</span><button aria-label={t("contest.manageSeries")} className="text-button taxonomy-manage-trigger" onClick={() => openManagementDialog("series")} ref={seriesManageTriggerRef} type="button">{t("contest.edit")}</button></div>
+            <div className="filter-options"><button className={seriesFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => selectSeries({ kind: "any" })} type="button">{t("contest.allSeries")}</button>{series.map((item) => <button className={seriesFilter.kind === "exact" && seriesFilter.seriesId === item.seriesId ? "filter-option filter-option--selected" : "filter-option"} key={item.seriesId} onClick={() => selectSeries({ kind: "exact", seriesId: item.seriesId })} type="button">{item.displayName}</button>)}<button aria-label={t("contest.createSeries")} className="filter-option filter-option--create" onClick={() => openCreationDialog("series")} ref={seriesCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div>
+          </div>
+          <div className="taxonomy-filter-group">
+            <div className="taxonomy-filter-group__header"><span className="filter-label">{t("contest.year")}</span><button aria-label={t("contest.manageYear")} className="text-button taxonomy-manage-trigger" onClick={() => openManagementDialog("year")} ref={yearManageTriggerRef} type="button">{t("contest.edit")}</button></div>
+            <div className="filter-options"><button className={yearFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "any" })} type="button">全部年份</button>{years.map((year) => <button className={yearFilter.kind === "exact" && yearFilter.yearId === year.yearId ? "filter-option filter-option--selected" : "filter-option"} key={year.yearId} onClick={() => setYearFilter({ kind: "exact", yearId: year.yearId })} type="button">{year.value}</button>)}<button aria-label={t("contest.createYear")} className="filter-option filter-option--create" onClick={() => openCreationDialog("year")} ref={yearCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div>
+          </div>
         </div>
         {families === null && !failed ? <p aria-busy="true">{t("contest.loading")}</p> : null}
         {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
@@ -2199,11 +2314,28 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
           {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
           <div className="action-row contest-taxonomy-create-form__actions"><button className="secondary-action" disabled={managementBusy} onClick={closeCreationDialog} type="button">{t("common.cancel")}</button><button className="primary-action" disabled={managementBusy || (creationMode === "series" && createSeriesFamilyId === null)} type="submit">{managementBusy ? t("contest.saving") : creationMode === "category" ? t("contest.createFamily") : creationMode === "series" ? t("contest.createSeries") : t("contest.createYear")}</button></div>
         </form></div></div> : null}
-        {yearEntities.length > 0 ? <div className="management-list"><strong>{t("contest.yearManagement")}</strong>{yearEntities.map((item) => <div className="management-list__row" key={item.yearId}><span>{item.value}</span><button className="text-button" onClick={() => { setEditingYear(item.yearId); setYearDraft(String(item.value)); }} type="button">{t("contest.rename")}</button><button className="danger-action" onClick={() => { setDeleteYearReplacement(null); setDeleteYearTarget(item.yearId); }} type="button">{t("common.delete")}</button>{editingYear === item.yearId ? <form className="inline-form" onSubmit={(event) => void renameYear(event, item.yearId)}><label>{t("contest.year")}<input min="1" onInput={(event) => setYearDraft(event.currentTarget.value)} required type="number" value={yearDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingYear(null)} type="button">{t("common.cancel")}</button></form> : null}</div>)}</div> : null}
-        {familyId !== null && families?.find((family) => family.familyId === familyId) ? <div className="management-list"><div><strong>{t("contest.selectedFamily")}</strong><button className="text-button" onClick={() => { setEditingFamily(familyId); setFamilyDraft(families.find((family) => family.familyId === familyId)?.displayName ?? ""); }} type="button">{t("contest.rename")}</button><button className="danger-action" onClick={() => { setDeleteFamilyReplacement(null); setDeleteFamilyTarget(familyId); }} type="button">{t("common.delete")}</button></div>{editingFamily === familyId ? <form className="inline-form" onSubmit={(event) => void renameFamily(event, familyId)}><label>{t("contest.familyName")}<input onInput={(event) => setFamilyDraft(event.currentTarget.value)} required value={familyDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingFamily(null)} type="button">{t("common.cancel")}</button></form> : null}</div> : null}
-        {familyId !== null && series.length > 0 ? <div className="management-list"><strong>{t("contest.seriesManagement")}</strong>{series.map((item) => <div className="management-list__row" key={item.seriesId}><span>{item.displayName}</span><button className="text-button" onClick={() => { setEditingSeries(item.seriesId); setSeriesDraft(item.displayName); }} type="button">{t("contest.rename")}</button><button className="danger-action" onClick={() => { setDeleteSeriesReplacement(null); setDeleteSeriesTarget(item.seriesId); }} type="button">{t("common.delete")}</button>{editingSeries === item.seriesId ? <form className="inline-form" onSubmit={(event) => void renameSeries(event, item.seriesId)}><label>{t("contest.seriesName")}<input onInput={(event) => setSeriesDraft(event.currentTarget.value)} required value={seriesDraft} /></label><button className="primary-action" disabled={managementBusy} type="submit">{t("contest.saveName")}</button><button className="secondary-action" onClick={() => setEditingSeries(null)} type="button">{t("common.cancel")}</button></form> : null}</div>)}</div> : null}
-        {deleteFamilyTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.selectedFamily")}</p><p>{t("contest.deleteFamilyDescription", { count: series.length })}</p><label>{t("contest.family")}<select value={deleteFamilyReplacement ?? ""} onChange={(event) => setDeleteFamilyReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{families?.filter((family) => family.familyId !== deleteFamilyTarget).map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteFamily(deleteFamilyTarget, deleteFamilyReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteFamilyTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
-        {deleteSeriesTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.seriesManagement")}</p><label>{t("contest.series")}<select value={deleteSeriesReplacement ?? ""} onChange={(event) => setDeleteSeriesReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{series.filter((item) => item.seriesId !== deleteSeriesTarget).map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteSeries(deleteSeriesTarget, deleteSeriesReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteSeriesTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
+        {managementMode ? <div className="modal-backdrop"><div aria-labelledby="contest-taxonomy-management-title" aria-modal="true" className="contest-taxonomy-management-dialog" ref={managementDialogRef} role="dialog" tabIndex={-1}>
+          {managementIsRenaming ? <form className="contest-taxonomy-management contest-taxonomy-management--rename" onSubmit={(event) => editingFamily !== null ? void renameFamily(event, editingFamily) : editingSeries !== null ? void renameSeries(event, editingSeries) : editingYear !== null ? void renameYear(event, editingYear) : undefined}>
+            <h2 id="contest-taxonomy-management-title">{editingFamily !== null ? t("contest.renameFamily") : editingSeries !== null ? t("contest.renameSeries") : t("contest.renameYear")}</h2>
+            {editingSeries !== null ? <div className="taxonomy-management-context"><span>{t("contest.family")}</span><strong>{families?.find((item) => item.familyId === managedSeriesFamilyId)?.displayName ?? ""}</strong></div> : null}
+            <div className="taxonomy-management-context"><span>{t("contest.currentName")}</span><strong>{editingFamily !== null ? managedFamily?.displayName : editingSeries !== null ? managedSeriesItem?.displayName : managedYear?.value}</strong></div>
+            <label>{t("contest.newName")}<input disabled={managementBusy} min={editingYear !== null ? 1 : undefined} onInput={(event) => editingYear !== null ? setYearDraft(event.currentTarget.value) : editingSeries !== null ? setSeriesDraft(event.currentTarget.value) : setFamilyDraft(event.currentTarget.value)} ref={managementRenameInputRef} required type={editingYear !== null ? "number" : "text"} value={editingYear !== null ? yearDraft : editingSeries !== null ? seriesDraft : familyDraft} /></label>
+            {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
+            <div className="action-row taxonomy-management-actions"><button className="secondary-action" disabled={managementBusy} onClick={cancelRenameSubview} type="button">{t("common.cancel")}</button><button className="primary-action" disabled={managementBusy} type="submit">{managementBusy ? t("contest.saving") : t("contest.saveName")}</button></div>
+          </form> : <div className="contest-taxonomy-management">
+            <h2 id="contest-taxonomy-management-title">{managementMode === "category" ? t("contest.manageFamily") : managementMode === "series" ? t("contest.manageSeries") : t("contest.manageYear")}</h2>
+            {managementMode === "series" ? <label>{t("contest.family")}<select disabled={managementBusy} onChange={(event) => { const next = event.currentTarget.value ? Number(event.currentTarget.value) : null; managementSeriesRequest.current += 1; setManagedSeriesFamilyId(next); setManagedSeriesId(null); setManagedSeries([]); setManagementMessage(null); if (next !== null) void loadManagedSeries(next).catch((error) => setManagementMessage(contestLibraryErrorMessage(error))); }} ref={managementInitialRef as React.RefObject<HTMLSelectElement>} value={managedSeriesFamilyId ?? ""}><option value="">{t("contest.chooseFamily")}</option>{families?.map((item) => <option key={item.familyId} value={item.familyId}>{item.displayName}</option>)}</select></label> : null}
+            <p className="taxonomy-management-instruction">{managementMode === "category" ? t("contest.chooseManagedFamily") : managementMode === "series" ? t("contest.chooseManagedSeries") : t("contest.chooseManagedYear")}</p>
+            {managementMode === "category" ? families && families.length > 0 ? <div className="taxonomy-management-options">{families.map((item, index) => <button aria-pressed={managedFamilyId === item.familyId} className={managedFamilyId === item.familyId ? "taxonomy-management-option taxonomy-management-option--selected" : "taxonomy-management-option"} key={item.familyId} onClick={() => setManagedFamilyId(item.familyId)} ref={index === 0 ? managementInitialRef as React.RefObject<HTMLButtonElement> : undefined} type="button">{item.displayName}</button>)}</div> : <p className="taxonomy-management-empty">{t("contest.noManagedFamilies")}</p> : null}
+            {managementMode === "series" ? managedSeriesFamilyId === null ? <p className="taxonomy-management-empty">{t("contest.chooseFamilyFirst")}</p> : managedSeries.length > 0 ? <div className="taxonomy-management-options">{managedSeries.map((item) => <button aria-pressed={managedSeriesId === item.seriesId} className={managedSeriesId === item.seriesId ? "taxonomy-management-option taxonomy-management-option--selected" : "taxonomy-management-option"} key={item.seriesId} onClick={() => setManagedSeriesId(item.seriesId)} type="button">{item.displayName}</button>)}</div> : <p className="taxonomy-management-empty">{t("contest.noManagedSeries")}</p> : null}
+            {managementMode === "year" ? yearEntities.length > 0 ? <div className="taxonomy-management-options">{yearEntities.map((item, index) => <button aria-pressed={managedYearId === item.yearId} className={managedYearId === item.yearId ? "taxonomy-management-option taxonomy-management-option--selected" : "taxonomy-management-option"} key={item.yearId} onClick={() => setManagedYearId(item.yearId)} ref={index === 0 ? managementInitialRef as React.RefObject<HTMLButtonElement> : undefined} type="button">{item.value}</button>)}</div> : <p className="taxonomy-management-empty">{t("contest.noManagedYears")}</p> : null}
+            <div aria-live="polite" className="taxonomy-management-current"><span>{t("contest.currentSelection")}</span><strong>{managementMode === "category" ? managedFamily?.displayName ?? t("contest.noneSelected") : managementMode === "series" ? managedSeriesItem?.displayName ?? t("contest.noneSelected") : managedYear?.value ?? t("contest.noneSelected")}</strong></div>
+            {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
+            <div className="action-row taxonomy-management-actions"><button className="secondary-action" disabled={managementBusy} onClick={closeManagementDialog} type="button">{t("common.cancel")}</button><button className="text-button" disabled={!managementHasSelection || managementBusy} onClick={startRenameSubview} ref={managementRenameActionRef} type="button">{t("contest.rename")}</button><button className="danger-action" disabled={!managementHasSelection || managementBusy} onClick={openManagedDelete} type="button">{t("common.delete")}</button></div>
+          </div>}
+        </div></div> : null}
+        {deleteFamilyTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.selectedFamily")}</p><p>{t("contest.deleteFamilyDescription", { count: deleteFamilySeriesCount })}</p><label>{t("contest.family")}<select value={deleteFamilyReplacement ?? ""} onChange={(event) => setDeleteFamilyReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{families?.filter((family) => family.familyId !== deleteFamilyTarget).map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteFamily(deleteFamilyTarget, deleteFamilyReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteFamilyTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
+        {deleteSeriesTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.seriesManagement")}</p><label>{t("contest.series")}<select value={deleteSeriesReplacement ?? ""} onChange={(event) => setDeleteSeriesReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{managedSeries.filter((item) => item.seriesId !== deleteSeriesTarget).map((item) => <option key={item.seriesId} value={item.seriesId}>{item.displayName}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteSeries(deleteSeriesTarget, deleteSeriesReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteSeriesTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
         {deleteYearTarget !== null ? <div className="modal-backdrop"><div className="content-panel" role="dialog" aria-modal="true"><h2>{t("common.delete")}</h2><p>{t("contest.yearManagement")}</p><label>{t("contest.year")}<select value={deleteYearReplacement ?? ""} onChange={(event) => setDeleteYearReplacement(event.currentTarget.value ? Number(event.currentTarget.value) : null)}><option value="">{t("contest.optional")}</option>{yearEntities.filter((item) => item.yearId !== deleteYearTarget).map((item) => <option key={item.yearId} value={item.yearId}>{item.value}</option>)}</select></label><div className="action-row"><button className="danger-action" disabled={managementBusy} onClick={() => void deleteYear(deleteYearTarget, deleteYearReplacement)} type="button">{t("common.delete")}</button><button className="secondary-action" onClick={() => setDeleteYearTarget(null)} type="button">{t("common.cancel")}</button></div></div></div> : null}
       </section>
       <form className="content-panel contest-import-form" onSubmit={submitImport}><label>{t("contest.url")}<input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} /></label><button className="primary-action" disabled={importing} type="submit">{importing ? t("contest.importing") : t("contest.import")}</button>{importMessage ? <p aria-live="polite" className="system-caption">{importMessage}</p> : null}</form>

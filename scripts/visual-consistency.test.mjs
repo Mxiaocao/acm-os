@@ -75,10 +75,23 @@ test("Contest taxonomy filters stay peer-level and create chips wrap with their 
   const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
   assert.equal(shells.match(/className="taxonomy-filter-group"/g)?.length, 3);
   assert.equal(shells.match(/className="filter-option filter-option--create"/g)?.length, 3);
+  assert.equal(shells.match(/className="text-button taxonomy-manage-trigger"/g)?.length, 3);
   assert.doesNotMatch(shells, /contest-library-create-panel/);
+  assert.doesNotMatch(shells, /management-list|management-list__row|className="inline-form"/);
   assert.match(css, /\.filter-options\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.taxonomy-filter-group__header\s*\{[^}]*justify-content:\s*space-between;/);
   assert.match(css, /\.filter-option--create\s*\{[\s\S]*?min-width:\s*40px;[\s\S]*?border-style:\s*dashed;/);
   assert.doesNotMatch(css, /\.filter-options\s*\{[^}]*overflow-x:/);
+});
+
+test("Contest taxonomy management reuses chips in one scoped dialog instead of persistent row actions", async () => {
+  const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
+  assert.match(shells, /className="contest-taxonomy-management-dialog"/);
+  assert.match(shells, /className="taxonomy-management-options"/);
+  assert.match(shells, /managedFamilyId === item\.familyId \? "taxonomy-management-option taxonomy-management-option--selected"/);
+  assert.match(css, /\.taxonomy-management-options\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.taxonomy-management-option--selected\s*\{[^}]*border-color:\s*var\(--accent\)/);
+  assert.doesNotMatch(css, /\.management-list(?:__row)?\s*\{/);
 });
 
 test("Contest cabinet switches only between full and compact column presentation", async () => {

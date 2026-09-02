@@ -601,17 +601,33 @@ test("Contest Library creates taxonomy from peer-level chips and preserves persi
     assert.equal(view.document.activeElement, createSeriesButton);
     assert.ok(calls.some(([name]) => name === "contest_library_create_series"));
     assert.ok([...view.document.querySelectorAll("button")].some((button) => button.textContent === "Rounds"));
-    const familyRename = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "重命名");
+    const familyManage = view.document.querySelector('button[aria-label="管理分类"]');
+    await act(async () => familyManage.click()); await settle();
+    let managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(managementDialog.getAttribute("aria-modal"), "true");
+    assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "User Family");
+    const familyRename = [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "重命名");
     await act(async () => familyRename.click()); await settle();
-    const familyRenameForm = view.document.querySelector(".management-list .inline-form");
+    const familyRenameForm = view.document.querySelector(".contest-taxonomy-management--rename");
     const familyRenameInput = familyRenameForm.querySelector("input");
+    assert.equal(view.document.activeElement, familyRenameInput);
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(familyRenameInput, "Renamed Family"); familyRenameInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await settle();
     await act(async () => familyRenameForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.deepEqual(calls.find(([name]) => name === "contest_library_rename_family")[1], { familyId: 2, displayName: "Renamed Family" });
-    const seriesRename = [...view.document.querySelectorAll(".management-list__row > button")].find((button) => button.textContent === "重命名");
+    assert.equal([...view.document.querySelectorAll("button.filter-option--selected")].some((button) => button.textContent === "Renamed Family"), true);
+    assert.equal(view.document.activeElement.textContent, "重命名");
+    await act(async () => [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "取消").click()); await settle();
+    const seriesManage = view.document.querySelector('button[aria-label="管理系列"]');
+    await act(async () => seriesManage.click()); await settle();
+    managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(managementDialog.querySelector("select").value, "2");
+    const managedSeriesChip = [...managementDialog.querySelectorAll(".taxonomy-management-option")].find((button) => button.textContent === "Rounds");
+    await act(async () => managedSeriesChip.click()); await settle();
+    const seriesRename = [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "重命名");
     await act(async () => seriesRename.click()); await settle();
-    const seriesRenameForm = view.document.querySelector(".management-list__row .inline-form");
+    const seriesRenameForm = view.document.querySelector(".contest-taxonomy-management--rename");
+    assert.match(seriesRenameForm.textContent, /Renamed Family/);
     const seriesRenameInput = seriesRenameForm.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(seriesRenameInput, "Renamed Series"); seriesRenameInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await settle();
@@ -636,7 +652,10 @@ test("Contest Library peer groups expose accessible create dialogs and explicit 
     const [createFamilyButton, createSeriesButton, createYearButton] = [...view.document.querySelectorAll("button.filter-option--create")];
     assert.equal(groups.length, 3);
     assert.deepEqual([createFamilyButton, createSeriesButton, createYearButton].map((button) => button.getAttribute("aria-label")), ["创建分类", "创建系列", "创建年份"]);
+    assert.deepEqual([...view.document.querySelectorAll(".taxonomy-manage-trigger")].map((button) => button.getAttribute("aria-label")), ["管理分类", "管理系列", "管理年份"]);
     assert.equal(view.document.querySelector(".contest-library-create-panel"), null);
+    assert.equal(view.document.querySelector(".management-list"), null);
+    assert.equal(view.document.querySelector(".management-list__row"), null);
 
     await act(async () => createSeriesButton.click()); await settle();
     let dialog = view.document.querySelector('[role="dialog"]');
@@ -664,6 +683,133 @@ test("Contest Library peer groups expose accessible create dialogs and explicit 
     last.focus();
     await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
     assert.equal(view.document.activeElement, dialog.querySelector("input"));
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library taxonomy management keeps selection independent and gives Series an explicit Category context", { concurrency: false }, async () => {
+  const calls = [];
+  const families = [{ familyId: 1, displayName: "Codeforces" }, { familyId: 2, displayName: "XCPC" }];
+  const seriesByFamily = new Map([
+    [1, [{ seriesId: 11, familyId: 1, displayName: "Div.1" }, { seriesId: 12, familyId: 1, displayName: "Div.2" }]],
+    [2, [{ seriesId: 21, familyId: 2, displayName: "Regional" }]],
+  ]);
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return families;
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_series") return seriesByFamily.get(args.input.familyId) ?? [];
+    if (command === "contest_library_list_years") return [];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_delete_series") { calls.push([command, args.input]); return null; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const seriesManage = view.document.querySelector('button[aria-label="管理系列"]');
+    await act(async () => seriesManage.click()); await settle();
+    let dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    let context = dialog.querySelector("select");
+    assert.equal(context.value, "");
+    assert.equal(view.document.activeElement, context);
+    assert.match(dialog.textContent, /请先选择分类/);
+    const cancelManagement = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "取消");
+    cancelManagement.focus();
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
+    assert.equal(view.document.activeElement, context);
+    assert.equal([...view.document.querySelectorAll(".taxonomy-filter-group")][0].querySelector(".filter-option--selected").textContent, "全部比赛");
+
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "1"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    const divOne = [...dialog.querySelectorAll(".taxonomy-management-option")].find((button) => button.textContent === "Div.1");
+    await act(async () => divOne.click()); await settle();
+    assert.equal(dialog.querySelector(".taxonomy-management-current strong").textContent, "Div.1");
+    assert.equal([...view.document.querySelectorAll(".taxonomy-filter-group")][0].querySelector(".filter-option--selected").textContent, "全部比赛");
+    assert.equal([...view.document.querySelectorAll(".taxonomy-filter-group")][1].querySelector(".filter-option--selected").textContent, "全部系列");
+
+    context = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "2"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(dialog.querySelector(".taxonomy-management-current strong").textContent, "尚未选择");
+    assert.equal(dialog.querySelector('.taxonomy-management-option[aria-pressed="true"]'), null);
+
+    context = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "1"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    await act(async () => [...dialog.querySelectorAll(".taxonomy-management-option")].find((button) => button.textContent === "Div.1").click()); await settle();
+    await act(async () => dialog.querySelector(".danger-action").click()); await settle();
+    const deleteDialog = view.document.querySelector('[role="dialog"]');
+    const replacement = deleteDialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "12"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    await act(async () => [...deleteDialog.querySelectorAll("button")].find((button) => button.textContent === "删除").click()); await settle();
+    assert.deepEqual(calls[0], ["contest_library_delete_series", { seriesId: 11, replacementSeriesId: 12 }]);
+
+    const xcpc = [...view.document.querySelectorAll(".taxonomy-filter-group:first-child .filter-option")].find((button) => button.textContent === "XCPC");
+    await act(async () => xcpc.click()); await settle();
+    const regional = [...view.document.querySelectorAll(".taxonomy-filter-group:nth-child(2) .filter-option")].find((button) => button.textContent === "Regional");
+    await act(async () => regional.click()); await settle();
+    await act(async () => seriesManage.click()); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(dialog.querySelector("select").value, "2");
+    assert.equal(dialog.querySelector(".taxonomy-management-current strong").textContent, "Regional");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }))); await settle();
+    assert.equal(view.document.querySelector(".contest-taxonomy-management-dialog"), null);
+    assert.equal(view.document.activeElement, seriesManage);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library management exposes exact empty states without repair entities", { concurrency: false }, async () => {
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    await act(async () => view.document.querySelector('button[aria-label="管理分类"]').click()); await settle();
+    assert.match(view.document.querySelector(".contest-taxonomy-management-dialog").textContent, /暂无可编辑的分类/);
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }))); await settle();
+    await act(async () => view.document.querySelector('button[aria-label="管理年份"]').click()); await settle();
+    assert.match(view.document.querySelector(".contest-taxonomy-management-dialog").textContent, /暂无可编辑的年份/);
+    assert.doesNotMatch(view.document.body.textContent, /Unknown|Unassigned|未知年份|未分配系列/);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library rename blocks duplicate submits and retains failed input", { concurrency: false }, async () => {
+  let rejectRename;
+  let renameCalls = 0;
+  const pendingRename = new Promise((_resolve, reject) => { rejectRename = reject; });
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Codeforces" }];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_rename_family") { renameCalls += 1; return pendingRename; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    await act(async () => view.document.querySelector('button[aria-label="管理分类"]').click()); await settle();
+    let dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    await act(async () => dialog.querySelector(".taxonomy-management-option").click()); await settle();
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "重命名").click()); await settle();
+    const form = view.document.querySelector(".contest-taxonomy-management--rename");
+    const input = form.querySelector("input");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, "Persistent rename"); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await act(async () => {
+      form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    assert.equal(renameCalls, 1);
+    assert.equal(input.disabled, true);
+    await act(async () => rejectRename(new Error("duplicate_family_name"))); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(dialog.querySelector("input").value, "Persistent rename");
+    assert.ok(dialog.querySelector(".error-message"));
   } finally { await view.cleanup(); }
 });
 
@@ -721,7 +867,10 @@ test("Contest Library category deletion discloses series identity preservation b
     await settle();
     const family = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "Family A");
     await act(async () => family.click()); await settle();
-    const deleteButton = [...view.document.querySelectorAll(".management-list > div > button")].find((button) => button.textContent === "删除");
+    await act(async () => view.document.querySelector('button[aria-label="管理分类"]').click()); await settle();
+    const managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "Family A");
+    const deleteButton = [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "删除");
     await act(async () => deleteButton.click()); await settle();
     assert.match(view.document.body.textContent, /保留系列身份；如果替代分类中存在同名系列，删除将被阻止。此分类下共 1 个系列会随其关联一并迁移。/);
     const dialog = view.document.querySelector('[role="dialog"]');
@@ -809,15 +958,18 @@ test("Contest Library manages Year entities through stable IDs", { concurrency: 
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(createInput, "2027"); createInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await act(async () => createForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.deepEqual(calls.find(([name]) => name === "contest_library_create_year")[1], { value: 2027 });
-    let row = [...view.document.querySelectorAll(".management-list__row")].find((item) => item.textContent.includes("2027"));
-    await act(async () => [...row.querySelectorAll("button")].find((button) => button.textContent === "\u91cd\u547d\u540d").click()); await settle();
-    const renameForm = row.querySelector(".inline-form");
+    await act(async () => view.document.querySelector('button[aria-label="管理年份"]').click()); await settle();
+    let managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "2027");
+    await act(async () => [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "\u91cd\u547d\u540d").click()); await settle();
+    const renameForm = view.document.querySelector(".contest-taxonomy-management--rename");
     const renameInput = renameForm.querySelector("input");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(renameInput, "2028"); renameInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await act(async () => renameForm.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.deepEqual(calls.find(([name]) => name === "contest_library_rename_year")[1], { yearId: 3, value: 2028 });
-    row = [...view.document.querySelectorAll(".management-list__row")].find((item) => item.textContent.includes("2028"));
-    await act(async () => row.querySelector(".danger-action").click()); await settle();
+    managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "2028");
+    await act(async () => managementDialog.querySelector(".danger-action").click()); await settle();
     const dialog = view.document.querySelector('[role="dialog"]');
     const replacement = dialog.querySelector("select");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "1"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
