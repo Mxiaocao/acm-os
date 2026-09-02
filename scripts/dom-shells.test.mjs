@@ -739,9 +739,13 @@ test("Contest Library taxonomy management keeps selection independent and gives 
     await act(async () => [...dialog.querySelectorAll(".taxonomy-management-option")].find((button) => button.textContent === "Div.1").click()); await settle();
     await act(async () => dialog.querySelector(".danger-action").click()); await settle();
     const deleteDialog = view.document.querySelector('[role="dialog"]');
+    assert.equal(view.document.querySelector(".contest-taxonomy-management-dialog"), null);
+    assert.match(deleteDialog.textContent, /当前系列Div\.1/);
+    assert.match(deleteDialog.textContent, /所属分类Codeforces/);
     const replacement = deleteDialog.querySelector("select");
+    assert.deepEqual([...replacement.options].map((option) => option.textContent), ["不设替代项（仅适用于未使用对象）", "Div.2"]);
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "12"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
-    await act(async () => [...deleteDialog.querySelectorAll("button")].find((button) => button.textContent === "删除").click()); await settle();
+    await act(async () => [...deleteDialog.querySelectorAll("button")].find((button) => button.textContent === "确认删除").click()); await settle();
     assert.deepEqual(calls[0], ["contest_library_delete_series", { seriesId: 11, replacementSeriesId: 12 }]);
 
     const xcpc = [...view.document.querySelectorAll(".taxonomy-filter-group:first-child .filter-option")].find((button) => button.textContent === "XCPC");
@@ -872,16 +876,94 @@ test("Contest Library category deletion discloses series identity preservation b
     assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "Family A");
     const deleteButton = [...managementDialog.querySelectorAll("button")].find((button) => button.textContent === "删除");
     await act(async () => deleteButton.click()); await settle();
-    assert.match(view.document.body.textContent, /保留系列身份；如果替代分类中存在同名系列，删除将被阻止。此分类下共 1 个系列会随其关联一并迁移。/);
+    assert.match(view.document.body.textContent, /全部 1 个系列会保留身份并迁移到替代分类/);
     const dialog = view.document.querySelector('[role="dialog"]');
     assert.ok(dialog);
+    assert.equal(dialog.getAttribute("aria-labelledby"), "contest-taxonomy-delete-category-title");
+    assert.match(dialog.getAttribute("aria-describedby"), /contest-taxonomy-delete-category-description/);
+    assert.match(dialog.textContent, /当前分类Family A/);
+    assert.match(dialog.textContent, /删除影响/);
+    assert.match(dialog.textContent, /风险提示/);
     assert.equal(dialog.querySelectorAll("select option").length, 2);
     assert.equal(calls.length, 0);
     const replacement = dialog.querySelector("select");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "2"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
-    const confirm = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "删除");
+    const confirm = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "确认删除");
     await act(async () => confirm.click()); await settle();
     assert.deepEqual(calls[0][1], { familyId: 1, replacementFamilyId: 2 });
+  } finally { await view.cleanup(); }
+});
+
+test("Contest taxonomy delete retains validation state and blocks duplicate busy actions", { concurrency: false }, async () => {
+  let families = [{ familyId: 1, displayName: "Family A" }, { familyId: 2, displayName: "Family B" }, { familyId: 3, displayName: "Family C" }];
+  let deleteCalls = 0;
+  let resolveDelete;
+  const pendingDelete = new Promise((resolve) => { resolveDelete = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return families;
+    if (command === "contest_library_list_series") return [];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_contests") return [];
+    if (command === "contest_library_delete_family") {
+      deleteCalls += 1;
+      if (args.input.replacementFamilyId === null) throw new Error("family_in_use");
+      if (args.input.replacementFamilyId === 2) throw new Error("family_in_use");
+      families = families.filter((item) => item.familyId !== args.input.familyId);
+      return pendingDelete;
+    }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const manageTrigger = view.document.querySelector('button[aria-label="管理分类"]');
+    await act(async () => manageTrigger.click()); await settle();
+    let managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    await act(async () => managementDialog.querySelector(".taxonomy-management-option").click()); await settle();
+    await act(async () => managementDialog.querySelector(".danger-action").click()); await settle();
+    let dialog = view.document.querySelector(".contest-taxonomy-delete-dialog");
+    const select = dialog.querySelector("select");
+    assert.equal(view.document.activeElement, select);
+    const confirm = dialog.querySelector(".danger-action");
+    confirm.focus();
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })));
+    assert.equal(view.document.activeElement, select);
+
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }))); await settle();
+    managementDialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.ok(managementDialog);
+    assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "Family A");
+    await act(async () => managementDialog.querySelector(".danger-action").click()); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-delete-dialog");
+
+    await act(async () => dialog.querySelector(".danger-action").click()); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-delete-dialog");
+    assert.equal(deleteCalls, 1);
+    assert.match(dialog.textContent, /当前对象正在使用/);
+    assert.ok(dialog.querySelector('[role="alert"]'));
+    assert.equal(dialog.querySelector(".danger-action").disabled, true);
+    assert.equal(dialog.querySelector("select").value, "");
+
+    const replacement = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "2"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    await act(async () => dialog.querySelector(".danger-action").click()); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-delete-dialog");
+    assert.match(dialog.textContent, /替代分类中存在同名系列/);
+    assert.equal(dialog.querySelector("select").value, "2");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(dialog.querySelector("select"), "3"); dialog.querySelector("select").dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    const readyConfirm = view.document.querySelector(".contest-taxonomy-delete-dialog .danger-action");
+    await act(async () => { readyConfirm.click(); readyConfirm.click(); });
+    assert.equal(deleteCalls, 3);
+    dialog = view.document.querySelector(".contest-taxonomy-delete-dialog");
+    assert.equal(dialog.querySelector(".danger-action").textContent, "删除中…");
+    assert.equal(dialog.querySelector("select").disabled, true);
+    assert.equal(dialog.querySelector(".secondary-action").disabled, true);
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    assert.ok(view.document.querySelector(".contest-taxonomy-delete-dialog"));
+    await act(async () => resolveDelete()); await settle();
+    assert.equal(view.document.querySelector(".contest-taxonomy-delete-dialog"), null);
+    assert.equal(view.document.activeElement, manageTrigger);
   } finally { await view.cleanup(); }
 });
 
@@ -971,9 +1053,11 @@ test("Contest Library manages Year entities through stable IDs", { concurrency: 
     assert.equal(managementDialog.querySelector(".taxonomy-management-current strong").textContent, "2028");
     await act(async () => managementDialog.querySelector(".danger-action").click()); await settle();
     const dialog = view.document.querySelector('[role="dialog"]');
+    assert.match(dialog.textContent, /当前年份2028/);
+    assert.match(dialog.textContent, /未使用的年份可以不选替代项直接删除/);
     const replacement = dialog.querySelector("select");
     await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(replacement, "1"); replacement.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
-    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "\u5220\u9664").click()); await settle();
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "确认删除").click()); await settle();
     assert.deepEqual(calls.find(([name]) => name === "contest_library_delete_year")[1], { yearId: 3, replacementYearId: 1 });
   } finally { await view.cleanup(); }
 });

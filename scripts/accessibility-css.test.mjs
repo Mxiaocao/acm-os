@@ -41,6 +41,17 @@ test("inactive Compact cabinet columns stay out of the interactive accessibility
   );
 });
 
+test("Contest taxonomy destructive workflow exposes labelled dialog and contained focus states", async () => {
+  const shells = await readFile(new URL("../src/app/shells.tsx", import.meta.url), "utf8");
+  assert.match(shells, /aria-describedby=\{`\$\{descriptionId\} \$\{riskId\}/);
+  assert.match(shells, /aria-labelledby=\{titleId\}/);
+  assert.match(shells, /aria-modal="true"/);
+  assert.match(shells, /role="dialog"/);
+  assert.match(shells, /if \(!busy\) onCancel\(\)/);
+  assert.match(shells, /select:not\(\[disabled\]\), button:not\(\[disabled\]\)/);
+  assert.match(shells, /aria-live="assertive"[\s\S]*?role="alert"/);
+});
+
 test("Tauri runtime configurations keep a restrictive content security policy", async () => {
   const config = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   const e2eConfig = JSON.parse(await readFile(new URL("../src-tauri/tauri.e2e.conf.json", import.meta.url), "utf8"));

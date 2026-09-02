@@ -94,6 +94,18 @@ test("Contest taxonomy management reuses chips in one scoped dialog instead of p
   assert.doesNotMatch(css, /\.management-list(?:__row)?\s*\{/);
 });
 
+test("Contest safe-delete dialogs use one structured destructive hierarchy", async () => {
+  const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
+  assert.match(shells, /function TaxonomyDeleteDialog/);
+  assert.match(shells, /className="taxonomy-delete-current"/);
+  assert.match(shells, /className="taxonomy-delete-section taxonomy-delete-replacement"/);
+  assert.match(shells, /className="taxonomy-delete-risk"/);
+  assert.match(shells, /className="action-row taxonomy-delete-footer"/);
+  assert.match(css, /\.taxonomy-delete-footer\s*\{[^}]*justify-content:\s*flex-end;/);
+  assert.match(css, /\.taxonomy-delete-risk\s*\{[^}]*border-left:\s*3px solid var\(--danger\);/);
+  assert.doesNotMatch(shells, /deleteFamilyTarget !== null \? <div className="modal-backdrop"><div className="content-panel"/);
+});
+
 test("Contest cabinet switches only between full and compact column presentation", async () => {
   const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
   assert.match(css, /\.contest-cabinet-prototype\s*\{[\s\S]*?container-name:\s*contest-cabinet-presentation;[\s\S]*?container-type:\s*inline-size;/);
