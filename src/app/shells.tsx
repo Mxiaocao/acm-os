@@ -2085,14 +2085,20 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const closeManagementDialog = useCallback(() => {
     if (managementPendingRef.current || managementMode === null) return;
     const mode = managementMode;
+    managementSeriesRequest.current += 1;
     setManagementMode(null); setEditingFamily(null); setEditingSeries(null); setEditingYear(null); setManagementMessage(null);
     restoreManagementFocus(mode);
   }, [managementMode, restoreManagementFocus]);
   const loadManagedSeries = async (nextFamilyId: number) => {
     const request = ++managementSeriesRequest.current;
-    const next = await listContestLibrarySeries(nextFamilyId);
-    if (request === managementSeriesRequest.current) setManagedSeries(next);
-    return next;
+    try {
+      const next = await listContestLibrarySeries(nextFamilyId);
+      if (request === managementSeriesRequest.current) setManagedSeries(next);
+      return next;
+    } catch (error) {
+      if (request === managementSeriesRequest.current) setManagementMessage(contestLibraryErrorMessage(error));
+      return null;
+    }
   };
   const openManagementDialog = (mode: "category" | "series" | "year") => {
     setManagementMessage(null); setEditingFamily(null); setEditingSeries(null); setEditingYear(null);
@@ -2234,6 +2240,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     try {
       await renameContestLibrarySeries(id, seriesDraft);
       const next = await loadManagedSeries(managedSeriesFamilyId);
+      if (next === null) return;
       if (familyId === managedSeriesFamilyId) setSeries(next);
       setSeriesDraft(""); managementSubviewReturnRef.current = true; setEditingSeries(null);
     }
@@ -2446,7 +2453,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
             <div className="action-row taxonomy-management-actions"><button className="secondary-action" disabled={managementBusy} onClick={cancelRenameSubview} type="button">{t("common.cancel")}</button><button className="primary-action" disabled={managementBusy} type="submit">{managementBusy ? t("contest.saving") : t("contest.saveName")}</button></div>
           </form> : <div className="contest-taxonomy-management">
             <h2 id="contest-taxonomy-management-title">{managementMode === "category" ? t("contest.manageFamily") : managementMode === "series" ? t("contest.manageSeries") : t("contest.manageYear")}</h2>
-            {managementMode === "series" ? <label>{t("contest.family")}<select disabled={managementBusy} onChange={(event) => { const next = event.currentTarget.value ? Number(event.currentTarget.value) : null; managementSeriesRequest.current += 1; setManagedSeriesFamilyId(next); setManagedSeriesId(null); setManagedSeries([]); setManagementMessage(null); if (next !== null) void loadManagedSeries(next).catch((error) => setManagementMessage(contestLibraryErrorMessage(error))); }} ref={managementInitialRef as React.RefObject<HTMLSelectElement>} value={managedSeriesFamilyId ?? ""}><option value="">{t("contest.chooseFamily")}</option>{families?.map((item) => <option key={item.familyId} value={item.familyId}>{item.displayName}</option>)}</select></label> : null}
+            {managementMode === "series" ? <label>{t("contest.family")}<select disabled={managementBusy} onChange={(event) => { const next = event.currentTarget.value ? Number(event.currentTarget.value) : null; managementSeriesRequest.current += 1; setManagedSeriesFamilyId(next); setManagedSeriesId(null); setManagedSeries([]); setManagementMessage(null); if (next !== null) void loadManagedSeries(next); }} ref={managementInitialRef as React.RefObject<HTMLSelectElement>} value={managedSeriesFamilyId ?? ""}><option value="">{t("contest.chooseFamily")}</option>{families?.map((item) => <option key={item.familyId} value={item.familyId}>{item.displayName}</option>)}</select></label> : null}
             <p className="taxonomy-management-instruction">{managementMode === "category" ? t("contest.chooseManagedFamily") : managementMode === "series" ? t("contest.chooseManagedSeries") : t("contest.chooseManagedYear")}</p>
             {managementMode === "category" ? families && families.length > 0 ? <div className="taxonomy-management-options">{families.map((item, index) => <button aria-pressed={managedFamilyId === item.familyId} className={managedFamilyId === item.familyId ? "taxonomy-management-option taxonomy-management-option--selected" : "taxonomy-management-option"} key={item.familyId} onClick={() => setManagedFamilyId(item.familyId)} ref={index === 0 ? managementInitialRef as React.RefObject<HTMLButtonElement> : undefined} type="button">{item.displayName}</button>)}</div> : <p className="taxonomy-management-empty">{t("contest.noManagedFamilies")}</p> : null}
             {managementMode === "series" ? managedSeriesFamilyId === null ? <p className="taxonomy-management-empty">{t("contest.chooseFamilyFirst")}</p> : managedSeries.length > 0 ? <div className="taxonomy-management-options">{managedSeries.map((item) => <button aria-pressed={managedSeriesId === item.seriesId} className={managedSeriesId === item.seriesId ? "taxonomy-management-option taxonomy-management-option--selected" : "taxonomy-management-option"} key={item.seriesId} onClick={() => setManagedSeriesId(item.seriesId)} type="button">{item.displayName}</button>)}</div> : <p className="taxonomy-management-empty">{t("contest.noManagedSeries")}</p> : null}

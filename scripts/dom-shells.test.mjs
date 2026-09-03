@@ -811,6 +811,65 @@ test("Contest Library taxonomy management keeps selection independent and gives 
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library Series management ignores stale Category rejection", { concurrency: false }, async () => {
+  let rejectA;
+  let resolveB;
+  const seriesA = new Promise((resolve, reject) => { rejectA = reject; });
+  const seriesB = new Promise((resolve) => { resolveB = resolve; });
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Category A" }, { familyId: 2, displayName: "Category B" }];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_series") return args.input.familyId === 1 ? seriesA : seriesB;
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const pageCategory = [...view.document.querySelectorAll(".taxonomy-filter-group")][0].querySelector(".filter-option--selected").textContent;
+    const pageSeries = [...view.document.querySelectorAll(".taxonomy-filter-group")][1].querySelector(".filter-option--selected").textContent;
+    const seriesManage = view.document.querySelectorAll(".taxonomy-manage-trigger")[1];
+    await act(async () => seriesManage.click()); await settle();
+    let dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    let context = dialog.querySelector("select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "1"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    context = view.document.querySelector(".contest-taxonomy-management-dialog select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "2"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    await act(async () => resolveB([{ seriesId: 22, familyId: 2, displayName: "Series B" }])); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(dialog.querySelector("select").value, "2");
+    assert.ok([...dialog.querySelectorAll(".taxonomy-management-option")].some((button) => button.textContent === "Series B"));
+    await act(async () => rejectA(new Error("stale Category A failure"))); await settle();
+    dialog = view.document.querySelector(".contest-taxonomy-management-dialog");
+    assert.equal(dialog.querySelector("select").value, "2");
+    assert.ok([...dialog.querySelectorAll(".taxonomy-management-option")].some((button) => button.textContent === "Series B"));
+    assert.equal(dialog.querySelector(".error-message")?.textContent ?? null, null);
+    assert.equal([...view.document.querySelectorAll(".taxonomy-filter-group")][0].querySelector(".filter-option--selected").textContent, pageCategory);
+    assert.equal([...view.document.querySelectorAll(".taxonomy-filter-group")][1].querySelector(".filter-option--selected").textContent, pageSeries);
+  } finally { await view.cleanup(); }
+});
+
+test("Contest Library Series management shows the current Category rejection", { concurrency: false }, async () => {
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Category A" }];
+    if (command === "contest_library_list_year_entities") return [];
+    if (command === "contest_library_list_series") return Promise.reject(new Error(`Category ${args.input.familyId} unavailable`));
+    if (command === "contest_library_list_contests") return [];
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    await settle();
+    const seriesManage = view.document.querySelectorAll(".taxonomy-manage-trigger")[1];
+    await act(async () => seriesManage.click()); await settle();
+    const context = view.document.querySelector(".contest-taxonomy-management-dialog select");
+    await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLSelectElement.prototype, "value").set.call(context, "1"); context.dispatchEvent(new view.window.Event("change", { bubbles: true })); }); await settle();
+    assert.match(view.document.querySelector(".contest-taxonomy-management-dialog .error-message").textContent, /比赛库操作失败/);
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Library management exposes exact empty states without repair entities", { concurrency: false }, async () => {
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
