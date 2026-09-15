@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 export type TodayLane = "carryIn" | "review" | "study";
 export type TodayReason = "continueReview" | "continueLearning" | "dueFirstColdStart" | "dueLongTermReview" | "relearn" | "upsolve";

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type { StartupRecoveryReasonCode } from "./startup";
 import type { WorkspaceStatusDto } from "./workspace";
 

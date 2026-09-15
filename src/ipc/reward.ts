@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import { v7 as uuidv7 } from "uuid";
 
 export interface RewardActivationStateDto {

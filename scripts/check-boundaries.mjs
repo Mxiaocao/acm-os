@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const EXPECTED_RUST_DEPENDENCIES = {
   "acm-os-domain": ["normal:chrono"],
-  "acm-os-application": ["normal:acm-os-domain"],
+  "acm-os-application": ["normal:acm-os-domain", "normal:chrono"],
   "acm-os-infrastructure": [
     "dev:tokio",
     "normal:acm-os-application",

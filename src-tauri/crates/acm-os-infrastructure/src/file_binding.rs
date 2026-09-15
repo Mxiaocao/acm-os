@@ -113,6 +113,7 @@ pub(crate) fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
         if !resolved_directory.starts_with(vault) || !visited.insert(resolved_directory.clone()) {
             continue;
         }
+        if manager_private_path(resolved_directory.strip_prefix(vault).map_err(|_| ())?) { continue; }
         for entry in std::fs::read_dir(&resolved_directory).map_err(|_| ())? {
             let entry = entry.map_err(|_| ())?;
             let file_type = entry.file_type().map_err(|_| ())?;
@@ -137,6 +138,7 @@ pub(crate) fn markdown_files(vault: &Path) -> Result<Vec<PathBuf>, ()> {
             }
         }
     }
+    files.retain(|path| path.strip_prefix(vault).is_ok_and(|relative| !manager_private_path(relative)));
     files.sort();
     files.dedup();
     Ok(files)
@@ -147,6 +149,7 @@ fn read_resolved_note(
     path: PathBuf,
     relocated: bool,
 ) -> Result<ResolvedNoteFile, ()> {
+    if manager_private_path(path.strip_prefix(vault).map_err(|_| ())?) { return Err(()); }
     let bytes = std::fs::read(&path).map_err(|_| ())?;
     resolved_note_from_bytes(vault, path, bytes, relocated)
 }
@@ -175,11 +178,19 @@ pub(crate) fn resolved_note_from_bytes(
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
+    !manager_private_path(path)
+        && !path.as_os_str().is_empty()
         && !path.is_absolute()
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn manager_private_path(path: &Path) -> bool {
+    path.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
+        name == ".acm-os" || name.starts_with(".acm-os-deleted-")
+    })
 }
 
 fn is_markdown(path: &Path) -> bool {

@@ -1,3 +1,6 @@
+import { VaultManagerPanel } from "./VaultManagerPanel";
+import { getVaultManagerStatus, type ManagerStatus } from "../ipc/vault-manager";
+import { setVaultContext } from "../ipc/invoke";
 import { useEffect, useState } from "react";
 import { getAppShellStatus, type AppShellStatusDto } from "../ipc/app-shell";
 import { getFoundationStatus, type FoundationStatus } from "../ipc/foundation";
@@ -15,6 +18,8 @@ import {
 type ConfiguredWorkspace = Extract<WorkspaceStatusDto, { state: "configured" }>;
 
 export function App() {
+  const [vaultStatus, setVaultStatus] = useState<ManagerStatus | null>(null);
+  const [vaultError, setVaultError] = useState(false);
   const [shell, setShell] = useState<AppShellStatusDto | null>(null);
   const [foundation, setFoundation] = useState<FoundationStatus>({ state: "checking" });
   const [startupUnavailable, setStartupUnavailable] = useState(false);
@@ -29,8 +34,19 @@ export function App() {
       .catch(() => {
         if (active) setFoundation({ state: "unavailable" });
       });
-    getAppShellStatus()
+    getVaultManagerStatus()
+      .then(async (status) => {
+        if (!active) return null;
+        setVaultStatus(status);
+        setVaultContext(status.context);
+        if (status.current.state !== "ready") return null;
+        return getAppShellStatus().catch(() => {
+          if (active) setStartupUnavailable(true);
+          return null;
+        });
+      })
       .then((result) => {
+        if (!result) return;
         if (active) {
           setShell(result);
           if (result.state === "normal" && window.location.pathname === "/") {
@@ -40,11 +56,22 @@ export function App() {
         }
       })
       .catch(() => {
-        if (active) setStartupUnavailable(true);
+        if (active) setVaultError(true);
       });
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const changed = () => {
+      setShell(null); setVaultStatus(null); setVaultError(false); setStartupUnavailable(false);
+      window.history.replaceState(null, "", "/settings"); setPathname("/settings");
+      // Destroy timers, closures and caches from the previous data space.
+      window.location.reload();
+    };
+    window.addEventListener("vault-context-changed", changed);
+    return () => window.removeEventListener("vault-context-changed", changed);
   }, []);
 
   useEffect(() => {
@@ -67,6 +94,9 @@ export function App() {
     setPathname(nextPathname);
   };
 
+  if (vaultError || (vaultStatus && vaultStatus.current.state !== "ready")) {
+    return <main className="setup-shell"><h1>ACM-OS Workspace</h1><VaultManagerPanel /></main>;
+  }
   if (startupUnavailable) {
     return (
       <RecoveryShell

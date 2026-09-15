@@ -186,8 +186,11 @@ fn validate_reward_intent_id(value: &str) -> Result<(), &'static str> {
 
 #[tauri::command]
 pub async fn reward_activation_state(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<RewardActivationStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::reward_activation_state(database.inner())
         .await
         .map(|active| RewardActivationStateDto { active })
@@ -196,8 +199,11 @@ pub async fn reward_activation_state(
 
 #[tauri::command]
 pub async fn reward_account_summary(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<RewardAccountSummaryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::load_reward_account(database.inner())
         .await
         .map(reward_account_summary_dto)
@@ -206,8 +212,11 @@ pub async fn reward_account_summary(
 
 #[tauri::command]
 pub async fn list_custom_rewards(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<CustomRewardSummaryDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::list_custom_rewards(database.inner())
         .await
         .map(|values| values.into_iter().map(custom_reward_summary_dto).collect())
@@ -216,8 +225,11 @@ pub async fn list_custom_rewards(
 
 #[tauri::command]
 pub async fn reward_redemption_history(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<RedemptionHistoryItemDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::list_redemption_history(database.inner())
         .await
         .map(|values| {
@@ -231,8 +243,11 @@ pub async fn reward_redemption_history(
 
 #[tauri::command]
 pub async fn activate_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::activate_reward(database.inner())
         .await
         .map_err(acm_os_application::RewardError::code)
@@ -240,9 +255,12 @@ pub async fn activate_reward(
 
 #[tauri::command]
 pub async fn create_custom_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CreateCustomRewardInput,
 ) -> Result<CustomRewardSummaryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_custom_reward(database.inner(), &input.name, input.coin_cost)
         .await
         .map(custom_reward_summary_dto)
@@ -251,9 +269,12 @@ pub async fn create_custom_reward(
 
 #[tauri::command]
 pub async fn update_custom_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: UpdateCustomRewardInput,
 ) -> Result<CustomRewardSummaryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::update_custom_reward(
         database.inner(),
         &input.custom_reward_id,
@@ -267,9 +288,12 @@ pub async fn update_custom_reward(
 
 #[tauri::command]
 pub async fn archive_custom_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ArchiveCustomRewardInput,
 ) -> Result<CustomRewardSummaryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::archive_custom_reward(database.inner(), &input.custom_reward_id)
         .await
         .map(custom_reward_summary_dto)
@@ -278,9 +302,12 @@ pub async fn archive_custom_reward(
 
 #[tauri::command]
 pub async fn redeem_custom_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: RedeemCustomRewardInput,
 ) -> Result<RedemptionResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     validate_reward_intent_id(&input.redemption_id)?;
     acm_os_application::redeem_custom_reward(
         database.inner(),
@@ -294,9 +321,12 @@ pub async fn redeem_custom_reward(
 
 #[tauri::command]
 pub async fn refund_custom_reward(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: RefundCustomRewardInput,
 ) -> Result<RefundResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     validate_reward_intent_id(&input.refund_id)?;
     validate_reward_intent_id(&input.redemption_id)?;
     acm_os_application::refund_custom_reward(
@@ -322,10 +352,12 @@ pub struct SystemHealthSnapshotDto {
 
 #[tauri::command]
 pub async fn system_health_snapshot(
-    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<SystemHealthSnapshotDto, ()> {
-    let (startup_state, schema_version) = match startup.execute() {
+    let manager = manager.inner().as_ref().map_err(|_| ())?;
+    let database = manager.database(&vault_context).await.map_err(|_| ())?;
+    let (startup_state, schema_version) = match database.status() {
         acm_os_application::StartupGateStatus::Ready { schema_version } => {
             ("ready", Some(*schema_version))
         }
@@ -1473,9 +1505,12 @@ pub struct ContestImportRunDto {
 
 #[tauri::command]
 pub async fn import_codeforces_contest(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestImportInput,
 ) -> Result<ContestImportRunDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::import_codeforces_contest;
 
     let contest = acm_os_application::codeforces::locate_public_contest(&input.contest_url)
@@ -1513,9 +1548,12 @@ pub async fn import_codeforces_contest(
 
 #[tauri::command]
 pub async fn import_manual_codeforces_contest(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ManualContestInput,
 ) -> Result<ContestImportRunDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestImportPort;
     let problems = input
         .problems
@@ -1652,8 +1690,11 @@ impl acm_os_application::ContestImportSource for DesktopE2eContestSource {
 
 #[tauri::command]
 pub async fn contest_shelf(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<ContestShelfItemDto>, ()> {
+    let manager = manager.inner().as_ref().map_err(|_| ())?;
+    let database = manager.database(&vault_context).await.map_err(|_| ())?;
     use acm_os_application::ContestReadPort;
     database
         .list_contests()
@@ -1664,8 +1705,11 @@ pub async fn contest_shelf(
 
 #[tauri::command]
 pub async fn contest_library_list_families(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<ContestLibraryFamilyDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::list_families(database.inner())
         .await
         .map(|items| {
@@ -1682,9 +1726,12 @@ pub async fn contest_library_list_families(
 
 #[tauri::command]
 pub async fn contest_library_create_family(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryFamilyInput,
 ) -> Result<ContestLibraryFamilyDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_family(database.inner(), &input.display_name)
         .await
         .map(|item| ContestLibraryFamilyDto {
@@ -1696,9 +1743,12 @@ pub async fn contest_library_create_family(
 
 #[tauri::command]
 pub async fn contest_library_rename_family(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryFamilyRenameInput,
 ) -> Result<ContestLibraryFamilyDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::rename_family(database.inner(), input.family_id, &input.display_name)
         .await
         .map(|item| ContestLibraryFamilyDto {
@@ -1710,9 +1760,12 @@ pub async fn contest_library_rename_family(
 
 #[tauri::command]
 pub async fn contest_library_delete_family(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryFamilyDeleteInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::delete_family(
         database.inner(),
         input.family_id,
@@ -1724,9 +1777,12 @@ pub async fn contest_library_delete_family(
 
 #[tauri::command]
 pub async fn contest_library_list_series(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryFamilyIdInput,
 ) -> Result<Vec<ContestLibrarySeriesDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::list_series(database.inner(), input.family_id)
         .await
         .map(|items| {
@@ -1744,9 +1800,12 @@ pub async fn contest_library_list_series(
 
 #[tauri::command]
 pub async fn contest_library_create_series(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibrarySeriesInput,
 ) -> Result<ContestLibrarySeriesDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_series(database.inner(), input.family_id, &input.display_name)
         .await
         .map(|item| ContestLibrarySeriesDto {
@@ -1759,9 +1818,12 @@ pub async fn contest_library_create_series(
 
 #[tauri::command]
 pub async fn contest_library_rename_series(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibrarySeriesRenameInput,
 ) -> Result<ContestLibrarySeriesDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::rename_series(database.inner(), input.series_id, &input.display_name)
         .await
         .map(|item| ContestLibrarySeriesDto {
@@ -1774,9 +1836,12 @@ pub async fn contest_library_rename_series(
 
 #[tauri::command]
 pub async fn contest_library_delete_series(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibrarySeriesDeleteInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::delete_series(
         database.inner(),
         input.series_id,
@@ -1788,8 +1853,11 @@ pub async fn contest_library_delete_series(
 
 #[tauri::command]
 pub async fn contest_library_list_year_entities(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<ContestLibraryYearDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::list_year_entities(database.inner())
         .await
         .map(|items| {
@@ -1806,9 +1874,12 @@ pub async fn contest_library_list_year_entities(
 
 #[tauri::command]
 pub async fn contest_library_create_year(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryYearInput,
 ) -> Result<ContestLibraryYearDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_year(database.inner(), input.value)
         .await
         .map(|item| ContestLibraryYearDto {
@@ -1820,9 +1891,12 @@ pub async fn contest_library_create_year(
 
 #[tauri::command]
 pub async fn contest_library_rename_year(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryYearRenameInput,
 ) -> Result<ContestLibraryYearDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::rename_year(database.inner(), input.year_id, input.value)
         .await
         .map(|item| ContestLibraryYearDto {
@@ -1834,9 +1908,12 @@ pub async fn contest_library_rename_year(
 
 #[tauri::command]
 pub async fn contest_library_delete_year(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryYearDeleteInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::delete_year(database.inner(), input.year_id, input.replacement_year_id)
         .await
         .map_err(contest_library_error_code)
@@ -1844,9 +1921,12 @@ pub async fn contest_library_delete_year(
 
 #[tauri::command]
 pub async fn contest_library_list_years(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryYearsInput,
 ) -> Result<Vec<ContestLibraryYearDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let series = contest_library_series_filter(input.series)?;
     acm_os_application::list_years(database.inner(), input.family_id, series)
         .await
@@ -1864,9 +1944,12 @@ pub async fn contest_library_list_years(
 
 #[tauri::command]
 pub async fn contest_library_list_contest_placements(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestDetailInput,
 ) -> Result<Vec<ContestLibraryPlacementDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
     acm_os_application::list_contest_placements(database.inner(), &contest)
@@ -1891,9 +1974,12 @@ pub async fn contest_library_list_contest_placements(
 
 #[tauri::command]
 pub async fn contest_library_create_placement(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryPlacementInput,
 ) -> Result<ContestLibraryPlacementDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
     acm_os_application::create_placement(
@@ -1914,9 +2000,12 @@ pub async fn contest_library_create_placement(
 
 #[tauri::command]
 pub async fn contest_library_update_placement(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryPlacementUpdateInput,
 ) -> Result<ContestLibraryPlacementDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::update_placement(
         database.inner(),
         acm_os_application::UpdateContestPlacement {
@@ -1935,9 +2024,12 @@ pub async fn contest_library_update_placement(
 
 #[tauri::command]
 pub async fn contest_library_remove_placement(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryPlacementRemoveInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::remove_placement(database.inner(), input.placement_id)
         .await
         .map_err(contest_library_error_code)
@@ -1945,9 +2037,12 @@ pub async fn contest_library_remove_placement(
 
 #[tauri::command]
 pub async fn contest_library_list_contests(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestLibraryListInput,
 ) -> Result<Vec<ContestShelfItemDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let scope = contest_library_scope(input.scope)?;
     let archive = contest_library_archive_filter(input.archive);
     acm_os_application::list_library_contests(database.inner(), scope, archive)
@@ -1958,9 +2053,12 @@ pub async fn contest_library_list_contests(
 
 #[tauri::command]
 pub async fn contest_detail(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestDetailInput,
 ) -> Result<ContestDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestReadPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -1973,9 +2071,12 @@ pub async fn contest_detail(
 
 #[tauri::command]
 pub async fn complete_contest_facts(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CompleteContestFactsInput,
 ) -> Result<ContestDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestFactsPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2000,9 +2101,12 @@ pub async fn complete_contest_facts(
 
 #[tauri::command]
 pub async fn correct_contest_problem_facts(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CorrectContestProblemFactsInput,
 ) -> Result<ContestDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestCorrectionPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2021,9 +2125,12 @@ pub async fn correct_contest_problem_facts(
 
 #[tauri::command]
 pub async fn set_contest_archived(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestArchiveInput,
 ) -> Result<ContestDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestManagementPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2043,9 +2150,12 @@ pub struct ContestArchiveInput {
 
 #[tauri::command]
 pub async fn preview_delete_contest(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestDetailInput,
 ) -> Result<ContestDeletePreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestManagementPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2058,9 +2168,12 @@ pub async fn preview_delete_contest(
 
 #[tauri::command]
 pub async fn delete_contest(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestDetailInput,
 ) -> Result<ContestDeletePreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestManagementPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2084,9 +2197,12 @@ pub async fn preview_contest_ai_analysis(
 
 #[tauri::command]
 pub async fn save_contest_ai_analysis(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ContestAiAnalysisInput,
 ) -> Result<ContestDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestAiAnalysisPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
@@ -2103,8 +2219,11 @@ pub async fn save_contest_ai_analysis(
 
 #[tauri::command]
 pub async fn lightweight_problems(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<Vec<LightweightProblemItemDto>, ()> {
+    let manager = manager.inner().as_ref().map_err(|_| ())?;
+    let database = manager.database(&vault_context).await.map_err(|_| ())?;
     use acm_os_application::ContestReadPort;
     database
         .list_lightweight_problems()
@@ -2120,9 +2239,12 @@ pub async fn lightweight_problems(
 
 #[tauri::command]
 pub async fn lightweight_problem_detail(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<LightweightProblemDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestReadPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
@@ -2151,9 +2273,12 @@ pub async fn lightweight_problem_detail(
 
 #[tauri::command]
 pub async fn lightweight_problem_detail_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemDetailInput,
 ) -> Result<CanonicalProblemDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?;
     use acm_os_application::ContestReadPort;
     let today = command_local_date().ok();
@@ -2169,9 +2294,12 @@ pub async fn lightweight_problem_detail_by_id(
 
 #[tauri::command]
 pub async fn create_personal_note(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
@@ -2184,9 +2312,12 @@ pub async fn create_personal_note(
 
 #[tauri::command]
 pub async fn create_personal_note_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2198,9 +2329,12 @@ pub async fn create_personal_note_by_id(
 
 #[tauri::command]
 pub async fn transition_problem_lifecycle(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ProblemLifecycleCommandInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let action = parse_problem_lifecycle_action(&input.action)?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
@@ -2212,9 +2346,12 @@ pub async fn transition_problem_lifecycle(
 
 #[tauri::command]
 pub async fn transition_problem_lifecycle_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemLifecycleCommandInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2261,9 +2398,12 @@ fn validate_internal_problem_id(value: &str) -> Result<String, &'static str> {
 
 #[tauri::command]
 pub async fn today_snapshot(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: TodayLoadInput,
 ) -> Result<Option<TodaySnapshotDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     use acm_os_application::TodaySnapshotPort;
     let existing = database
@@ -2296,8 +2436,11 @@ pub async fn today_snapshot(
 
 #[tauri::command]
 pub async fn weekly_acm_budget(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<WeeklyAcmBudgetDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::load_weekly_acm_budget(database.inner())
         .await
         .map(weekly_acm_budget_dto)
@@ -2306,9 +2449,12 @@ pub async fn weekly_acm_budget(
 
 #[tauri::command]
 pub async fn save_weekly_acm_budget(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     schedule: WeeklyAcmBudgetDto,
 ) -> Result<WeeklyAcmBudgetDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let schedule = parse_weekly_acm_budget(schedule);
     acm_os_application::save_weekly_acm_budget(database.inner(), &schedule)
         .await
@@ -2318,9 +2464,12 @@ pub async fn save_weekly_acm_budget(
 
 #[tauri::command]
 pub async fn reorder_today(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: TodayReorderInput,
 ) -> Result<TodaySnapshotDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::reorder_today_snapshot(
         database.inner(),
         &input.plan_id,
@@ -2333,9 +2482,12 @@ pub async fn reorder_today(
 
 #[tauri::command]
 pub async fn complete_today_entry(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: TodayDoneInput,
 ) -> Result<TodaySnapshotDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::complete_today_entry(database.inner(), &input.plan_id, &input.entry_id)
         .await
         .map(today_snapshot_dto)
@@ -2344,9 +2496,12 @@ pub async fn complete_today_entry(
 
 #[tauri::command]
 pub async fn preview_today_replan(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: TodayReplanInput,
 ) -> Result<TodayReplanPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::preview_today_replan(database.inner(), today, input.budget_minutes)
         .await
@@ -2356,9 +2511,12 @@ pub async fn preview_today_replan(
 
 #[tauri::command]
 pub async fn apply_today_replan(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     preview: TodayReplanPreviewDto,
 ) -> Result<TodaySnapshotDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let preview = parse_today_replan_preview(preview)?;
     acm_os_application::apply_today_replan(database.inner(), &preview)
         .await
@@ -2368,8 +2526,11 @@ pub async fn apply_today_replan(
 
 #[tauri::command]
 pub async fn today_extra_suggestions(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<TodayExtraSuggestionsPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
     acm_os_application::preview_today_extra_suggestions(database.inner(), today)
         .await
@@ -2379,9 +2540,12 @@ pub async fn today_extra_suggestions(
 
 #[tauri::command]
 pub async fn accept_today_extra_suggestion(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: TodayAcceptSuggestionInput,
 ) -> Result<TodaySnapshotDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let preview = parse_today_extra_suggestions_preview(input.preview)?;
     acm_os_application::accept_today_extra_suggestion(database.inner(), &preview, &input.problem_id)
         .await
@@ -2391,9 +2555,12 @@ pub async fn accept_today_extra_suggestion(
 
 #[tauri::command]
 pub async fn start_or_resume_review(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<ReviewAttemptDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
@@ -2407,9 +2574,12 @@ pub async fn start_or_resume_review(
 
 #[tauri::command]
 pub async fn start_or_resume_review_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<CanonicalReviewAttemptDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2422,9 +2592,12 @@ pub async fn start_or_resume_review_by_id(
 
 #[tauri::command]
 pub async fn review_focus(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ReviewFocusInput,
 ) -> Result<ReviewFocusDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2436,9 +2609,12 @@ pub async fn review_focus(
 
 #[tauri::command]
 pub async fn review_help_drawer(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ReviewFocusInput,
 ) -> Result<ReviewHelpDrawerDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2450,9 +2626,12 @@ pub async fn review_help_drawer(
 
 #[tauri::command]
 pub async fn reveal_review_help(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: RevealReviewHelpInput,
 ) -> Result<RevealedReviewHelpDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2471,9 +2650,12 @@ pub async fn reveal_review_help(
 
 #[tauri::command]
 pub async fn complete_review(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CompleteReviewInput,
 ) -> Result<CompletedReviewAttemptDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2487,9 +2669,12 @@ pub async fn complete_review(
 
 #[tauri::command]
 pub async fn void_review(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: VoidReviewInput,
 ) -> Result<CanonicalReviewHistoryItemDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2501,9 +2686,12 @@ pub async fn void_review(
 
 #[tauri::command]
 pub async fn review_attempt_history(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ReviewFocusInput,
 ) -> Result<CanonicalReviewHistoryItemDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if input.attempt_id.len() != 36 {
         return Err("invalid_review_attempt_identity");
     }
@@ -2515,9 +2703,12 @@ pub async fn review_attempt_history(
 
 #[tauri::command]
 pub async fn review_history(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<ReviewHistoryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
@@ -2530,9 +2721,12 @@ pub async fn review_history(
 
 #[tauri::command]
 pub async fn review_history_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<CanonicalReviewHistoryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2544,9 +2738,12 @@ pub async fn review_history_by_id(
 
 #[tauri::command]
 pub async fn update_problem_mastery_evidence(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: UpdateProblemMasteryEvidenceInput,
 ) -> Result<ProblemMasteryProjectionDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
     let problem = acm_os_domain::CodeforcesProblemIdentity::new(contest, input.index)
@@ -2568,9 +2765,12 @@ pub async fn update_problem_mastery_evidence(
 
 #[tauri::command]
 pub async fn update_problem_mastery_evidence_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalMasteryEvidenceInput,
 ) -> Result<ProblemMasteryProjectionDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2596,9 +2796,12 @@ pub async fn update_problem_mastery_evidence_by_id(
 
 #[tauri::command]
 pub async fn delete_personal_note(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::delete_personal_note(database.inner(), &problem)
         .await
@@ -2608,9 +2811,12 @@ pub async fn delete_personal_note(
 
 #[tauri::command]
 pub async fn delete_personal_note_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2622,9 +2828,12 @@ pub async fn delete_personal_note_by_id(
 
 #[tauri::command]
 pub async fn personal_note_projection(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<PersonalNoteReadStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::PersonalNoteReadPort;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     database
@@ -2636,9 +2845,12 @@ pub async fn personal_note_projection(
 
 #[tauri::command]
 pub async fn personal_note_projection_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<PersonalNoteReadStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2650,9 +2862,12 @@ pub async fn personal_note_projection_by_id(
 
 #[tauri::command]
 pub async fn personal_note_relocation_candidates(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::personal_note_relocation_candidates(&*database, &problem)
         .await
@@ -2670,9 +2885,12 @@ pub async fn personal_note_relocation_candidates(
 
 #[tauri::command]
 pub async fn personal_note_relocation_candidates_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<Vec<PersonalNoteRelocationCandidateDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2692,9 +2910,12 @@ pub async fn personal_note_relocation_candidates_by_id(
 
 #[tauri::command]
 pub async fn rebind_personal_note(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: RebindPersonalNoteInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::rebind_personal_note(&*database, &problem, input.vault_relative_path)
         .await
@@ -2704,9 +2925,12 @@ pub async fn rebind_personal_note(
 
 #[tauri::command]
 pub async fn rebind_personal_note_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalRebindPersonalNoteInput,
 ) -> Result<PersonalNoteBindingDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2722,9 +2946,12 @@ pub async fn rebind_personal_note_by_id(
 
 #[tauri::command]
 pub async fn confirm_personal_note_deleted(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::confirm_personal_note_deleted(&*database, &problem)
         .await
@@ -2734,9 +2961,12 @@ pub async fn confirm_personal_note_deleted(
 
 #[tauri::command]
 pub async fn confirm_personal_note_deleted_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<ProblemLifecycleStateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -2748,10 +2978,13 @@ pub async fn confirm_personal_note_deleted_by_id(
 
 #[tauri::command]
 pub async fn open_personal_note_in_obsidian(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     app: tauri::AppHandle,
     input: LightweightProblemDetailInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::{
         PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort,
     };
@@ -2780,10 +3013,13 @@ pub async fn open_personal_note_in_obsidian(
 
 #[tauri::command]
 pub async fn open_personal_note_in_obsidian_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     app: tauri::AppHandle,
     input: CanonicalProblemIdInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::{
         PersonalNoteReadPort, PersonalNoteReadState, WorkspaceConfigurationPort,
     };
@@ -2835,10 +3071,13 @@ pub fn open_original_oj(
 
 #[tauri::command]
 pub async fn open_knowledge_in_obsidian(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     app: tauri::AppHandle,
     input: KnowledgeNodeInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::WorkspaceConfigurationPort;
     use tauri_plugin_opener::OpenerExt;
 
@@ -2862,9 +3101,12 @@ pub async fn open_knowledge_in_obsidian(
 
 #[tauri::command]
 pub async fn open_obsidian_graph(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     app: tauri::AppHandle,
 ) -> Result<ObsidianGraphOpenResult, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::WorkspaceConfigurationPort;
     use tauri_plugin_opener::OpenerExt;
 
@@ -2908,9 +3150,12 @@ pub async fn open_obsidian_graph(
 
 #[tauri::command]
 pub async fn knowledge_index(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeSearchInput,
 ) -> Result<KnowledgeIndexDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let projection = acm_os_application::rebuild_knowledge_index(database.inner())
         .await
         .map_err(knowledge_index_error_code)?;
@@ -2942,9 +3187,12 @@ pub async fn knowledge_index(
 
 #[tauri::command]
 pub async fn knowledge_relocation_candidates(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeNodeInput,
 ) -> Result<Vec<KnowledgeRelocationCandidateDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::knowledge_relocation_candidates(&*database, &input.knowledge_node_id)
         .await
         .map(|items| {
@@ -2961,9 +3209,12 @@ pub async fn knowledge_relocation_candidates(
 
 #[tauri::command]
 pub async fn rebind_knowledge_node(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: RebindKnowledgeNodeInput,
 ) -> Result<KnowledgeNodeDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::rebind_knowledge_node(
         &*database,
         &input.knowledge_node_id,
@@ -2976,9 +3227,12 @@ pub async fn rebind_knowledge_node(
 
 #[tauri::command]
 pub async fn confirm_knowledge_markdown_deleted(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeNodeInput,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::confirm_knowledge_markdown_deleted(&*database, &input.knowledge_node_id)
         .await
         .map_err(acm_os_application::KnowledgeBindingRepairError::code)
@@ -2986,9 +3240,12 @@ pub async fn confirm_knowledge_markdown_deleted(
 
 #[tauri::command]
 pub async fn resolve_knowledge_identity_conflict(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: ResolveKnowledgeIdentityConflictInput,
 ) -> Result<KnowledgeNodeDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::resolve_knowledge_identity_conflict(
         &*database,
         &input.historical_knowledge_node_id,
@@ -3002,9 +3259,12 @@ pub async fn resolve_knowledge_identity_conflict(
 
 #[tauri::command]
 pub async fn knowledge_detail(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeNodeInput,
 ) -> Result<KnowledgeDetailDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::load_knowledge_detail(database.inner(), &input.knowledge_node_id)
         .await
         .map(knowledge_detail_dto)
@@ -3013,9 +3273,12 @@ pub async fn knowledge_detail(
 
 #[tauri::command]
 pub async fn confirm_knowledge_understanding(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeUnderstandingInput,
 ) -> Result<KnowledgeUnderstandingDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let level = knowledge_understanding_level(&input.level)?;
     let date = command_local_date().map_err(|_| "local_date_unavailable")?;
     acm_os_application::confirm_knowledge_understanding(
@@ -3031,9 +3294,12 @@ pub async fn confirm_knowledge_understanding(
 
 #[tauri::command]
 pub async fn knowledge_reevaluation_suggestion(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeNodeInput,
 ) -> Result<KnowledgeReevaluationSuggestionDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::load_knowledge_reevaluation_suggestion(
         database.inner(),
         &input.knowledge_node_id,
@@ -3049,9 +3315,12 @@ pub async fn knowledge_reevaluation_suggestion(
 
 #[tauri::command]
 pub async fn knowledge_candidates(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<Vec<KnowledgeCandidateDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_index = input.index.clone();
     let generic_problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let items = acm_os_application::list_knowledge_candidates(database.inner(), &generic_problem)
@@ -3070,9 +3339,12 @@ pub async fn knowledge_candidates(
 
 #[tauri::command]
 pub async fn knowledge_candidates_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemIdInput,
 ) -> Result<Vec<CanonicalKnowledgeCandidateDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -3090,9 +3362,12 @@ pub async fn knowledge_candidates_by_id(
 
 #[tauri::command]
 pub async fn register_knowledge_candidate(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeCandidateRegisterInput,
 ) -> Result<KnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_index = input.index.clone();
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     acm_os_application::register_knowledge_candidate(
@@ -3108,9 +3383,12 @@ pub async fn register_knowledge_candidate(
 
 #[tauri::command]
 pub async fn register_knowledge_candidate_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalKnowledgeCandidateRegisterInput,
 ) -> Result<CanonicalKnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -3127,9 +3405,12 @@ pub async fn register_knowledge_candidate_by_id(
 
 #[tauri::command]
 pub async fn set_knowledge_candidate_disposition(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeCandidateDispositionInput,
 ) -> Result<KnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_index = input.index.clone();
     let problem = codeforces_problem_identity(input.contest_id, input.index)?;
     let disposition = match input.disposition.as_str() {
@@ -3151,9 +3432,12 @@ pub async fn set_knowledge_candidate_disposition(
 
 #[tauri::command]
 pub async fn set_knowledge_candidate_disposition_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalKnowledgeCandidateDispositionInput,
 ) -> Result<CanonicalKnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -3179,9 +3463,12 @@ pub async fn set_knowledge_candidate_disposition_by_id(
 
 #[tauri::command]
 pub async fn accept_existing_knowledge_candidate(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: KnowledgeCandidateAcceptInput,
 ) -> Result<AcceptedKnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem = knowledge_candidate_problem(input.contest_id, input.index)?;
     let problem = acm_os_domain::ProblemIdentity::new(
         acm_os_domain::ContestIdentity::new(
@@ -3209,9 +3496,12 @@ pub async fn accept_existing_knowledge_candidate(
 
 #[tauri::command]
 pub async fn accept_existing_knowledge_candidate_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalKnowledgeCandidateAcceptInput,
 ) -> Result<AcceptedKnowledgeCandidateDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?
         .parse::<i64>()
         .map_err(|_| "invalid_problem_id")?;
@@ -3776,9 +4066,12 @@ fn personal_note_read_state_dto(
 
 #[tauri::command]
 pub async fn statement_assets(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: LightweightProblemDetailInput,
 ) -> Result<Vec<LocalStatementAssetDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     use acm_os_application::ContestReadPort;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_problem_identity")?;
@@ -3802,9 +4095,12 @@ pub async fn statement_assets(
 
 #[tauri::command]
 pub async fn statement_assets_by_id(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: CanonicalProblemDetailInput,
 ) -> Result<Vec<LocalStatementAssetDto>, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     let problem_id = validate_internal_problem_id(&input.problem_id)?;
     use acm_os_application::ContestReadPort;
     database
@@ -5054,10 +5350,13 @@ pub struct StartupStatusDto {
 }
 
 #[tauri::command]
-pub fn startup_status(
-    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
-) -> StartupStatusDto {
-    startup_status_dto(startup.execute())
+pub async fn startup_status(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+) -> Result<StartupStatusDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    Ok(startup_status_dto(database.status()))
 }
 
 #[derive(serde::Serialize)]
@@ -5072,10 +5371,12 @@ pub struct AppShellStatusDto {
 
 #[tauri::command]
 pub async fn app_shell_status(
-    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<AppShellStatusDto, ()> {
-    let workspace = match startup.execute() {
+    let manager = manager.inner().as_ref().map_err(|_| ())?;
+    let database = manager.database(&vault_context).await.map_err(|_| ())?;
+    let workspace = match database.status() {
         acm_os_application::StartupGateStatus::Ready { .. } => {
             acm_os_application::query_workspace_configuration(database.inner())
                 .await
@@ -5084,7 +5385,7 @@ pub async fn app_shell_status(
         acm_os_application::StartupGateStatus::RecoveryRequired { .. } => None,
     };
     let destination =
-        acm_os_application::select_startup_destination(startup.execute(), workspace.as_ref());
+        acm_os_application::select_startup_destination(database.status(), workspace.as_ref());
     Ok(app_shell_status_dto(destination, workspace))
 }
 
@@ -5182,8 +5483,11 @@ pub struct WorkspaceConfigurationErrorDto {
 
 #[tauri::command]
 pub async fn workspace_status(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<WorkspaceStatusDto, WorkspaceConfigurationErrorDto> {
+    let manager = manager.inner().as_ref().map_err(|e| WorkspaceConfigurationErrorDto { code: e.code(), field: None })?;
+    let database = manager.database(&vault_context).await.map_err(|e| WorkspaceConfigurationErrorDto { code: e.code(), field: None })?;
     acm_os_application::query_workspace_configuration(database.inner())
         .await
         .map(workspace_status_dto)
@@ -5337,8 +5641,11 @@ pub struct DiagnosticExportResultDto {
 
 #[tauri::command]
 pub async fn preview_manual_backup(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<ManualBackupPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::preview_manual_backup(database.inner())
         .await
         .map(|value| ManualBackupPreviewDto {
@@ -5351,8 +5658,11 @@ pub async fn preview_manual_backup(
 
 #[tauri::command]
 pub async fn create_manual_backup(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<ManualBackupResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_manual_backup(database.inner())
         .await
         .map(|value| ManualBackupResultDto {
@@ -5364,8 +5674,11 @@ pub async fn create_manual_backup(
 
 #[tauri::command]
 pub async fn backup_inventory(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<BackupInventoryDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::backup_inventory(database.inner())
         .await
         .map(|value| BackupInventoryDto {
@@ -5388,9 +5701,12 @@ pub async fn backup_inventory(
 
 #[tauri::command]
 pub async fn preview_system_restore_candidate(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: SystemRestoreCandidateInput,
 ) -> Result<SystemRestoreCandidatePreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::preview_system_restore_candidate(database.inner(), input.source_path)
         .await
         .map(|value| SystemRestoreCandidatePreviewDto {
@@ -5406,9 +5722,12 @@ pub async fn preview_system_restore_candidate(
 
 #[tauri::command]
 pub async fn prepare_system_restore(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: SystemRestoreCandidateInput,
 ) -> Result<RestoreIntentPreparationDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::prepare_restore_intent(database.inner(), input.source_path)
         .await
         .map(|value| RestoreIntentPreparationDto {
@@ -5427,10 +5746,13 @@ pub async fn prepare_system_restore(
 }
 
 #[tauri::command]
-pub fn restart_for_pending_restore(
+pub async fn restart_for_pending_restore(
     app: tauri::AppHandle,
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     if !database.has_pending_restore_intent() {
         return Err("restore_intent_missing");
     }
@@ -5440,10 +5762,12 @@ pub fn restart_for_pending_restore(
 
 #[tauri::command]
 pub async fn restore_diagnostics(
-    startup: tauri::State<'_, acm_os_application::StartupStatusQuery>,
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<RestoreDiagnosticsDto, ()> {
-    let (startup_state, current_schema_version) = match startup.execute() {
+    let manager = manager.inner().as_ref().map_err(|_| ())?;
+    let database = manager.database(&vault_context).await.map_err(|_| ())?;
+    let (startup_state, current_schema_version) = match database.status() {
         acm_os_application::StartupGateStatus::Ready { schema_version } => {
             ("ready", Some(*schema_version))
         }
@@ -5463,9 +5787,12 @@ pub async fn restore_diagnostics(
 
 #[tauri::command]
 pub async fn confirm_restore_rollback_cleanup(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     rollback_artifact_path: String,
 ) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     database
         .confirm_restore_rollback_cleanup(&rollback_artifact_path)
         .await
@@ -5490,8 +5817,11 @@ pub async fn confirm_restore_rollback_cleanup(
 
 #[tauri::command]
 pub async fn preview_post_restore_rebuild(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<PostRestoreRebuildPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::preview_post_restore_rebuild(database.inner())
         .await
         .map(|value| PostRestoreRebuildPreviewDto {
@@ -5507,8 +5837,11 @@ pub async fn preview_post_restore_rebuild(
 
 #[tauri::command]
 pub async fn validate_post_restore_problem_bindings(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<PostRestoreProblemBindingValidationDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::validate_post_restore_problem_bindings(database.inner())
         .await
         .map(|value| PostRestoreProblemBindingValidationDto {
@@ -5529,8 +5862,11 @@ pub async fn validate_post_restore_problem_bindings(
 
 #[tauri::command]
 pub async fn validate_post_restore_knowledge_bindings(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<PostRestoreKnowledgeBindingValidationDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::validate_post_restore_knowledge_bindings(database.inner())
         .await
         .map(|value| PostRestoreKnowledgeBindingValidationDto {
@@ -5552,8 +5888,11 @@ pub async fn validate_post_restore_knowledge_bindings(
 
 #[tauri::command]
 pub async fn check_post_restore_rebuild_preconditions(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<PostRestoreRebuildPreconditionCheckDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::check_post_restore_rebuild_preconditions(database.inner())
         .await
         .map(|value| PostRestoreRebuildPreconditionCheckDto {
@@ -5567,8 +5906,11 @@ pub async fn check_post_restore_rebuild_preconditions(
 
 #[tauri::command]
 pub async fn apply_post_restore_rebuild(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<PostRestoreRebuildApplyResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::apply_post_restore_rebuild(database.inner())
         .await
         .map(|value| PostRestoreRebuildApplyResultDto {
@@ -5581,8 +5923,11 @@ pub async fn apply_post_restore_rebuild(
 
 #[tauri::command]
 pub async fn preview_diagnostic_export(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<DiagnosticExportPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::preview_diagnostic_export(database.inner())
         .await
         .map(|value| DiagnosticExportPreviewDto {
@@ -5596,8 +5941,11 @@ pub async fn preview_diagnostic_export(
 
 #[tauri::command]
 pub async fn create_diagnostic_export(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<DiagnosticExportResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_diagnostic_export(database.inner())
         .await
         .map(|value| DiagnosticExportResultDto {
@@ -5609,8 +5957,11 @@ pub async fn create_diagnostic_export(
 
 #[tauri::command]
 pub async fn create_weekly_backup(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<ManualBackupResultDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::create_weekly_backup(database.inner())
         .await
         .map(|value| ManualBackupResultDto {
@@ -5631,8 +5982,11 @@ pub struct BackupRetentionPreviewDto {
 
 #[tauri::command]
 pub async fn preview_backup_retention(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
 ) -> Result<BackupRetentionPreviewDto, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::preview_backup_retention(database.inner())
         .await
         .map(|value| BackupRetentionPreviewDto {
@@ -5652,9 +6006,12 @@ pub struct BackupRetentionApplyInput {
 
 #[tauri::command]
 pub async fn apply_backup_retention(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     input: BackupRetentionApplyInput,
 ) -> Result<u64, &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
     acm_os_application::apply_backup_retention(database.inner(), input.paths)
         .await
         .map_err(acm_os_application::ManualBackupError::code)
@@ -5662,11 +6019,17 @@ pub async fn apply_backup_retention(
 
 #[tauri::command]
 pub async fn configure_workspace(
-    database: tauri::State<'_, acm_os_infrastructure::DatabaseRuntime>,
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
     watcher: tauri::State<'_, crate::vault_watcher::VaultWatcher>,
     app: tauri::AppHandle,
     draft: WorkspaceConfigurationInput,
 ) -> Result<WorkspaceStatusDto, WorkspaceConfigurationErrorDto> {
+    let manager = manager.inner().as_ref().map_err(|e| WorkspaceConfigurationErrorDto { code: e.code(), field: None })?;
+    let database = manager.database(&vault_context).await.map_err(|e| WorkspaceConfigurationErrorDto { code: e.code(), field: None })?;
+    if std::fs::canonicalize(&draft.active_vault_path).ok().as_deref() != Some(std::path::Path::new(database.root_path())) {
+        return Err(WorkspaceConfigurationErrorDto { code: "vault_root_mismatch", field: Some("active_vault") });
+    }
     let configuration = acm_os_application::configure_workspace(
         database.inner(),
         acm_os_application::WorkspaceConfigurationDraft {

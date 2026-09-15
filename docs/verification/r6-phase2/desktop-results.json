@@ -1,0 +1,20 @@
+{
+  "result": "PASS",
+  "temporary": "E:\\项目开发\\acm-os\\.desktop-e2e-r6-QTwgxm",
+  "createFromUi": true,
+  "openFromUi": true,
+  "deleteFromUi": true,
+  "crossVaultWriteBlocked": true,
+  "restartPersistence": true,
+  "sqliteFiles": [
+    {
+      "name": "A",
+      "path": "\\\\?\\E:\\项目开发\\acm-os\\.desktop-e2e-r6-QTwgxm\\vault\\.acm-os\\system-facts.sqlite3"
+    },
+    {
+      "name": "B",
+      "path": "\\\\?\\E:\\项目开发\\acm-os\\.desktop-e2e-r6-QTwgxm\\vault-b\\.acm-os\\system-facts.sqlite3"
+    }
+  ],
+  "sentinelSha256": "5ed7046f61268505436370b6d2ecd669bc344214c40badb1227456dc2850141c"
+}

@@ -1,0 +1,134 @@
+[
+  {
+    "path": "package.json",
+    "sha256": "ca35abae64a9ee9843bdb91f1e4dc9ff23aa2f5ab821fc0fe415054dbb6d951f"
+  },
+  {
+    "path": "scripts/check-boundaries.mjs",
+    "sha256": "a03ff1bd514b86047afd1a23223eb04d9792717df4cdb85851fed3b30a6ce36d"
+  },
+  {
+    "path": "scripts/dom-shells.test.mjs",
+    "sha256": "fb09effae4b0c7fb99e85272fc2826de244810ce83ac047ad2c02f5cea16be8b"
+  },
+  {
+    "path": "scripts/reward-page.test.mjs",
+    "sha256": "a3bc4862009d6c6854aca7e9c2dc2c2cf504ac3d75ac5dc0d9f6f07d0f0f97bf"
+  },
+  {
+    "path": "scripts/vault-boundary.test.mjs",
+    "sha256": "69f0dc06c2f3fdb4403f028ddde97e534ca5e0ea56820550d72c6d405ebf2570"
+  },
+  {
+    "path": "scripts/vault-desktop-e2e.mjs",
+    "sha256": "9fd368b39fde84cb76ac2ccc7712f49f82a5d70135728099af5e2095d844fffe"
+  },
+  {
+    "path": "scripts/vault-manager-ui.test.mjs",
+    "sha256": "80b4b7074bb55ae4c88d99324aa64b4b750a9ea93fd6a79efe6e9523b3d2dc08"
+  },
+  {
+    "path": "scripts/verify-vault-phase.mjs",
+    "sha256": "7e9f05a0592962467b47d9c4304614079e64f8b576013f276a1bd2c21a67fd77"
+  },
+  {
+    "path": "src-tauri/crates/acm-os-infrastructure/src/file_binding.rs",
+    "sha256": "94bb5c498a177ffc9e378fa2faff47fa1f6754a4149c2e03f876c3d4faba959c"
+  },
+  {
+    "path": "src-tauri/crates/acm-os-infrastructure/src/lib.rs",
+    "sha256": "422c4966bdcb6f148ef028b969fcfa4a81b0869a8c2ea6cb8eb752d34264f7ae"
+  },
+  {
+    "path": "src-tauri/crates/acm-os-infrastructure/src/persistence.rs",
+    "sha256": "1fa1200bc72c477eda983dc23da25d3ac7b843605009c5ebaff02ebf7d51e64c"
+  },
+  {
+    "path": "src-tauri/crates/acm-os-infrastructure/src/vault_manager.rs",
+    "sha256": "a62db2b55966d0779307e667629e414f5e45103bf98cdf2873dc02e5311f9f4f"
+  },
+  {
+    "path": "src-tauri/crates/acm-os-infrastructure/src/vault_manager/tests.rs",
+    "sha256": "77dd452bf960dbcaab9cbb6ae691362a0aa7e038b05b7724971a5291c5677cc7"
+  },
+  {
+    "path": "src-tauri/src/desktop_e2e.js",
+    "sha256": "c23e5305409118a0df0a82cdb727394327161c72dd63fc95ddbaae847bf47467"
+  },
+  {
+    "path": "src-tauri/src/ipc.rs",
+    "sha256": "f2fce148759c10a5d9337b8f1fedacb4db17ddca06163e4cac57e0e55f25e88f"
+  },
+  {
+    "path": "src-tauri/src/lib.rs",
+    "sha256": "822657d191745fbd9b2b36797f2f996f3065eeddc88ab333fe2e92100cd491b2"
+  },
+  {
+    "path": "src-tauri/src/vault_desktop_e2e.js",
+    "sha256": "4b8fc0d37623757a0b80db9c962b5df42d6f8bb6a95472b1f8a4484c9b86fbe9"
+  },
+  {
+    "path": "src-tauri/src/vault_ipc.rs",
+    "sha256": "039c6e383a65e31fa05cad4a530658167c941ac812994131a7ffd1a115fab531"
+  },
+  {
+    "path": "src-tauri/src/vault_watcher.rs",
+    "sha256": "b3dd47f698bf48a8bc8ab00243fbc06d56266365d43120e8086a4cb005b0e811"
+  },
+  {
+    "path": "src/app/App.tsx",
+    "sha256": "2b10ca0a66c8508383b7bd58bedb298580158d6bdd2d959c2519afbb6e5170e8"
+  },
+  {
+    "path": "src/app/VaultManagerPanel.tsx",
+    "sha256": "d7fed238fabda49abe68b06cf046938b9ad1d52f32c35cdda2b115e16074234d"
+  },
+  {
+    "path": "src/app/shells.tsx",
+    "sha256": "838c6dc789b0f80752faf65226cb796a24ca1e9f8a3ecfbdae6869571c755ae5"
+  },
+  {
+    "path": "src/ipc/app-shell.ts",
+    "sha256": "366c0a4e0a3dc1c264320ba1eabfe27b5e640e164b6f3a80417a090a9bd8325a"
+  },
+  {
+    "path": "src/ipc/contest.ts",
+    "sha256": "d8ced9136f4a6087be5dd4bf28de1a0279bfc4870e189105a30a51e13d022a2f"
+  },
+  {
+    "path": "src/ipc/foundation.ts",
+    "sha256": "38ee150fe09ae91b55d70535c233008402f01ac2226541975a3436df2400d9f9"
+  },
+  {
+    "path": "src/ipc/invoke.ts",
+    "sha256": "962d926b834a151b38085c61b1022ff51d0ccf6247eb93c31cd93c4f94c00916"
+  },
+  {
+    "path": "src/ipc/knowledge.ts",
+    "sha256": "8b1c4609032848352be4084165c152d58439f39b4cb5bf6df6b9b799c54accbf"
+  },
+  {
+    "path": "src/ipc/reward.ts",
+    "sha256": "0572486bc1dd0a34ec86358223aef7fdfeb916083a0d2f48c495b608d43f4e3c"
+  },
+  {
+    "path": "src/ipc/startup.ts",
+    "sha256": "4940c287694ac874cf4609088aeca9adbdf087675315fc9023f2fbcd2d4d6b17"
+  },
+  {
+    "path": "src/ipc/today.ts",
+    "sha256": "1792e6e72cc9ab79811261995458fa10c4bb5052d1d1c4d068a034cd5dc3f602"
+  },
+  {
+    "path": "src/ipc/vault-manager.ts",
+    "sha256": "329552d6a9b9609b27c32ec2c0739143d2d0a37462feaa2cc5cf0d6658558473"
+  },
+  {
+    "path": "src/ipc/workspace.ts",
+    "sha256": "78668cc5de638b41366d48d17af873d20929aedbad5bbcda576ccda7af041f78"
+  },
+  {
+    "path": "src/main.tsx",
+    "sha256": "de0cb918ace99de43cb13dbebafb4f0a6d1fabd7c9508123b043e7d6623e0f1b"
+  }
+]

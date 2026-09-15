@@ -21,3 +21,8 @@ if (import.meta.env.VITE_ACM_OS_DESKTOP_E2E === "1") {
   // @ts-expect-error The desktop E2E driver is a test-only JavaScript asset bundled by Vite.
   void import("../src-tauri/src/desktop_e2e.js");
 }
+
+if (import.meta.env.VITE_ACM_OS_VAULT_E2E === "1") {
+  // @ts-expect-error Test-only native WebView driver.
+  void import("../src-tauri/src/vault_desktop_e2e.js");
+}

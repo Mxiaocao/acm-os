@@ -22,3 +22,5 @@ pub fn current_local_date() -> Result<acm_os_domain::LocalDate, ()> {
         .to_string();
     acm_os_domain::LocalDate::parse_iso(&value).map_err(|_| ())
 }
+
+pub mod vault_manager;

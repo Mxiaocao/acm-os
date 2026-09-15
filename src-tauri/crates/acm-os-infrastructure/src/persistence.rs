@@ -283,6 +283,14 @@ async fn apply_pending_restore_intent(
 }
 
 impl DatabaseRuntime {
+    #[cfg(test)]
+    pub(crate) fn vault_test_pool(&self) -> &SqlitePool { self._pool.as_ref().expect("test runtime ready") }
+
+    /// Drain connections before releasing a Vault runtime.
+    pub(crate) async fn close(&self) {
+        if let Some(pool) = &self._pool { pool.close().await; }
+    }
+
     pub fn recovery(reason: StartupRecoveryReason) -> Self {
         Self::recovery_with_app_private_data(reason, None)
     }

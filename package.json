@@ -16,7 +16,9 @@
     "test:release-network": "cargo test --manifest-path src-tauri/Cargo.toml -p acm-os-infrastructure real_codeforces_ -- --ignored --test-threads=1",
     "test:desktop-e2e": "node scripts/desktop-e2e.mjs",
     "tauri": "tauri",
-    "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs"
+    "check:boundaries": "node --test scripts/check-boundaries.test.mjs && node scripts/check-boundaries.mjs",
+    "test:vault-ui": "node --import tsx --test scripts/vault-manager-ui.test.mjs",
+    "test:vault-desktop": "node scripts/vault-desktop-e2e.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

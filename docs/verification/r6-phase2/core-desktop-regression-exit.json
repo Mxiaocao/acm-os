@@ -1,0 +1,7 @@
+{
+  "command": [
+    "node",
+    "scripts/desktop-e2e.mjs"
+  ],
+  "exitCode": 0
+}

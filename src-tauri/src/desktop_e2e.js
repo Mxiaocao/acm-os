@@ -1,4 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { t } from "../../src/app/i18n";
+import { invoke, setVaultContext } from "../../src/ipc/invoke";
+import { createVault, getVaultManagerStatus, openVault } from "../../src/ipc/vault-manager";
 
 if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
   window.__ACM_OS_DESKTOP_E2E_DRIVER__ = true;
@@ -128,11 +130,12 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
     };
     const setDate = (localDate) => invoke("desktop_e2e_set_date", { input: { localDate } });
     const stage = (value) => invoke("desktop_e2e_log", { input: { stage: value } });
-    const budgetInput = (day) => document.querySelector(`input[aria-label="${day} ACM budget in minutes"]`);
+    const budgetInput = (day) => document.querySelectorAll("form.weekly-budget-form input")[["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].indexOf(day)] ?? null;
     const summaryValue = (label) => {
       const index = { Date: 0, Planned: 1, Budget: 2, Over: 3 }[label];
       const term = document.querySelectorAll(".today-toolbar dt")[index];
-      return term?.nextElementSibling?.textContent.trim() ?? "";
+      const value = term?.nextElementSibling?.textContent.trim() ?? "";
+      return label === "Date" || !value ? value : `${value.match(/\d+/)?.[0]} min`;
     };
     const assertText = (actual, expected, label) => {
       if (actual !== expected) throw new Error(`${label}: expected ${expected}, got ${actual}`);
@@ -149,13 +152,12 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       );
       document.querySelector('section.content-panel button.primary-action[type="button"]').click();
       await waitFor(
-        () => document.querySelector('section.content-panel[aria-label="Personal Markdown projection"]') !== null,
+        () => document.querySelector(`section.content-panel[aria-label="${t("problem.projectionAria")}"]`) !== null,
         "Personal Markdown projection",
       );
-      await waitFor(
-        () => document.querySelector('section.content-panel[aria-label="Personal Markdown projection"] code')?.textContent.trim() !== "",
-        "Personal Markdown binding",
-      );
+      const route = window.location.pathname.split("/");
+      const detail = await invoke("lightweight_problem_detail", { input: { contestId: Number(route[2]), index: route[3] } });
+      if (!detail.personalNote?.vaultRelativePath) throw new Error("Personal Markdown binding missing");
     };
     const knowledgeCandidateRow = (targetRef) => [...document.querySelectorAll("section.knowledge-candidates > ul > li")]
       .find((item) => item.querySelector("strong")?.textContent.trim() === targetRef);
@@ -200,7 +202,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       knowledgeCandidateAction(targetRef, "button:not(.secondary-action)").click();
       await waitFor(
         () => knowledgeCandidateRow(targetRef) === undefined
-          && document.querySelector('section.content-panel[aria-label="Personal Markdown projection"]') !== null,
+          && document.querySelector(`section.content-panel[aria-label="${t("problem.projectionAria")}"]`) !== null,
         "accepted Knowledge relation",
       );
     };
@@ -232,6 +234,14 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
     try {
       await stage("driver-started");
       const configured = await invoke("desktop_e2e_context");
+      const manager = await getVaultManagerStatus();
+      if (manager.current.state === "none") {
+        await waitFor(() => document.querySelector('[data-testid="vault-manager"]'), "Vault Manager startup");
+        const vault = await createVault({ name: "Desktop E2E", rootPath: configured.vault });
+        await openVault({ vaultId: vault.id });
+        return; // App reload resumes this test with an active, scoped runtime.
+      }
+      setVaultContext(manager.context);
       if (configured.phase === "verify-restart") {
         const expectedProblems = [
           ["A", "Desktop E2E Problem"],
@@ -415,16 +425,6 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       }
 
       await waitFor(
-        () => document.querySelector(".workspace-form button[type=submit]") !== null,
-        "workspace setup form",
-      );
-      await stage("workspace-shell-ready");
-      const inputs = [...document.querySelectorAll(".workspace-form input")];
-      [configured.vault, configured.problems, configured.knowledge]
-        .forEach((value, index) => inputValue(inputs[index], value));
-      document.querySelector(".workspace-form button[type=submit]").click();
-
-      await waitFor(
           () => document.querySelector('nav a[href="/today"]') !== null,
         "primary Today route",
       );
@@ -448,8 +448,8 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await waitFor(() => budgetInput("Monday") !== null, "weekly budget inputs");
       const weekly = { Monday: "95", Tuesday: "73", Wednesday: "", Thursday: "101", Friday: "47", Saturday: "0", Sunday: "95" };
       for (const [day, value] of Object.entries(weekly)) inputValue(budgetInput(day), value);
-      await clickText("Save weekly budget");
-      await waitText("Weekly ACM budget saved.");
+      document.querySelector("form.weekly-budget-form").requestSubmit();
+      await waitText(t("today.budgetSaved"));
       await stage("weekly-saved");
 
       await navigateTo("Today");
@@ -476,7 +476,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       await navigateTo("Today");
       await waitFor(() => summaryValue("Date") === "2026-08-11", "Tuesday Today plan");
       assertText(summaryValue("Budget"), "73 min", "Tuesday weekly default");
-      const override = document.querySelector('input[aria-label="Daily budget in minutes"]');
+      const override = document.querySelector('.today-toolbar form input[type="number"]');
       inputValue(override, "47");
       document.querySelector(".today-toolbar button[type=submit]").click();
       await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
@@ -484,7 +484,7 @@ if (!window.__ACM_OS_DESKTOP_E2E_DRIVER__) {
       document.querySelector('[role="dialog"] button.secondary-action').click();
       await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') === null, "cancelled preview");
       assertText(summaryValue("Budget"), "73 min", "Cancel must not persist");
-      inputValue(document.querySelector('input[aria-label="Daily budget in minutes"]'), "47");
+      inputValue(document.querySelector('.today-toolbar form input[type="number"]'), "47");
       document.querySelector(".today-toolbar button[type=submit]").click();
       await waitFor(() => document.querySelector('[role="dialog"][aria-labelledby="today-replan-title"]') !== null, "replan dialog");
       document.querySelector('[role="dialog"] button.primary-action').click();

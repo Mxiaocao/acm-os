@@ -1,0 +1,59 @@
+[
+  {
+    "name": "cargo-test",
+    "cmd": "cargo",
+    "args": [
+      "test",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--workspace"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "cargo-check",
+    "cmd": "cargo",
+    "args": [
+      "check",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--workspace"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "frontend-build",
+    "cmd": "C:\\nvm4w\\nodejs\\node.exe",
+    "args": [
+      "node_modules/typescript/bin/tsc"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "vite-build",
+    "cmd": "C:\\nvm4w\\nodejs\\node.exe",
+    "args": [
+      "node_modules/vite/bin/vite.js",
+      "build"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "diff-check",
+    "cmd": "git",
+    "args": [
+      "diff",
+      "--check"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "diff-stat",
+    "cmd": "git",
+    "args": [
+      "diff",
+      "--stat"
+    ],
+    "exitCode": 0
+  }
+]

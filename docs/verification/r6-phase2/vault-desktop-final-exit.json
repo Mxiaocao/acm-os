@@ -1,0 +1,7 @@
+{
+  "command": [
+    "node",
+    "scripts/vault-desktop-e2e.mjs"
+  ],
+  "exitCode": 0
+}

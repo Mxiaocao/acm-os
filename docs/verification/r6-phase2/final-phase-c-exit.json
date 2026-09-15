@@ -1,0 +1,8 @@
+{
+  "command": [
+    "node",
+    "scripts/verify-vault-phase.mjs",
+    "phase-c"
+  ],
+  "exitCode": 0
+}

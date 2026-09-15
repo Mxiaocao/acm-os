@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 export type WorkspacePathField = "active_vault" | "problem_root" | "knowledge_root";
 

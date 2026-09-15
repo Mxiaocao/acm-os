@@ -11,6 +11,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const vite = await createServer({
   configFile: false,
+  optimizeDeps: { noDiscovery: true, include: [] },
   root: process.cwd(),
   cacheDir: ".dom-shells-vite-cache",
   plugins: [{
@@ -36,7 +37,7 @@ const vite = await createServer({
       return undefined;
     },
   }],
-  server: { middlewareMode: true },
+  server: { middlewareMode: true, hmr: false },
 });
 const moduleRunner = createServerModuleRunner(vite.environments.ssr, { hmr: false });
 moduleRunner.options.transport.timeout = 300_000;
@@ -47,6 +48,9 @@ test("Contest artwork keeps production asset URLs relative to the Tauri bundle",
   const loaded = await loadConfigFromFile({ command: "build", mode: "production" }, path.resolve("vite.config.ts"));
   assert.equal(loaded.config.base, "./");
 });
+
+const vaultFixture = { id: "test-vault", name: "Test Vault", rootPath: "C:/Vault", databasePath: "C:/Vault/.acm-os/system-facts.sqlite3", createdAtUtc: "2026-09-15T00:00:00Z", isCurrent: true };
+const managerFixture = { vaults: [vaultFixture], current: { state: "ready", vault: vaultFixture }, context: { vaultId: "test-vault", epoch: "test-session" } };
 
 const configuredWorkspace = {
   state: "configured",
@@ -254,6 +258,7 @@ async function renderApp(ipc, pathname = "/", strict = false) {
   }
   const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
   mockIPC((command, args) => {
+    if (command === "vault_manager_status") return managerFixture;
     if (command === "plugin:event|listen") return 1;
     if (command === "plugin:event|unlisten") return null;
     return ipc(command, args);
@@ -3128,7 +3133,7 @@ test("Knowledge opens the configured Vault's native Obsidian Graph command", {
     const openGraph = [...view.document.querySelectorAll("button")].find((button) => button.textContent === "打开 Obsidian 图谱");
     assert.ok(openGraph);
     await act(async () => openGraph.click()); await settle();
-    assert.deepEqual(calls, [["open_obsidian_graph", {}]]);
+    assert.deepEqual(calls, [["open_obsidian_graph", { vaultContext: managerFixture.context }]]);
   } finally { await view.cleanup(); }
 });
 
@@ -3335,6 +3340,6 @@ test("Settings previews manual backup before creating it", { concurrency: false 
     assert.match(view.document.body.textContent, /保留 7 个每日快照和 4 个每周快照/);
     assert.match(view.document.body.textContent, /完整性已验证/);
     assert.match(view.document.body.textContent, /protected/);
-    assert.equal([...view.document.querySelectorAll("button")].some((button) => /delete|prune/i.test(button.textContent)), false);
+    assert.equal([...view.document.querySelectorAll("button")].filter((button) => !button.closest("[data-testid=vault-manager]")).some((button) => /delete|prune/i.test(button.textContent)), false);
   } finally { await view.cleanup(); }
 });

@@ -11,3 +11,6 @@ src-tauri/gen/
 .DS_Store
 .vscode/
 .idea/
+
+/.dom-shells-vite-cache/
+/docs/verification/r6-phase2/*.log

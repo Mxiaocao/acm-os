@@ -10,9 +10,13 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const vite = await createServer({
   configFile: false,
+  optimizeDeps: { noDiscovery: true, include: [] },
   root: process.cwd(),
-  server: { middlewareMode: true },
+  server: { middlewareMode: true, hmr: false },
 });
+
+const vaultFixture = { id: "test-vault", name: "Test Vault", rootPath: "C:/Vault", databasePath: "C:/Vault/.acm-os/system-facts.sqlite3", createdAtUtc: "2026-09-15T00:00:00Z", isCurrent: true };
+const managerFixture = { vaults: [vaultFixture], current: { state: "ready", vault: vaultFixture }, context: { vaultId: "test-vault", epoch: "test-session" } };
 
 const configuredWorkspace = {
   state: "configured",
@@ -725,7 +729,7 @@ async function renderApp(ipc, settleInitial = true) {
     Object.defineProperty(globalThis, key, { configurable: true, value, writable: true });
   }
   const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
-  mockIPC((command, args) => ipc(command, args));
+  mockIPC((command, args) => command === "vault_manager_status" ? managerFixture : ipc(command, args));
   const { App } = await vite.ssrLoadModule("/src/app/App.tsx");
   const root = createRoot(dom.window.document.getElementById("root"));
   await act(async () => root.render(React.createElement(App)));

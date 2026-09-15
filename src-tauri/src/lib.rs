@@ -1,8 +1,8 @@
 mod ipc;
+mod vault_ipc;
 mod vault_watcher;
 
-use acm_os_application::{StartupRecoveryReason, StartupStatusQuery, WorkspaceConfigurationStatus};
-use acm_os_infrastructure::DatabaseRuntime;
+use acm_os_infrastructure::vault_manager::{VaultManager, VaultErrorCode};
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -23,38 +23,27 @@ pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     builder
         .setup(|app| {
-            let database = match app_private_data_path(app) {
-                Ok(app_private_data) => {
-                    let database = tauri::async_runtime::block_on(
-                        acm_os_infrastructure::start_database(&app_private_data),
-                    );
-                    if matches!(
-                        database.status(),
-                        acm_os_application::StartupGateStatus::Ready { .. }
-                    ) {
-                        let _ = tauri::async_runtime::block_on(
-                            database.process_pending_review_rewards(256),
-                        );
-                    }
-                    database
-                }
-                Err(_) => DatabaseRuntime::recovery(StartupRecoveryReason::AppDataUnavailable),
+            let manager = match app_private_data_path(app) {
+                Ok(root) => tauri::async_runtime::block_on(VaultManager::open(&root)),
+                Err(_) => Err(VaultErrorCode::RegistryUnavailable.into()),
             };
-            let startup_query = StartupStatusQuery::new(database.status().clone());
             let watcher = vault_watcher::VaultWatcher::new();
-            if let Ok(WorkspaceConfigurationStatus::Configured(configuration)) =
-                tauri::async_runtime::block_on(acm_os_application::query_workspace_configuration(
-                    &database,
-                ))
-            {
-                let _ = watcher.watch(configuration.active_vault_path(), app.handle().clone());
+            if let Ok(manager) = &manager {
+                let status = tauri::async_runtime::block_on(manager.status());
+                if let acm_os_infrastructure::vault_manager::CurrentVaultState::Ready { vault } = status.current {
+                    let _ = watcher.watch(&vault.root_path, app.handle().clone());
+                }
             }
             app.manage(watcher);
-            app.manage(database);
-            app.manage(startup_query);
+            app.manage(manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            vault_ipc::vault_manager_status,
+            vault_ipc::create_vault,
+            vault_ipc::open_vault,
+            vault_ipc::preview_delete_vault,
+            vault_ipc::delete_vault,
             ipc::foundation_status,
             ipc::reward_activation_state,
             ipc::reward_account_summary,

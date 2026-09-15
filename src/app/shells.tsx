@@ -1,3 +1,4 @@
+import { VaultManagerPanel } from "./VaultManagerPanel";
 import {
   type FormEvent,
   type MouseEvent,
@@ -767,6 +768,7 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
     return (
       <>
         <PageHeader eyebrow="工具" headingRef={headingRef} title={t("nav.settings")} />
+        <VaultManagerPanel />
         <section aria-labelledby="workspace-settings" className="content-panel">
           <h2 id="workspace-settings">工作区</h2>
           <dl className="detail-list detail-list--paths">

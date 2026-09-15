@@ -18,6 +18,8 @@ impl VaultWatcher {
         }
     }
 
+    pub fn stop(&self) { if let Ok(mut watcher) = self.watcher.lock() { *watcher = None; } }
+
     pub fn watch(&self, active_vault: &str, app: tauri::AppHandle) -> Result<(), ()> {
         let mut last_emit: Option<Instant> = None;
         let mut watcher =

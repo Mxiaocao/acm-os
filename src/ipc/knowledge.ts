@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 export type KnowledgeLocationState = "ready" | "locationAnomaly";
 export type KnowledgeUnderstandingLevel = "notLearned" | "vague" | "basic" | "proficient" | "deep";
