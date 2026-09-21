@@ -1,3 +1,4 @@
+import { displayPath } from "./display-path";
 import { VaultManagerPanel } from "./VaultManagerPanel";
 import {
   type FormEvent,
@@ -767,19 +768,19 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   if (page === "settings") {
     return (
       <>
-        <PageHeader eyebrow="工具" headingRef={headingRef} title={t("nav.settings")} />
+        <div className="settings-page">
+        <PageHeader eyebrow="偏好与管理" headingRef={headingRef} title={t("nav.settings")} />
         <VaultManagerPanel />
-        <section aria-labelledby="workspace-settings" className="content-panel">
-          <h2 id="workspace-settings">工作区</h2>
+        <details className="settings-disclosure">
+          <summary id="workspace-settings">笔记目录<span>查看当前工作区的文件位置</span></summary>
           <dl className="detail-list detail-list--paths">
-             <dt>当前 Vault</dt><dd>{workspace.activeVaultPath}</dd>
-             <dt>题目笔记目录</dt><dd>{workspace.problemRootPath}</dd>
-             <dt>知识库目录</dt><dd>{workspace.knowledgeRootPath}</dd>
+             <dt>题目笔记目录</dt><dd>{displayPath(workspace.problemRootPath)}</dd>
+             <dt>知识库目录</dt><dd>{displayPath(workspace.knowledgeRootPath)}</dd>
           </dl>
-          <p className="safe-note">修改当前 Vault 需要经过预览和确认流程。</p>
-         </section>
-         <ManualBackupSettings />
+         </details>
+         <details className="settings-disclosure"><summary>备份与恢复<span>保存备份或恢复工作区数据</span></summary><ManualBackupSettings /></details>
          <WeeklyAcmBudgetSettings />
+        </div>
       </>
     );
   }
@@ -1174,7 +1175,7 @@ function ManualBackupSettings() {
     setBusy(true);
     try {
       const result = await createManualBackup();
-      setMessage(`备份已创建：${result.path}`);
+      setMessage(`备份已创建：${displayPath(result.path)}`);
       setPreview(null);
       setInventory(await loadBackupInventory());
     } catch {
@@ -1192,7 +1193,7 @@ function ManualBackupSettings() {
        <button className="secondary-action" onClick={() => void prepare()} type="button">预览手动备份</button>
        <button className="secondary-action" onClick={() => void inspect()} type="button">查看备份清单</button>
       {preview ? <div role="alertdialog">
-        <p>数据库结构版本 {preview.schemaVersion}；目标目录 <code>{preview.backupDirectory}</code>；文件名前缀 <code>{preview.filenamePrefix}</code>。</p>
+        <p>数据库结构版本 {preview.schemaVersion}；目标目录 <code>{displayPath(preview.backupDirectory)}</code>；文件名前缀 <code>{preview.filenamePrefix}</code>。</p>
         <button disabled={busy} onClick={() => void backup()} type="button">{busy ? "正在创建备份…" : "创建备份"}</button>
       </div> : null}
       {message ? <p aria-live="polite" className="safe-note">{message}</p> : null}
@@ -1200,7 +1201,7 @@ function ManualBackupSettings() {
         <p>保留预览：保留 {inventory.dailyKeep} 个每日快照和 {inventory.weeklyKeep} 个每周快照。手动备份和迁移备份受保护。</p>
          {inventory.entries.length === 0 ? <p>没有已发布的备份。</p> : <ul className="backup-inventory">
           {inventory.entries.map((entry) => <li key={entry.path}>
-            <code>{entry.path}</code><span>{entry.category} · {entry.integrityVerified ? "完整性已验证" : "完整性验证失败"} · {entry.retention}</span>
+            <code>{displayPath(entry.path)}</code><span>{entry.category} · {entry.integrityVerified ? "完整性已验证" : "完整性验证失败"} · {entry.retention}</span>
           </li>)}
         </ul>}
       </div> : null}
@@ -3718,6 +3719,6 @@ function foundationCaption(foundation: FoundationStatus): string {
   switch (foundation.state) {
     case "checking": return "检查中";
     case "unavailable": return "不可用";
-    case "ready": return `已就绪 · ${foundation.foundation.core}`;
+    case "ready": return "已就绪";
   }
 }

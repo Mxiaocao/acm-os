@@ -15,6 +15,11 @@ for (const [key, value] of Object.entries({
 
 const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
 const reward = await import("../src/ipc/reward.ts");
+const { setVaultContext } = await import("../src/ipc/invoke.ts");
+const vaultContext = { vaultId: "reward-test-vault", epoch: "reward-test-session" };
+
+test.beforeEach(() => setVaultContext(vaultContext));
+test.afterEach(() => { clearMocks(); setVaultContext(null); });
 
 const redemptionId = "018f0d8e-4a5b-7c6d-8e9f-0123456789ab";
 const refundId = "018f0d8e-4a5b-7c6d-8e9f-0123456789ac";
@@ -85,11 +90,12 @@ test("Reward IPC wrappers preserve command names, DTOs, and exact request inputs
     "redeem_custom_reward",
     "refund_custom_reward",
   ]);
-  assert.deepEqual(calls[5].args, { input: { name: "Tea", coinCost: 12 } });
-  assert.deepEqual(calls[6].args, { input: { customRewardId: "reward-2", name: "Tea", coinCost: 13 } });
-  assert.deepEqual(calls[7].args, { input: { customRewardId: "reward-2" } });
-  assert.deepEqual(calls[8].args, { input: { redemptionId, customRewardId: "reward-2" } });
-  assert.deepEqual(calls[9].args, { input: { refundId, redemptionId } });
+  for (const call of calls) assert.deepEqual(call.args.vaultContext, vaultContext);
+  assert.deepEqual(calls[5].args, { vaultContext, input: { name: "Tea", coinCost: 12 } });
+  assert.deepEqual(calls[6].args, { vaultContext, input: { customRewardId: "reward-2", name: "Tea", coinCost: 13 } });
+  assert.deepEqual(calls[7].args, { vaultContext, input: { customRewardId: "reward-2" } });
+  assert.deepEqual(calls[8].args, { vaultContext, input: { redemptionId, customRewardId: "reward-2" } });
+  assert.deepEqual(calls[9].args, { vaultContext, input: { refundId, redemptionId } });
 });
 
 test("Reward mutation dispositions remain distinct runtime values", async () => {

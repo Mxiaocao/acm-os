@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import React, { act } from "react";
@@ -10,6 +10,7 @@ const bootDom=new JSDOM('<div/>');globalThis.window=bootDom.window;globalThis.do
 const {createRoot}=await import('react-dom/client');
 const {VaultManagerPanel}=await import('../src/app/VaultManagerPanel.tsx');
 const scoped=await import('../src/ipc/invoke.ts');
+const {displayPath}=await import('../src/app/display-path.ts');
 test.after(()=>bootDom.window.close());
 const a={id:'a',name:'A',rootPath:'C:/A',databasePath:'C:/A/.acm-os/system-facts.sqlite3',createdAtUtc:'2026-09-15T00:00:00Z',isCurrent:true};
 const b={...a,id:'b',name:'B',rootPath:'C:/B',isCurrent:false};
@@ -26,16 +27,16 @@ function button(v,text){const result=[...v.document.querySelectorAll('button')].
 async function type(v,id,value){const el=v.document.getElementById(id);await act(async()=>{Object.getOwnPropertyDescriptor(v.window.HTMLInputElement.prototype,'value').set.call(el,value);el.dispatchEvent(new v.window.Event('input',{bubbles:true}));el.dispatchEvent(new v.window.Event('change',{bubbles:true}));});}
 test('UI lists current Vault and creates through typed IPC',async()=>{
  let status=initial();const calls=[];const v=await view((cmd,args)=>{calls.push([cmd,args]);if(cmd==='vault_manager_status')return status;if(cmd==='create_vault'){assert.deepEqual(args.input,{name:'C',rootPath:'C:/C'});const c={...b,id:'c',name:'C',rootPath:'C:/C'};status={...status,vaults:[...status.vaults,c]};return c;}throw Error(cmd)});
- try{assert.match(v.document.querySelector('[data-testid=current-vault]').textContent,/A.*C:\/A/s);assert.equal(button(v,'Delete / 删除 A').disabled,true);await type(v,'vault-name','C');await type(v,'vault-path','C:/C');await act(async()=>v.document.querySelector('form').dispatchEvent(new v.window.Event('submit',{bubbles:true,cancelable:true})));assert.equal(calls.filter(([c])=>c==='create_vault').length,1);assert.ok(v.document.querySelector('[data-vault-id=c]'));}finally{await v.cleanup()}
+ try{assert.match(v.document.querySelector('[data-testid=current-vault]').textContent,/A.*C:\/A/s);assert.equal(button(v,'删除 A').disabled,true);await type(v,'vault-name','C');await type(v,'vault-path','C:/C');await act(async()=>v.document.querySelector('form').dispatchEvent(new v.window.Event('submit',{bubbles:true,cancelable:true})));assert.equal(calls.filter(([c])=>c==='create_vault').length,1);assert.ok(v.document.querySelector('[data-vault-id=c]'));}finally{await v.cleanup()}
 });
 test('Delete needs preview and exact second confirmation; cancellation writes nothing',async()=>{
  const calls=[];let status=initial();const p={vaultId:'b',name:'B',rootPath:'C:/B',retainedDataPath:'C:/B/.acm-os-deleted-b',confirmationText:'DELETE B',token:'token'};
  const v=await view((cmd,args)=>{calls.push([cmd,args]);if(cmd==='vault_manager_status')return status;if(cmd==='preview_delete_vault')return p;if(cmd==='delete_vault'){assert.deepEqual(args.input,{vaultId:'b',token:'token',confirmation:'DELETE B'});status={...status,vaults:[a]};return status;}throw Error(cmd)});
- try{await act(async()=>button(v,'Delete / 删除 B').click());assert.equal(calls.some(([c])=>c==='delete_vault'),false);assert.equal(button(v,'Confirm Delete / 确认删除').disabled,true);await type(v,'vault-delete-confirmation','DELETE A');assert.equal(button(v,'Confirm Delete / 确认删除').disabled,true);await act(async()=>button(v,'Cancel / 取消').click());assert.equal(calls.some(([c])=>c==='delete_vault'),false);await act(async()=>button(v,'Delete / 删除 B').click());await type(v,'vault-delete-confirmation','DELETE B');await act(async()=>button(v,'Confirm Delete / 确认删除').click());assert.equal(v.document.querySelector('[data-vault-id=b]'),null);}finally{await v.cleanup()}
+ try{await act(async()=>button(v,'删除 B').click());assert.equal(calls.some(([c])=>c==='delete_vault'),false);assert.equal(button(v,'确认删除').disabled,true);await type(v,'vault-delete-confirmation','DELETE A');assert.equal(button(v,'确认删除').disabled,true);await act(async()=>button(v,'取消').click());assert.equal(calls.some(([c])=>c==='delete_vault'),false);await act(async()=>button(v,'删除 B').click());await type(v,'vault-delete-confirmation','DELETE B');await act(async()=>button(v,'确认删除').click());assert.equal(v.document.querySelector('[data-vault-id=b]'),null);assert.match(v.document.querySelector('[role=status]').textContent,/笔记、数据库和备份已保留/);assert.ok(!v.document.querySelector('[role=status]').textContent.includes('.acm-os-deleted'));const recovery=v.document.querySelector('.vault-recovery-details');assert.equal(recovery.open,false);assert.ok(recovery.textContent.includes(p.retainedDataPath));}finally{await v.cleanup()}
 });
 test('Open revokes old context and requests workspace replacement',async()=>{
  const v=await view((cmd,args)=>{if(cmd==='vault_manager_status')return initial();if(cmd==='open_vault'){assert.deepEqual(args.input,{vaultId:'b'});return{vaults:[{...a,isCurrent:false},{...b,isCurrent:true}],current:{state:'ready',vault:b},context:{vaultId:'b',epoch:'b1'}};}throw Error(cmd)});
- try{scoped.setVaultContext(ca);let changed=0;v.window.addEventListener('vault-context-changed',()=>changed++);await act(async()=>button(v,'Open / 打开 B').click());assert.equal(changed,1);assert.equal(scoped.getVaultContext(),null);await assert.rejects(scoped.invoke('create_custom_reward',{input:{name:'old',coinCost:1}}),e=>e.code==='no_active_vault');}finally{await v.cleanup()}
+ try{scoped.setVaultContext(ca);let changed=0;v.window.addEventListener('vault-context-changed',()=>changed++);await act(async()=>button(v,'打开 B').click());assert.equal(changed,1);assert.equal(scoped.getVaultContext(),null);await assert.rejects(scoped.invoke('create_custom_reward',{input:{name:'old',coinCost:1}}),e=>e.code==='no_active_vault');}finally{await v.cleanup()}
 });
 test('Late business response is rejected after a binding change',async()=>{
  let resolve;let args;const v=await view((cmd,input)=>{if(cmd==='vault_manager_status')return initial();args=input;return new Promise(r=>resolve=r)});
@@ -43,5 +44,17 @@ test('Late business response is rejected after a binding change',async()=>{
 });
 test('Backend errors are shown without optimistic create/delete success',async()=>{
  const v=await view(cmd=>{if(cmd==='vault_manager_status')return initial();throw {code:'vault_unavailable'}});
- try{await act(async()=>button(v,'Open / 打开 B').click());assert.match(v.document.querySelector('[role=alert]').textContent,/不可用/);assert.ok(v.document.querySelector('[data-vault-id=b]'));}finally{await v.cleanup()}
+ try{await act(async()=>button(v,'打开 B').click());assert.match(v.document.querySelector('[role=alert]').textContent,/不可用/);assert.ok(v.document.querySelector('[data-vault-id=b]'));}finally{await v.cleanup()}
+});
+
+test('Display paths remove Windows namespace syntax without changing other paths',()=>{
+ const cases=[
+  [String.raw`\\?\E:\05-Knowledge-Base\26_Aut`,String.raw`E:\05-Knowledge-Base\26_Aut`],
+  [String.raw`\\?\UNC\server\share\笔记`,String.raw`\\server\share\笔记`],
+  [String.raw`\\server\share\笔记`,String.raw`\\server\share\笔记`],
+  [String.raw`E:\Vaults\A`,String.raw`E:\Vaults\A`],
+  ['/home/user/Vault','/home/user/Vault'],
+  [String.raw`\\?\Volume{123}\data`,String.raw`\\?\Volume{123}\data`],
+ ];
+ for(const [input,expected]of cases)assert.equal(displayPath(input),expected);
 });

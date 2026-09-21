@@ -1,4 +1,4 @@
-﻿// Bundled only by the dedicated desktop test build. All manager mutations use real UI controls.
+// Bundled only by the dedicated desktop test build. All manager mutations use real UI controls.
 import { invoke } from '@tauri-apps/api/core';
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,label){for(let i=0;i<300;i++){const v=await fn();if(v)return v;await wait(100);}throw Error(`Timed out: ${label}; ${document.body.innerText}`);}
@@ -7,8 +7,8 @@ async function button(text){return until(()=>[...document.querySelectorAll('butt
 async function click(text){(await button(text)).click();await wait(80);}
 async function fill(id,value){const el=await until(()=>document.getElementById(id),id);Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));await wait(50);}
 const status=()=>invoke('vault_manager_status');
-async function create(name,path){await fill('vault-name',name);await fill('vault-path',path);await click('Create / 创建');await until(async()=> (await status()).vaults.find(v=>v.name===name),`created ${name}`);await until(()=>!document.getElementById('vault-name').value,'create settled');}
-async function switchTo(name,next){sessionStorage.setItem('r6-step',next);await click(`Open / 打开 ${name}`);}
+async function create(name,path){const disclosure=await until(()=>document.querySelector(".vault-create"),"create form");if(!disclosure.open)disclosure.querySelector("summary").click();await fill('vault-name',name);await fill('vault-path',path);await click('创建 Vault');await until(async()=> (await status()).vaults.find(v=>v.name===name),`created ${name}`);await until(()=>!document.getElementById('vault-name').value,'create settled');}
+async function switchTo(name,next){sessionStorage.setItem('r6-step',next);await click(`打开 ${name}`);}
 async function rejects(fn,code){try{await fn();}catch(e){assert(String(typeof e==='object'?e.code: e).includes(code),`Expected ${code}, got ${JSON.stringify(e)}`);return;}throw Error(`Expected rejection: ${code}`);}
 async function manual(context,id,title,problem){return invoke('import_manual_codeforces_contest',{vaultContext:context,input:{contestId:id,title,sourceUrl:`https://codeforces.com/contest/${id}`,startsAtUtc:null,problems:[{index:'A',title:problem,sourceUrl:`https://codeforces.com/contest/${id}/problem/A`,statementText:'Real test statement'}]}});}
 async function run(){
@@ -42,9 +42,9 @@ async function run(){
    await rejects(()=>invoke('create_custom_reward',{vaultContext:ca,input:{name:'must not leak',coinCost:1}}),'stale_vault_context');
    try{await invoke('create_custom_reward',{input:{name:'missing context',coinCost:1}});throw Error('MISSING_CONTEXT_ACCEPTED');}catch(e){if(String(e).includes('MISSING_CONTEXT_ACCEPTED'))throw e;assert(/vaultContext|vault_context/.test(String(e)),`Missing-context rejection must come from IPC deserialization: ${e}`);}
    await rejects(()=>invoke('preview_delete_vault',{input:{vaultId:s.current.vault.id}}),'current_vault_delete_forbidden');
-   await click('Delete / 删除 C');await until(()=>document.getElementById('vault-delete-confirmation'),'delete confirmation');
-   await fill('vault-delete-confirmation','DELETE wrong');assert([...document.querySelectorAll('button')].find(b=>b.textContent==='Confirm Delete / 确认删除').disabled,'wrong confirmation disabled');
-   await fill('vault-delete-confirmation','DELETE C');await click('Confirm Delete / 确认删除');
+   await click('删除 C');await until(()=>document.getElementById('vault-delete-confirmation'),'delete confirmation');
+   await fill('vault-delete-confirmation','DELETE wrong');assert([...document.querySelectorAll('button')].find(b=>b.textContent==='确认删除').disabled,'wrong confirmation disabled');
+   await fill('vault-delete-confirmation','DELETE C');await click('确认删除');
    await until(async()=>!(await status()).vaults.some(v=>v.name==='C'),'C removed');
    await switchTo('A','a2');return;
  }

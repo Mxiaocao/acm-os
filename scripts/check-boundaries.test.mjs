@@ -12,7 +12,10 @@ const validRustPackages = () => [
   { name: "acm-os-domain", dependencies: [{ name: "chrono", kind: null }] },
   {
     name: "acm-os-application",
-    dependencies: [{ name: "acm-os-domain", kind: null, path: "local/domain" }],
+    dependencies: [
+      { name: "acm-os-domain", kind: null, path: "local/domain" },
+      { name: "chrono", kind: null },
+    ],
   },
   {
     name: "acm-os-infrastructure",
