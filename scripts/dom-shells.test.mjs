@@ -123,7 +123,8 @@ test("Manual Contest submits explicit identities and statement text through one 
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
     if (command === "contest_library_list_families") return [];
     if (command === "contest_library_list_contests") return [];
-    if (command === "import_manual_codeforces_contest") { calls.push(args.input); return { importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
+    if (command === "preview_problem_library") return { title: "Manual Round", problems: [{ problemId: 1, index: "A", title: "Manual A", alreadyAdded: false }] };
+    if (command === "import_manual_codeforces_contest") { calls.push(args.input); return { contestId: 1979, importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
@@ -147,6 +148,7 @@ test("Manual Contest submits explicit identities and statement text through one 
     assert.equal(calls[0].contestId, 1979);
     assert.equal(calls[0].problems[0].index, "A");
     assert.equal(calls[0].problems[0].statementText, "x < y");
+    assert.equal(view.document.querySelector('[aria-label="加入我的题库"] input[type="checkbox"]').checked, false);
     assert.match(view.document.body.textContent, /已通过标准导入和题面快照契约保存/);
   } finally { await view.cleanup(); }
 });
@@ -712,6 +714,7 @@ test("Contest Add panel keeps quick import visible, guarded, and refreshes throu
     if (command === "contest_library_list_families") return [];
     if (command === "contest_library_list_year_entities") return [];
     if (command === "contest_library_list_contests") { listCalls += 1; return []; }
+    if (command === "preview_problem_library") return { title: "Round 2256", problems: ["A", "B", "C", "D", "E1", "E2", "F"].map((index,i) => ({ problemId: i+1, index, title: "Problem " + index, alreadyAdded: false })) };
     if (command === "import_codeforces_contest") { importCalls.push(args.input); return pendingImport; }
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
@@ -733,10 +736,13 @@ test("Contest Add panel keeps quick import visible, guarded, and refreshes throu
     assert.equal(submit.textContent, "正在导入…");
     await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
     assert.equal(importCalls.length, 1);
-    await act(async () => finishImport({ importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] })); await settle();
+    await act(async () => finishImport({ contestId: 2256, importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] })); await settle();
     assert.match(panel.querySelector('[aria-live="polite"]').textContent, /比赛已导入/);
     assert.ok(listCalls > baselineListCalls);
     assert.equal(panel.querySelectorAll('[aria-live="polite"]').length, 1);
+    const selection = view.document.querySelector('[aria-label="加入我的题库"]');
+    assert.equal(selection.querySelectorAll('input[type="checkbox"]').length, 7);
+    assert.ok([...selection.querySelectorAll('input[type="checkbox"]')].every((input) => !input.checked));
   } finally { await view.cleanup(); }
 });
 
@@ -3341,5 +3347,43 @@ test("Settings previews manual backup before creating it", { concurrency: false 
     assert.match(view.document.body.textContent, /完整性已验证/);
     assert.match(view.document.body.textContent, /protected/);
     assert.equal([...view.document.querySelectorAll("button")].filter((button) => !button.closest("[data-testid=vault-manager]")).some((button) => /delete|prune/i.test(button.textContent)), false);
+  } finally { await view.cleanup(); }
+});
+
+
+test("Problem library selection marks membership, batches only checked items, and cancels without writes", async () => {
+  const added = [];
+  const members = new Set([1]);
+  const detail = { contestId: 1979, title: "Contest", sourceUrl: "https://codeforces.com/contest/1979", contestDate: null, importStatus: "complete", factsStatus: "pending", problems: [], corrections: [], aiAnalysis: null, archived: false };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "preview_problem_library") return { title: "Contest", problems: ["A", "B", "C"].map((index, i) => ({ problemId: i + 1, index, title: "Problem " + index, alreadyAdded: members.has(i + 1) })) };
+    if (command === "add_problem_library_items") { added.push(args.input); args.input.problemIds.forEach((id) => members.add(id)); return null; }
+    throw new Error("unexpected command " + command);
+  }, "/contests/1979");
+  try {
+    await settle();
+    const open = () => [...view.document.querySelectorAll("button")].find((b) => b.textContent === "选择比赛题加入我的题库");
+    await act(async () => open().click()); await settle();
+    let panel = view.document.querySelector('[aria-label="加入我的题库"]');
+    assert.match(panel.textContent, /共 3 道比赛题/);
+    const inputs = panel.querySelectorAll('input[type="checkbox"]');
+    assert.equal(inputs[0].disabled, true);
+    assert.equal(inputs[0].checked, true);
+    assert.equal(inputs[1].checked, false);
+    assert.equal(inputs[2].checked, false);
+    await act(async () => inputs[1].click());
+    await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "加入我的题库（1）").click()); await settle();
+    assert.deepEqual(added, [{ contestId: 1979, problemIds: [2] }]);
+    assert.equal(panel.querySelectorAll('input[type="checkbox"]')[1].disabled, true);
+    await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "完成").click());
+    await act(async () => open().click()); await settle();
+    panel = view.document.querySelector('[aria-label="加入我的题库"]');
+    await act(async () => panel.querySelectorAll('input[type="checkbox"]')[2].click());
+    await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "取消").click());
+    assert.equal(added.length, 1);
+    assert.equal(view.document.querySelector('[aria-label="加入我的题库"]'), null);
   } finally { await view.cleanup(); }
 });

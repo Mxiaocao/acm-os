@@ -1,3 +1,4 @@
+import { ProblemLibrarySelection } from "./ProblemLibrarySelection";
 import { displayPath } from "./display-path";
 import { VaultManagerPanel } from "./VaultManagerPanel";
 import {
@@ -1969,6 +1970,7 @@ function TaxonomyDeleteDialog({
 }
 
 function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
+  const [libraryContestId, setLibraryContestId] = useState<number | null>(null);
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [families, setFamilies] = useState<ContestLibraryFamilyDto[] | null>(null);
   const [series, setSeries] = useState<ContestLibrarySeriesDto[]>([]);
@@ -2364,7 +2366,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const submitImport = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (importing) return;
     setImporting(true); setImportMessage(null);
-    try { const result = await importCodeforcesContest(contestUrl); setImportMessage(result.importStatus === "complete" ? t("contest.imported") : t("contest.snapshotsRemain", { count: result.missingSnapshotProblems.length })); setRetryNonce((value) => value + 1); }
+    try { const result = await importCodeforcesContest(contestUrl); setLibraryContestId(result.contestId); setImportMessage(result.importStatus === "complete" ? t("contest.imported") : t("contest.snapshotsRemain", { count: result.missingSnapshotProblems.length })); setRetryNonce((value) => value + 1); }
     catch (error) { setImportMessage(contestImportErrorMessage(error)); }
     finally { setImporting(false); }
   };
@@ -2372,7 +2374,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     if (importing) return;
     setImporting(true); setImportMessage(null);
     try {
-      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`);
+      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`); setLibraryContestId(result.contestId);
       setImportMessage(result.importStatus === "complete" ? t("contest.snapshotsCompleted") : t("contest.retryRemain", { count: result.missingSnapshotProblems.length }));
       setRetryNonce((value) => value + 1);
     } catch (error) { setImportMessage(contestImportErrorMessage(error)); }
@@ -2384,6 +2386,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     try {
       const contestId = Number(manualContestId);
       await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setLibraryContestId(contestId);
       setImportMessage(t("contest.manualSaved"));
       setRetryNonce((value) => value + 1);
     } catch (error) {
@@ -2422,6 +2425,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   return (
     <>
       <PageHeader eyebrow={t("contest.library")} headingRef={headingRef} title="比赛" />
+      {libraryContestId !== null ? <ProblemLibrarySelection key={libraryContestId} contestId={libraryContestId} onClose={() => setLibraryContestId(null)} /> : null}
       <section className="content-panel contest-library-navigation" aria-label={t("contest.libraryNav")}>
         <div className="contest-library-navigation__header"><div><p className="eyebrow">{t("contest.browse")}</p><h2>{t("contest.archiveEyebrow")}</h2></div><label>{t("contest.archiveStatus")}<select value={archiveFilter} onChange={(event) => setArchiveFilter(event.currentTarget.value as ContestLibraryArchiveFilterDto)}><option value="active">{t("contest.activeContests")}</option><option value="archived">{t("contest.archivedContests")}</option><option value="all">{t("contest.allContests")}</option></select></label></div>
         <div className="contest-library-navigation__levels">
@@ -2498,6 +2502,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
 }
 
 function ContestShelf({ navigate }: { navigate: Navigate }) {
+  const [libraryContestId, setLibraryContestId] = useState<number | null>(null);
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [items, setItems] = useState<ContestShelfItemDto[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -2515,7 +2520,7 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     if (importing) return;
     setImporting(true); setImportMessage(null);
     try {
-      const result = await importCodeforcesContest(contestUrl);
+      const result = await importCodeforcesContest(contestUrl); setLibraryContestId(result.contestId);
       setImportMessage(result.importStatus === "complete" ? "比赛已完整导入。" : `比赛已保存，仍有 ${result.missingSnapshotProblems.length} 道题的题面尚未导入。`);
       setItems(await getContestShelf());
     } catch (error) {
@@ -2526,7 +2531,7 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     if (importing) return;
     setImporting(true); setImportMessage(null);
     try {
-      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`);
+      const result = await importCodeforcesContest(`https://codeforces.com/contest/${contestId}`); setLibraryContestId(result.contestId);
       setImportMessage(result.importStatus === "complete" ? "缺失题面已补齐，比赛导入完成。" : `重试完成，仍有 ${result.missingSnapshotProblems.length} 道题的题面尚未导入。`);
       setItems(await getContestShelf());
     } catch (error) {
@@ -2538,6 +2543,7 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     try {
       const contestId = Number(manualContestId);
       await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setLibraryContestId(contestId);
       setImportMessage(t("contest.manualSaved"));
       setItems(await getContestShelf());
     } catch (error) { const code = String(error); setImportMessage(code.includes("manual_manifest_conflict") ? t("contest.manualConflict") : t("contest.manualError")); }
@@ -2547,6 +2553,7 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
   return (
     <>
       <PageHeader eyebrow="M1 · 比赛导入" headingRef={headingRef} title="比赛" />
+      {libraryContestId !== null ? <ProblemLibrarySelection key={libraryContestId} contestId={libraryContestId} onClose={() => setLibraryContestId(null)} /> : null}
       <form className="content-panel contest-import-form" onSubmit={submitImport}>
         <label>Codeforces 公开比赛网址
           <input autoComplete="off" disabled={importing} onInput={(event) => { setContestUrl(event.currentTarget.value); setImportMessage(null); }} placeholder="https://codeforces.com/contest/1979" required value={contestUrl} />
@@ -2611,7 +2618,7 @@ function ProblemIndex({ navigate }: { navigate: Navigate }) {
     <>
       <PageHeader eyebrow={t("problem.indexEyebrow")} headingRef={headingRef} title="我的题库" />
       {failed ? <section className="empty-state" role="alert"><h2>{t("problem.indexUnavailable")}</h2><p>{t("problem.noStateChanged")}</p></section> : null}
-      {items?.length === 0 ? <section className="empty-state"><h2>{t("problem.noLightweight")}</h2><p>{t("problem.noLightweightDescription")}</p></section> : null}
+      {items?.length === 0 ? <section className="empty-state"><h2>{t("problem.noLightweight")}</h2><p>比赛中的题目不会自动加入。请在比赛详情中选择题目，加入我的题库。</p></section> : null}
       {items?.length ? <section className="content-panel" aria-label="轻量题目"><ul className="detail-list">{items.map((item) => <li key={`${item.contestId}-${item.index}`}><button className="list-link" onClick={() => navigate(`/problems/${item.contestId}/${item.index}`)} type="button"><strong>{item.index}. {displayProblemTitle(item.index, item.title)}</strong><span>Codeforces {item.contestId}{item.rating ? ` · ${item.rating}` : ""} · {item.hasStatementSnapshot ? "题面已保存" : "题面待获取"}</span></button></li>)}</ul></section> : null}
       {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>{t("problem.loadingLocal")}</p></section> : null}
     </>
@@ -2720,6 +2727,7 @@ function ContestPlacementPanel({
 }
 
 function ContestDetail({ contestId, navigate }: { contestId: number; navigate: Navigate }) {
+  const [showLibrarySelection, setShowLibrarySelection] = useState(false);
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [detail, setDetail] = useState<ContestDetailDto | null>(null);
   const [failed, setFailed] = useState(false);
@@ -2778,6 +2786,8 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
   const confirmDelete = async () => { setManaging(true); setMessage(null); try { await deleteContest(contestId); navigate("/contests", { replace: true }); } catch { setMessage("比赛未删除，现有事实和题目保持不变。"); setManaging(false); } };
   return <>
     <PageHeader eyebrow="M7 · 比赛事实" headingRef={headingRef} title={detail.title} />
+    <button className="secondary-action" type="button" onClick={() => setShowLibrarySelection(true)}>选择比赛题加入我的题库</button>
+    {showLibrarySelection ? <ProblemLibrarySelection key={contestId} contestId={contestId} onClose={() => setShowLibrarySelection(false)} /> : null}
     <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("contest.openOriginal")}</a></section>
     <ContestPlacementPanel contestId={contestId} placements={placements} error={placementError} editor={placementEditor} busy={placementBusy} onRetry={loadPlacements} onEdit={setPlacementEditor} onSaved={() => { setPlacementEditor(null); loadPlacements(); }} onBusy={setPlacementBusy} />
     <section className="content-panel contest-management" aria-label={t("contest.management")}><h2>{t("contest.management")}</h2><div className="action-row"><button className="secondary-action" disabled={managing} onClick={() => void toggleArchive()} type="button">{detail.archived ? t("contest.restoreAction") : t("contest.archiveAction")}</button>{deletePreview ? null : <button className="danger-action" disabled={managing} onClick={() => void loadDeletePreview()} type="button">{t("contest.previewDelete")}</button>}</div>{deletePreview ? <div role="alert"><p>{t("contest.deletePreview", { title: deletePreview.contestTitle, relationships: deletePreview.relationshipCount })}</p><p>{t("contest.deletePreserve", { preserved: deletePreview.preservedProblemCount, cleanup: deletePreview.cleanupProblemCount })}</p><div className="action-row"><button className="secondary-action" onClick={() => setDeletePreview(null)} type="button">{t("common.cancel")}</button><button className="danger-action" disabled={managing} onClick={() => void confirmDelete()} type="button">{t("contest.deleteAction")}</button></div></div> : null}</section>

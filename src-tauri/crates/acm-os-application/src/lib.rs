@@ -3355,6 +3355,35 @@ pub trait ContestReadPort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemLibraryPreviewItem {
+    pub problem_id: i64,
+    pub index: String,
+    pub title: String,
+    pub already_added: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemLibraryPreview {
+    pub title: String,
+    pub problems: Vec<ProblemLibraryPreviewItem>,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ProblemLibraryPort {
+    async fn preview_problem_library(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<ProblemLibraryPreview, ContestReadError>;
+
+    /// Validate every selection against the contest and add atomically.
+    async fn add_problem_library_items(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        problem_ids: &[i64],
+    ) -> Result<(), ContestReadError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContestImportContractError {
     TitleRequired,
     SourceUrlRequired,

@@ -1498,6 +1498,7 @@ pub struct ManualProblemInput {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContestImportRunDto {
+    contest_id: u64,
     import_status: &'static str,
     missing_snapshot_problems: Vec<String>,
     failed_snapshot_problems: Vec<String>,
@@ -1515,6 +1516,7 @@ pub async fn import_codeforces_contest(
 
     let contest = acm_os_application::codeforces::locate_public_contest(&input.contest_url)
         .map_err(|_| "unsupported_contest_url")?;
+    let contest_id = contest.contest_id();
     #[cfg(feature = "desktop-e2e")]
     let result = import_codeforces_contest(database.inner(), &DesktopE2eContestSource, contest)
         .await
@@ -1528,6 +1530,7 @@ pub async fn import_codeforces_contest(
             .map_err(contest_import_error_code)?
     };
     Ok(ContestImportRunDto {
+        contest_id,
         import_status: match result.persisted.status {
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
             acm_os_application::ContestImportStatus::Complete => "complete",
@@ -1590,6 +1593,7 @@ pub async fn import_manual_codeforces_contest(
             .map_err(|_| "manual_import_unavailable")?;
     }
     Ok(ContestImportRunDto {
+        contest_id: input.contest_id,
         import_status: match persisted.status {
             acm_os_application::ContestImportStatus::Complete => "complete",
             acm_os_application::ContestImportStatus::Incomplete => "incomplete",
@@ -2235,6 +2239,85 @@ pub async fn lightweight_problems(
                 .collect()
         })
         .map_err(|_| ())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProblemLibraryInput {
+    contest_id: u64,
+    problem_ids: Vec<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemLibraryPreviewDto {
+    title: String,
+    problems: Vec<ProblemLibraryPreviewItemDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemLibraryPreviewItemDto {
+    problem_id: i64,
+    index: String,
+    title: String,
+    already_added: bool,
+}
+
+#[tauri::command]
+pub async fn preview_problem_library(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: ProblemLibraryInput,
+) -> Result<ProblemLibraryPreviewDto, &'static str> {
+    use acm_os_application::ProblemLibraryPort;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager
+        .database(&vault_context)
+        .await
+        .map_err(|e| e.code())?;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    let preview = database
+        .preview_problem_library(&contest)
+        .await
+        .map_err(|_| "library_unavailable")?;
+    Ok(ProblemLibraryPreviewDto {
+        title: preview.title,
+        problems: preview
+            .problems
+            .into_iter()
+            .map(|item| ProblemLibraryPreviewItemDto {
+                problem_id: item.problem_id,
+                index: item.index,
+                title: item.title,
+                already_added: item.already_added,
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn add_problem_library_items(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: ProblemLibraryInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::ProblemLibraryPort;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager
+        .database(&vault_context)
+        .await
+        .map_err(|e| e.code())?;
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
+        .map_err(|_| "invalid_contest_identity")?;
+    database
+        .add_problem_library_items(&contest, &input.problem_ids)
+        .await
+        .map_err(|error| match error {
+            acm_os_application::ContestReadError::NotFound => "library_selection_invalid",
+            _ => "library_unavailable",
+        })
 }
 
 #[tauri::command]

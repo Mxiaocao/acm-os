@@ -93,9 +93,23 @@ export interface LightweightProblemItemDto {
 }
 
 export interface ContestImportRunDto {
+  contestId: number;
   importStatus: "incomplete" | "complete";
   missingSnapshotProblems: string[];
   failedSnapshotProblems: string[];
+}
+
+export interface ProblemLibraryPreviewDto {
+  title: string;
+  problems: { problemId: number; index: string; title: string; alreadyAdded: boolean }[];
+}
+
+export function previewProblemLibrary(contestId: number): Promise<ProblemLibraryPreviewDto> {
+  return invoke("preview_problem_library", { input: { contestId, problemIds: [] } });
+}
+
+export function addProblemLibraryItems(contestId: number, problemIds: number[]): Promise<void> {
+  return invoke("add_problem_library_items", { input: { contestId, problemIds } });
 }
 
 export type StatementReadStateDto =

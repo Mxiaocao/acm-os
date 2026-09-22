@@ -83,7 +83,7 @@ async fn corrupt_registry_fails_closed() {
     ));
 }
 
-use acm_os_application::{ContestImportPort, ContestReadPort};
+use acm_os_application::{ContestImportPort, ContestReadPort, ProblemLibraryPort};
 async fn import(
     lease: &VaultLease<'_>,
     id: u64,
@@ -104,6 +104,20 @@ async fn import(
     )
     .unwrap();
     lease.persist_manifest(&plan.manifest).await.unwrap();
+    assert!(lease.list_lightweight_problems().await.unwrap().is_empty());
+    let preview = lease
+        .preview_problem_library(&plan.manifest.contest)
+        .await
+        .unwrap();
+    let selected: Vec<_> = preview
+        .problems
+        .iter()
+        .map(|item| item.problem_id)
+        .collect();
+    lease
+        .add_problem_library_items(&plan.manifest.contest, &selected)
+        .await
+        .unwrap();
     for snapshot in &plan.snapshots {
         lease.persist_first_snapshot(snapshot).await.unwrap();
     }

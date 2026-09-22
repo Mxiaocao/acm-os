@@ -7602,6 +7602,110 @@ fn discard_created_note_on_disk(
     std::fs::remove_file(resolved).map_err(|_| PersonalNoteError::CompensationFailed)
 }
 
+impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
+    async fn preview_problem_library(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+    ) -> Result<acm_os_application::ProblemLibraryPreview, ContestReadError> {
+        let pool = self
+            .contest_pool()
+            .map_err(|_| ContestReadError::Unavailable)?;
+        let (contest_id, title): (i64, String) = sqlx::query_as(
+            "SELECT c.id, c.title FROM contests c JOIN contest_external_identities ci ON ci.contest_id = c.id \
+             WHERE ci.platform = 'codeforces' AND ci.external_contest_key = ?1",
+        )
+        .bind(contest.contest_id().to_string())
+        .fetch_optional(pool).await.map_err(|_| ContestReadError::Unavailable)?
+        .ok_or(ContestReadError::NotFound)?;
+        let rows: Vec<(i64, String, String, bool)> = sqlx::query_as(
+            "SELECT p.id, pi.external_problem_key, p.title, \
+                EXISTS(SELECT 1 FROM problem_library_items li WHERE li.problem_id = p.id) \
+             FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id \
+             JOIN problem_external_identities pi ON pi.problem_id = p.id \
+               AND pi.platform = 'codeforces' AND pi.external_contest_key = ?2 \
+             WHERE cp.contest_id = ?1 ORDER BY cp.ordinal",
+        )
+        .bind(contest_id)
+        .bind(contest.contest_id().to_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?;
+        Ok(acm_os_application::ProblemLibraryPreview {
+            title,
+            problems: rows
+                .into_iter()
+                .map(|(problem_id, index, title, already_added)| {
+                    acm_os_application::ProblemLibraryPreviewItem {
+                        problem_id,
+                        index,
+                        title,
+                        already_added,
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    async fn add_problem_library_items(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        problem_ids: &[i64],
+    ) -> Result<(), ContestReadError> {
+        let preview = self.preview_problem_library(contest).await?;
+        let mut has_new_member = false;
+        for id in problem_ids {
+            let item = preview
+                .problems
+                .iter()
+                .find(|item| item.problem_id == *id)
+                .ok_or(ContestReadError::NotFound)?;
+            has_new_member |= !item.already_added;
+        }
+        if !has_new_member {
+            return Ok(());
+        }
+        let today = crate::current_local_date().map_err(|_| ContestReadError::Unavailable)?;
+        self.ensure_daily_backup(today)
+            .await
+            .map_err(|_| ContestReadError::Unavailable)?;
+        let pool = self
+            .contest_pool()
+            .map_err(|_| ContestReadError::Unavailable)?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|_| ContestReadError::Unavailable)?;
+        let contest_id: i64 = sqlx::query_scalar(
+            "SELECT contest_id FROM contest_external_identities \
+             WHERE platform = 'codeforces' AND external_contest_key = ?1",
+        )
+        .bind(contest.contest_id().to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ContestReadError::Unavailable)?
+        .ok_or(ContestReadError::NotFound)?;
+        for problem_id in problem_ids {
+            let belongs: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM contest_problems WHERE contest_id = ?1 AND problem_id = ?2)",
+            )
+            .bind(contest_id).bind(problem_id).fetch_one(&mut *tx).await
+            .map_err(|_| ContestReadError::Unavailable)?;
+            if !belongs {
+                return Err(ContestReadError::NotFound);
+            }
+            sqlx::query(
+                "INSERT INTO problem_library_items (problem_id, origin) VALUES (?1, 'explicit') \
+                 ON CONFLICT(problem_id) DO NOTHING",
+            )
+            .bind(problem_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ContestReadError::Unavailable)?;
+        }
+        tx.commit().await.map_err(|_| ContestReadError::Unavailable)
+    }
+}
+
 impl ContestImportPort for DatabaseRuntime {
     async fn persist_manifest(
         &self,
@@ -8128,6 +8232,8 @@ impl ContestReadPort for DatabaseRuntime {
                     p.identity_type \
              FROM problems p JOIN problem_external_identities identities \
                ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
+             WHERE EXISTS(SELECT 1 FROM problem_library_items li WHERE li.problem_id = p.id) \
+               AND identities.rowid = (SELECT MIN(pi.rowid) FROM problem_external_identities pi WHERE pi.problem_id = p.id AND pi.platform = 'codeforces') \
              ORDER BY identities.external_contest_key DESC, identities.external_problem_key ASC",
         )
         .fetch_all(self.contest_pool().map_err(|_| ContestReadError::Unavailable)?)
@@ -9517,7 +9623,7 @@ impl ContestManagementPort for DatabaseRuntime {
     }
 }
 
-const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id)";
+const CLEANUP_PROBLEM_IDS_SQL: &str = "SELECT p.id FROM contest_problems cp JOIN problems p ON p.id = cp.problem_id JOIN problem_learning_states pls ON pls.problem_id = p.id WHERE cp.contest_id = ?1 AND p.identity_type = 'lightweight' AND pls.learning_status = 'unstarted' AND NOT EXISTS (SELECT 1 FROM problem_library_items li WHERE li.problem_id = p.id) AND (SELECT COUNT(*) FROM contest_problems all_cp WHERE all_cp.problem_id = p.id) = 1 AND NOT EXISTS (SELECT 1 FROM file_bindings x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_cycles x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM review_attempts x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM problem_mastery_evidence x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM today_plan_entries x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_candidate_records x WHERE x.problem_id = p.id) AND NOT EXISTS (SELECT 1 FROM knowledge_link_index x WHERE x.source_kind = 'problem' AND x.source_id = CAST(p.id AS TEXT)) AND NOT EXISTS (SELECT 1 FROM contest_correction_events x WHERE x.problem_id = p.id)";
 
 async fn contest_delete_state(
     connection: &mut sqlx::SqliteConnection,
@@ -11198,6 +11304,7 @@ async fn validate_schema_contract(
             | 32
             | 33
             | 34
+            | 35
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -11350,6 +11457,24 @@ async fn validate_schema_contract(
     }
     if schema_version >= 33 {
         validate_custom_reward_redemption_contract(pool).await?;
+    }
+    if schema_version >= 35 {
+        validate_table_columns(
+            pool,
+            "problem_library_items",
+            &["problem_id", "added_at_utc", "origin"],
+        )
+        .await?;
+        let actual: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'problem_library_items'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|_| StartupRecoveryReason::IntegrityCheckFailed)?;
+        let expected = "CREATE TABLE problem_library_items (problem_id INTEGER PRIMARY KEY REFERENCES problems(id) ON DELETE RESTRICT, added_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), origin TEXT NOT NULL CHECK (origin IN ('legacy', 'explicit')))";
+        if normalize_schema_sql(&actual) != normalize_schema_sql(expected) {
+            return Err(StartupRecoveryReason::IntegrityCheckFailed);
+        }
     }
     Ok(())
 }
@@ -12111,6 +12236,14 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
                 "reward_grant_ledger_origins".to_owned(),
             ),
         ]);
+        expected_objects.sort();
+    }
+    if schema_version >= 35 {
+        expected_objects.push((
+            "table".to_owned(),
+            "problem_library_items".to_owned(),
+            "problem_library_items".to_owned(),
+        ));
         expected_objects.sort();
     }
     expected_objects
@@ -13101,6 +13234,7 @@ async fn validate_table_columns(
         "contest_families" => "PRAGMA table_xinfo('contest_families')",
         "contest_series" => "PRAGMA table_xinfo('contest_series')",
         "contest_years" => "PRAGMA table_xinfo('contest_years')",
+        "problem_library_items" => "PRAGMA table_xinfo('problem_library_items')",
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
@@ -13680,7 +13814,7 @@ mod tests {
 
     #[test]
     fn production_migrator_embeds_the_special_version() {
-        assert_eq!(supported_schema_version(), 34);
+        assert_eq!(supported_schema_version(), 35);
         assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
@@ -13888,11 +14022,11 @@ mod tests {
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            34
+            35
         );
-        validate_schema_contract(&runtime_pool, 34)
+        validate_schema_contract(&runtime_pool, 35)
             .await
-            .expect("schema 34 contract");
+            .expect("schema 35 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -13908,7 +14042,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
     }
 
@@ -14132,6 +14266,234 @@ mod tests {
                 .cloned()
                 .ok_or(ContestImportSourceError::InvalidRemoteData)
         }
+    }
+
+    #[tokio::test]
+    async fn problem_library_seven_problem_import_select_repeat_and_delete() {
+        use acm_os_application::ProblemLibraryPort;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        assert_eq!(
+            runtime.status(),
+            &StartupGateStatus::Ready { schema_version: 35 }
+        );
+        let mut draft = contest_draft();
+        draft.slots = ["A", "B", "C", "D", "E1", "E2", "F"]
+            .iter()
+            .enumerate()
+            .map(|(i, index)| ContestProblemSlotDraft {
+                ordinal: i as u32 + 1,
+                problem: acm_os_domain::CodeforcesProblemIdentity::new(
+                    draft.contest.clone(),
+                    *index,
+                )
+                .unwrap(),
+                title: format!("Problem {index}"),
+                rating: None,
+                source_url: format!("https://codeforces.com/contest/1979/problem/{index}"),
+            })
+            .collect();
+        let source = CoreLoopContestSource {
+            snapshots: draft
+                .slots
+                .iter()
+                .map(|slot| snapshot(slot.problem.index(), "<p>statement</p>", "<p>statement</p>"))
+                .collect(),
+            manifest: draft.clone(),
+        };
+        acm_os_application::import_codeforces_contest(&runtime, &source, draft.contest.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .contest_detail(&draft.contest)
+                .await
+                .unwrap()
+                .problems
+                .len(),
+            7
+        );
+        assert!(runtime
+            .list_lightweight_problems()
+            .await
+            .unwrap()
+            .is_empty());
+        let preview = runtime
+            .preview_problem_library(&draft.contest)
+            .await
+            .unwrap();
+        assert_eq!(preview.problems.len(), 7);
+        assert!(preview.problems.iter().all(|p| !p.already_added));
+        let ids = [
+            preview.problems[0].problem_id,
+            preview.problems[2].problem_id,
+        ];
+        runtime
+            .add_problem_library_items(&draft.contest, &ids)
+            .await
+            .unwrap();
+        let library = runtime.list_lightweight_problems().await.unwrap();
+        assert_eq!(
+            library
+                .iter()
+                .map(|p| p.problem.index())
+                .collect::<Vec<_>>(),
+            vec!["A", "C"]
+        );
+        assert_eq!(
+            runtime
+                .contest_detail(&draft.contest)
+                .await
+                .unwrap()
+                .problems
+                .len(),
+            7
+        );
+        runtime
+            .add_problem_library_items(&draft.contest, &[ids[0], ids[0], ids[1]])
+            .await
+            .unwrap();
+        acm_os_application::import_codeforces_contest(&runtime, &source, draft.contest.clone())
+            .await
+            .unwrap();
+        assert_eq!(runtime.list_contests().await.unwrap().len(), 1);
+        assert_eq!(
+            runtime
+                .contest_detail(&draft.contest)
+                .await
+                .unwrap()
+                .problems
+                .len(),
+            7
+        );
+        assert_eq!(runtime.list_lightweight_problems().await.unwrap().len(), 2);
+        let preview = runtime
+            .preview_problem_library(&draft.contest)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.problems.iter().filter(|p| p.already_added).count(),
+            2
+        );
+        let pool = runtime._pool.as_ref().unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_library_items")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            2
+        );
+        let deletion = runtime
+            .preview_delete_contest(&draft.contest)
+            .await
+            .unwrap();
+        assert_eq!(deletion.cleanup_problem_count, 5);
+        assert_eq!(deletion.preserved_problem_count, 2);
+        runtime.delete_contest(&draft.contest).await.unwrap();
+        assert_eq!(runtime.list_lightweight_problems().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn problem_library_rejects_invalid_batch_atomically_and_shares_membership() {
+        use acm_os_application::ProblemLibraryPort;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.unwrap();
+        let preview = runtime
+            .preview_problem_library(&draft.contest)
+            .await
+            .unwrap();
+        let id = preview.problems[0].problem_id;
+        assert!(runtime
+            .add_problem_library_items(&draft.contest, &[id, i64::MAX])
+            .await
+            .is_err());
+        assert!(runtime
+            .list_lightweight_problems()
+            .await
+            .unwrap()
+            .is_empty());
+        runtime
+            .add_problem_library_items(&draft.contest, &[])
+            .await
+            .unwrap();
+        let pool = runtime._pool.as_ref().unwrap();
+        sqlx::raw_sql("INSERT INTO contests (id,title,source_url,import_status) VALUES (999,'Shared','https://codeforces.com/contest/999','incomplete'); INSERT INTO contest_external_identities VALUES (999,'codeforces','999');").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO contest_problems (contest_id,problem_id,ordinal,import_state) VALUES (999,?1,1,'pending_snapshot')").bind(id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO problem_external_identities VALUES (?1,'codeforces','999','A')")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let other = acm_os_domain::CodeforcesContestIdentity::new(999).unwrap();
+        // Concurrent requests from different contests still create one membership.
+        let selected = [id];
+        let (first, second) = tokio::join!(
+            runtime.add_problem_library_items(&draft.contest, &selected),
+            runtime.add_problem_library_items(&other, &selected)
+        );
+        first.unwrap();
+        second.unwrap();
+        assert!(
+            runtime
+                .preview_problem_library(&other)
+                .await
+                .unwrap()
+                .problems[0]
+                .already_added
+        );
+        assert_eq!(runtime.list_lightweight_problems().await.unwrap().len(), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problem_library_items")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn problem_library_migration_preserves_legacy_and_restarts() {
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        runtime.persist_manifest(&contest_draft()).await.unwrap();
+        let pool = runtime._pool.as_ref().unwrap().clone();
+        sqlx::raw_sql("DROP TABLE problem_library_items; DELETE FROM _sqlx_migrations WHERE version = 35; UPDATE app_metadata SET schema_generation = 34;").execute(&pool).await.unwrap();
+        validate_schema_contract(&pool, 34).await.unwrap();
+        pool.close().await;
+        drop(runtime);
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(
+            upgraded.status(),
+            &StartupGateStatus::Ready { schema_version: 35 }
+        );
+        assert_eq!(upgraded.list_lightweight_problems().await.unwrap().len(), 2);
+        let pool = upgraded._pool.as_ref().unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM problem_library_items WHERE origin = 'legacy'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contest_problems")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            2
+        );
+        validate_schema_contract(pool, 35).await.unwrap();
+        pool.close().await;
+        drop(upgraded);
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(
+            restarted.list_lightweight_problems().await.unwrap().len(),
+            2
+        );
     }
 
     fn contest_draft() -> ContestImportDraft {
@@ -16807,7 +17169,8 @@ mod tests {
              ALTER TABLE _contests_schema_25 RENAME TO contests;\
              DROP TABLE problems;\
              ALTER TABLE _problems_schema_25 RENAME TO problems;\
-             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 34;\
+             DROP TABLE problem_library_items;\
+             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 35;\
              UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
         )
         .execute(&mut *transaction)
@@ -17008,23 +17371,23 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 34);
+        assert_eq!(ledger_count, 35);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 34);
-        validate_schema_contract(pool, 34)
+        assert_eq!(schema_generation, 35);
+        validate_schema_contract(pool, 35)
             .await
-            .expect("generation 34 schema contract");
+            .expect("generation 35 schema contract");
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -17054,7 +17417,8 @@ mod tests {
                  contest_id, family_id, COALESCE(series_id, 0), \
                  COALESCE(year, 0), COALESCE(ordinal, 0) \
              ); \
-             DELETE FROM _sqlx_migrations WHERE version = 34; \
+             DROP TABLE problem_library_items; \
+             DELETE FROM _sqlx_migrations WHERE version >= 34; \
              UPDATE app_metadata SET schema_generation = 33 WHERE singleton = 1;",
         )
         .execute(&pool)
@@ -17106,12 +17470,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 34)
+        validate_schema_contract(pool, 35)
             .await
-            .expect("schema 34 contract");
+            .expect("schema 35 contract");
         let years: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
             "SELECT identities.external_contest_key, p.year_id, y.value \
              FROM contest_placements p \
@@ -17274,7 +17638,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
         let ids_after: (i64, i64, String, String) = sqlx::query_as(
@@ -17336,7 +17700,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("highest successful migration"),
-            34
+            35
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -17368,13 +17732,13 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
-        validate_schema_contract(pool, 34)
+        validate_schema_contract(pool, 35)
             .await
-            .expect("schema 34 contract after migration");
+            .expect("schema 35 contract after migration");
         drop(upgraded);
         assert_eq!(
             start_database(directory.path()).await.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
     }
 
@@ -17671,7 +18035,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -17803,12 +18167,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 34)
+        validate_schema_contract(pool, 35)
             .await
-            .expect("schema 34 contract");
+            .expect("schema 35 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
         let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), \
@@ -18255,7 +18619,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -18290,7 +18654,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-34-"));
+            .starts_with("schema-10-to-35-"));
     }
 
     #[tokio::test]
@@ -23534,7 +23898,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
     }
 
@@ -23604,7 +23968,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -23637,7 +24001,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -23682,7 +24046,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -23847,7 +24211,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
     }
 
@@ -24059,7 +24423,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 34);
+        assert_eq!(preview.supported_schema_version, 35);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -24541,7 +24905,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -24633,7 +24997,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-34-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-35-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -24893,7 +25257,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -24927,7 +25291,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -25744,7 +26108,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -26175,7 +26539,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 34 }
+            &StartupGateStatus::Ready { schema_version: 35 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(

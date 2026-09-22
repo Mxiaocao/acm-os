@@ -88,6 +88,8 @@ pub fn run() {
             ipc::import_codeforces_contest,
             ipc::import_manual_codeforces_contest,
             ipc::lightweight_problems,
+            ipc::preview_problem_library,
+            ipc::add_problem_library_items,
             ipc::lightweight_problem_detail,
             ipc::lightweight_problem_detail_by_id,
             ipc::create_personal_note,
