@@ -1,5 +1,22 @@
 import { invoke } from "./invoke";
 
+export type ProblemTarget = { problemId: string } | { contestId: number; index: string };
+export type DeleteProblemTarget = ProblemTarget;
+
+export interface ProblemUpdateFields {
+  title: string;
+  sourceUrl: string;
+  rating: number | null;
+}
+
+export function updateProblem(target: ProblemTarget, changes: ProblemUpdateFields): Promise<void> {
+  return invoke("update_problem", { input: { target, ...changes } });
+}
+
+export function deleteProblem(input: DeleteProblemTarget): Promise<void> {
+  return invoke("delete_problem", { input });
+}
+
 export interface ContestShelfItemDto {
   contestId: number;
   title: string;

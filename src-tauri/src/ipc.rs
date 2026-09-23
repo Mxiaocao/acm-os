@@ -2320,6 +2320,73 @@ pub async fn add_problem_library_items(
         })
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProblemIdentityInput {
+    problem_id: Option<String>,
+    contest_id: Option<u64>,
+    index: Option<String>,
+}
+
+impl ProblemIdentityInput {
+    fn target(self) -> Result<acm_os_application::ProblemLibraryTarget, &'static str> {
+        use acm_os_application::ProblemLibraryTarget;
+        match (self.problem_id, self.contest_id, self.index) {
+            (Some(id), None, None) => {
+                let id = validate_internal_problem_id(&id)?;
+                Ok(ProblemLibraryTarget::Canonical(id.parse().map_err(|_| "invalid_problem_id")?))
+            }
+            (None, Some(contest_id), Some(index)) => {
+                let contest = acm_os_domain::CodeforcesContestIdentity::new(contest_id)
+                    .map_err(|_| "invalid_problem_identity")?;
+                Ok(ProblemLibraryTarget::Codeforces(acm_os_domain::CodeforcesProblemIdentity::new(contest, index)
+                    .map_err(|_| "invalid_problem_identity")?))
+            }
+            _ => Err("invalid_problem_identity"),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn delete_problem(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: ProblemIdentityInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::ProblemLibraryPort;
+    let target = input.target()?;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    database.delete_problem(&target).await.map_err(|error| match error {
+        acm_os_application::ContestReadError::NotFound => "problem_not_found",
+        acm_os_application::ContestReadError::Unavailable => "problem_delete_unavailable",
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateProblemInput {
+    target: ProblemIdentityInput,
+    title: String,
+    source_url: String,
+    rating: Option<u32>,
+}
+
+#[tauri::command]
+pub async fn update_problem(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: UpdateProblemInput,
+) -> Result<(), &'static str> {
+    use acm_os_application::{ProblemLibraryPort, ProblemUpdate, ProblemUpdateError};
+    let target = input.target.target()?;
+    let changes = ProblemUpdate::validated(&input.title, &input.source_url, input.rating)
+        .map_err(ProblemUpdateError::code)?;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    database.update_problem(&target, &changes).await.map_err(ProblemUpdateError::code)
+}
+
 #[tauri::command]
 pub async fn lightweight_problem_detail(
     manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
@@ -6260,6 +6327,35 @@ mod tests {
                 super::validate_internal_problem_id(value),
                 Err("invalid_problem_id")
             );
+        }
+    }
+
+    #[test]
+    fn update_problem_input_rejects_readonly_and_invalid_fields() {
+        for json in [
+            r#"{"target":{"problemId":"42"},"title":"B","sourceUrl":"https://example.test","rating":-1}"#,
+            r#"{"target":{"problemId":"42"},"title":"B","sourceUrl":"https://example.test","rating":1.5}"#,
+            r#"{"target":{"problemId":"42"},"title":"B","sourceUrl":"https://example.test","rating":4294967296}"#,
+            r#"{"target":{"problemId":"42"},"title":"B","sourceUrl":"https://example.test","createdAtUtc":"changed"}"#,
+            r#"{"target":{"problemId":"42","contestBindingId":1},"title":"B","sourceUrl":"https://example.test"}"#,
+        ] {
+            assert!(serde_json::from_str::<super::UpdateProblemInput>(json).is_err(), "{json}");
+        }
+        let input: super::UpdateProblemInput = serde_json::from_str(r#"{"target":{"problemId":"42"},"title":"B","sourceUrl":"https://example.test","rating":null}"#).unwrap();
+        assert!(input.target.target().is_ok());
+    }
+
+    #[test]
+    fn delete_problem_input_requires_one_valid_identity() {
+        use super::ProblemIdentityInput;
+        for json in [r#"{}"#, r#"{"problemId":"0"}"#, r#"{"problemId":"-1"}"#,
+            r#"{"problemId":"abc"}"#, r#"{"contestId":1979}"#,
+            r#"{"contestId":0,"index":"A"}"#,
+            r#"{"problemId":"42","contestId":1979,"index":"A"}"#] {
+            assert!(serde_json::from_str::<ProblemIdentityInput>(json).unwrap().target().is_err(), "{json}");
+        }
+        for json in [r#"{"problemId":"42"}"#, r#"{"contestId":1979,"index":"A"}"#] {
+            assert!(serde_json::from_str::<ProblemIdentityInput>(json).unwrap().target().is_ok());
         }
     }
 

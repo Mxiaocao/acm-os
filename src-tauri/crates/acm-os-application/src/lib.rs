@@ -3370,6 +3370,16 @@ pub struct ProblemLibraryPreview {
 
 #[allow(async_fn_in_trait)]
 pub trait ProblemLibraryPort {
+    async fn update_problem(
+        &self,
+        target: &ProblemLibraryTarget,
+        changes: &ProblemUpdate,
+    ) -> Result<(), ProblemUpdateError>;
+
+    /// Hide a problem from the library without removing its identity or history.
+    /// Repeated deletion is successful and preserves the original timestamp.
+    async fn delete_problem(&self, target: &ProblemLibraryTarget) -> Result<(), ContestReadError>;
+
     async fn preview_problem_library(
         &self,
         contest: &acm_os_domain::CodeforcesContestIdentity,
@@ -3381,6 +3391,75 @@ pub trait ProblemLibraryPort {
         contest: &acm_os_domain::CodeforcesContestIdentity,
         problem_ids: &[i64],
     ) -> Result<(), ContestReadError>;
+}
+
+#[derive(Debug, Clone)]
+pub enum ProblemLibraryTarget {
+    Canonical(i64),
+    Codeforces(acm_os_domain::CodeforcesProblemIdentity),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemUpdate {
+    title: String,
+    source_url: String,
+    rating: Option<u32>,
+}
+
+impl ProblemUpdate {
+    pub fn validated(
+        title: &str,
+        source_url: &str,
+        rating: Option<u32>,
+    ) -> Result<Self, ProblemUpdateError> {
+        let title = title.trim();
+        let source_url = source_url.trim();
+        if title.is_empty() {
+            return Err(ProblemUpdateError::TitleRequired);
+        }
+        if source_url.is_empty() || source_url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(ProblemUpdateError::InvalidUrl);
+        }
+        if rating == Some(0) {
+            return Err(ProblemUpdateError::InvalidRating);
+        }
+        Ok(Self {
+            title: title.to_owned(),
+            source_url: source_url.to_owned(),
+            rating,
+        })
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+    pub fn rating(&self) -> Option<u32> {
+        self.rating
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemUpdateError {
+    TitleRequired,
+    InvalidUrl,
+    InvalidRating,
+    NotFound,
+    Unavailable,
+}
+
+impl ProblemUpdateError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::TitleRequired => "problem_title_required",
+            Self::InvalidUrl => "problem_url_invalid",
+            Self::InvalidRating => "problem_rating_invalid",
+            Self::NotFound => "problem_not_found_or_deleted",
+            Self::Unavailable => "problem_update_unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

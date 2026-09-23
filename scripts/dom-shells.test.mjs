@@ -187,6 +187,132 @@ const lightweightLifecycle = {
   nextReviewDueLocalDate: null,
   availableActions: [],
 };
+
+for (const canonical of [false, true]) {
+  test(`Problem edit validates, cancels, retries and refreshes (${canonical ? "canonical" : "external"})`, { concurrency: false }, async () => {
+    let detail = {
+      problemId: "42", contestId: 1979, index: "A", title: "Problem A", rating: 800,
+      sourceUrl: "https://example.test/a", statement: { state: "pending" },
+      identityType: "lightweight", personalNote: null, lifecycle: lightweightLifecycle,
+    };
+    const writes = [];
+    let failSave = true, failRefresh = false, finish;
+    const view = await renderApp((command, args) => {
+      if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+      if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+      if (command === "lightweight_problem_detail" || command === "lightweight_problem_detail_by_id") {
+        if (failRefresh) throw "problem_unavailable";
+        return detail;
+      }
+      if (command === "update_problem") {
+        writes.push(args.input);
+        if (failSave) throw "problem_update_unavailable";
+        return new Promise((resolve) => { finish = () => {
+          detail = { ...detail, title: args.input.title, sourceUrl: args.input.sourceUrl, rating: args.input.rating };
+          resolve();
+        }; });
+      }
+      throw new Error(`unexpected command ${command}`);
+    }, canonical ? "/problems/id/42" : "/problems/1979/A");
+    const button = (label) => [...view.document.querySelectorAll("button")].find((b) => b.textContent === label);
+    const fill = async (position, value) => act(async () => {
+      const input = view.document.querySelectorAll('form[aria-label="编辑题目"] input')[position];
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    const submit = async () => act(async () => view.document.querySelector('form[aria-label="编辑题目"]').dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    try {
+      await settle();
+      await act(async () => button("编辑题目").click());
+      await fill(0, "Discarded");
+      await act(async () => button("取消").click());
+      assert.equal(writes.length, 0);
+      assert.match(view.document.querySelector("h1").textContent, /Problem A/);
+      await act(async () => button("编辑题目").click());
+      assert.equal(view.document.querySelector('form[aria-label="编辑题目"] input').value, "Problem A");
+      await fill(0, "   "); await submit();
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /标题不能为空/);
+      await fill(0, " Problem B "); await fill(1, "javascript:alert(1)"); await submit();
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /HTTP/);
+      await fill(1, "https://example.test/b"); await fill(2, "-1"); await submit();
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /正整数/);
+      assert.equal(writes.length, 0);
+      await fill(2, "1600"); await submit();
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /数据库或备份/);
+      assert.equal(view.document.querySelector('form[aria-label="编辑题目"] input').value, " Problem B ");
+      failSave = false;
+      await submit(); await submit();
+      assert.equal(writes.length, 2);
+      assert.ok(button("处理中…").disabled);
+      assert.ok(button("取消").disabled);
+      assert.deepEqual(writes[1], { target: canonical ? { problemId: "42" } : { contestId: 1979, index: "A" }, title: "Problem B", sourceUrl: "https://example.test/b", rating: 1600 });
+      failRefresh = true;
+      await act(async () => finish()); await settle();
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /修改已保存.*刷新失败/);
+      failRefresh = false;
+      await act(async () => button("重试刷新").click()); await settle();
+      assert.equal(writes.length, 2);
+      assert.match(view.document.querySelector("h1").textContent, /Problem B/);
+      assert.ok(view.document.querySelector('a[href="https://example.test/b"]'));
+      await act(async () => button("编辑题目").click());
+      await fill(2, ""); await submit();
+      assert.equal(writes[2].rating, null);
+      await act(async () => finish()); await settle();
+      assert.ok(button("编辑题目"));
+    } finally { await view.cleanup(); }
+  });
+
+  test(`Problem delete confirms, cancels, retries and refreshes library (${canonical ? "canonical" : "external"})`, { concurrency: false }, async () => {
+    const calls = [];
+    let fail = true;
+    let finish;
+    let reads = 0;
+    const view = await renderApp((command, args) => {
+      if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+      if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+      if (command === "lightweight_problem_detail" || command === "lightweight_problem_detail_by_id") return {
+        problemId: "42", contestId: 1979, index: "A", title: "Problem A", rating: 800,
+        sourceUrl: "https://codeforces.com/contest/1979/problem/A",
+        statement: { state: "pending" }, identityType: "lightweight", personalNote: null,
+        lifecycle: lightweightLifecycle,
+      };
+      if (command === "delete_problem") {
+        calls.push(args.input);
+        if (fail) throw "problem_delete_unavailable";
+        return new Promise((resolve) => { finish = resolve; });
+      }
+      if (command === "lightweight_problems") { reads++; return []; }
+      throw new Error(`unexpected command ${command}`);
+    }, canonical ? "/problems/id/42" : "/problems/1979/A");
+    const button = (label) => [...view.document.querySelectorAll("button")].find((b) => b.textContent === label);
+    try {
+      await settle();
+      await act(async () => button("删除题目").click());
+      assert.match(view.document.querySelector('[role="alertdialog"]').textContent, /Problem A/);
+      assert.equal(view.document.activeElement, button("取消"));
+      assert.equal(calls.length, 0);
+      await act(async () => button("取消").click());
+      assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+      assert.equal(view.document.activeElement, button("删除题目"));
+      await act(async () => button("删除题目").click());
+      await act(async () => button("确认删除").click());
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /数据库或备份暂不可用/);
+      assert.equal(calls.length, 1);
+      fail = false;
+      await act(async () => { button("确认删除").click(); button("确认删除").click(); });
+      assert.equal(calls.length, 2);
+      assert.ok(button("正在删除…").disabled);
+      assert.ok(button("取消").disabled);
+      assert.deepEqual(calls[1], canonical ? { problemId: "42" } : { contestId: 1979, index: "A" });
+      await act(async () => finish());
+      await settle();
+      assert.equal(view.window.location.pathname, "/problems");
+      assert.equal(reads, 1);
+      assert.equal(view.document.querySelector('[role="alertdialog"]'), null);
+      assert.doesNotMatch(view.document.body.textContent, /Problem A/);
+    } finally { await view.cleanup(); }
+  });
+}
 const personalUnstartedLifecycle = {
   ...lightweightLifecycle,
   availableActions: ["joinUpsolve"],

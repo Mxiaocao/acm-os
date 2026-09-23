@@ -1,4 +1,5 @@
 import { ProblemLibrarySelection } from "./ProblemLibrarySelection";
+import { ProblemActions } from "./ProblemActions";
 import { displayPath } from "./display-path";
 import { VaultManagerPanel } from "./VaultManagerPanel";
 import {
@@ -3147,6 +3148,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <section className="content-panel">
         <p>{canonicalDetail.rating ? t("problem.rating", { rating: canonicalDetail.rating }) : ""} · {canonicalDetail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}</p>
         <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
+        <ProblemActions key={problemId} value={canonicalDetail} target={{ problemId: problemId! }} onSaved={async () => setCanonicalDetail(await getCanonicalProblemDetail(problemId!))} onDeleted={() => navigate("/problems", { replace: true })} />
         {canonicalDetail.identityType === "lightweight" ? <button className="primary-action" disabled={creatingNote} onClick={() => void createNote()} type="button">{creatingNote ? t("problem.creating") : t("problem.createPersonal")}</button> : null}
         {canonicalDetail.personalNote ? <p className="safe-note">{t("problem.personalMarkdown")}：<code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
         {canonicalDetail.identityType === "personal" ? <p><strong>{t("problem.currentStatus")}</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
@@ -3193,6 +3195,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         {" · "}{detail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}
       </p>
       <a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
+      <ProblemActions key={`${contestId}/${index}`} value={detail} target={{ contestId, index }} onSaved={async () => setDetail(await getLightweightProblemDetail(contestId, index))} onDeleted={() => navigate("/problems", { replace: true })} />
       {detail.identityType === "lightweight" ? (
         <button className="primary-action" disabled={creatingNote} onClick={createNote} type="button">
           {creatingNote ? t("problem.creating") : t("problem.createPersonal")}

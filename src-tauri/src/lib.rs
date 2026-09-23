@@ -90,6 +90,8 @@ pub fn run() {
             ipc::lightweight_problems,
             ipc::preview_problem_library,
             ipc::add_problem_library_items,
+            ipc::delete_problem,
+            ipc::update_problem,
             ipc::lightweight_problem_detail,
             ipc::lightweight_problem_detail_by_id,
             ipc::create_personal_note,
