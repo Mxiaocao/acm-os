@@ -63,7 +63,7 @@ export function ProblemActions({ value, target, onSaved, onDeleted }: {
       setError(persisted ? "修改已保存，但详情刷新失败。请重试刷新。" : messages[code] ?? `保存失败：${code}`);
     } finally { inFlight.current = false; setPending(false); }
   };
-  if (!editing) return <div className="action-row">
+  if (!editing) return <div className="action-row problem-actions">
     <button className="secondary-action" ref={trigger} type="button" onClick={() => {
       setTitle(value.title); setSourceUrl(value.sourceUrl); setRating(value.rating?.toString() ?? "");
       setSaved(false); setError(null); setEditing(true);

@@ -337,6 +337,45 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
   border-radius: 2px;
 }
 
+.problem-detail-page {
+  display: grid;
+  gap: 32px;
+}
+
+.problem-detail-page > .page-header {
+  margin-bottom: 8px;
+}
+
+.problem-detail-page > .content-panel,
+.problem-detail-page > .empty-state {
+  margin-top: 0;
+  padding: 28px 30px;
+}
+
+.problem-detail-page > .problem-overview {
+  display: grid;
+  align-items: start;
+  gap: 14px;
+}
+
+.problem-detail-page > .problem-overview > p {
+  margin-bottom: 0;
+}
+
+.problem-detail-page .problem-actions {
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.problem-detail-page .review-history-list {
+  gap: 14px;
+}
+
+.problem-detail-page .mastery-evidence {
+  margin-block: 24px;
+  padding: 22px;
+}
+
 .empty-state { max-width: 650px; box-shadow: none; }
 
 .content-panel { width: 100%; min-width: 0; max-width: none; }
@@ -1550,6 +1589,8 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
   .gate-shell, .gate-shell--recovery { width: min(100% - 24px, 720px); margin-top: 32px; }
   .gate-shell > .brand-mark { margin-bottom: 42px; }
   .gate-panel, .content-panel, .empty-state { padding: 18px; }
+  .problem-detail-page > .content-panel,
+  .problem-detail-page > .empty-state { padding: 22px 18px; }
   .detail-list { grid-template-columns: 1fr; gap: 5px; }
   .today-toolbar form, .today-suggestions li { align-items: stretch; flex-direction: column; }
   .detail-list dd { margin-bottom: 10px; }

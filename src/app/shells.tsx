@@ -3143,9 +3143,9 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
   if (failed) return <section className="empty-state" role="alert"><h1 ref={headingRef} tabIndex={-1}>{t("problem.unavailable")}</h1><p>{t("problem.unavailableDescription")}</p></section>;
   if (canonical) {
     if (!canonicalDetail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>{t("problem.loading")}</h1><p>{t("problem.readingSnapshot")}</p></section>;
-    return <>
+    return <div className="problem-detail-page">
       <PageHeader eyebrow={t("problem.canonicalEyebrow")} headingRef={headingRef} title={displayProblemTitle("", canonicalDetail.title)} />
-      <section className="content-panel">
+      <section className="content-panel problem-overview">
         <p>{canonicalDetail.rating ? t("problem.rating", { rating: canonicalDetail.rating }) : ""} · {canonicalDetail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}</p>
         <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
         <ProblemActions key={problemId} value={canonicalDetail} target={{ problemId: problemId! }} onSaved={async () => setCanonicalDetail(await getCanonicalProblemDetail(problemId!))} onDeleted={() => navigate("/problems", { replace: true })} />
@@ -3184,12 +3184,12 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         <ProblemReviewHistory problemId={problemId} learningStatus={canonicalDetail.lifecycle.learningStatus} />
       </> : null}
       {canonicalDetail.statement.state === "pending" ? <section className="empty-state"><h2>{t("problem.statementPending")}</h2><p>{t("problem.statementPendingDescription")}</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>{t("problem.preparingStatement")}</p></section> : <section className="content-panel statement-view"><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
-    </>;
+    </div>;
   }
   if (!detail) return <section className="empty-state" aria-busy="true"><h1 ref={headingRef} tabIndex={-1}>{t("problem.loading")}</h1><p>{t("problem.readingSnapshot")}</p></section>;
-  return <>
+  return <div className="problem-detail-page">
       <PageHeader eyebrow="M1 · 本地题面快照" headingRef={headingRef} title={detail.index + ". " + displayProblemTitle(detail.index, detail.title)} />
-    <section className="content-panel">
+    <section className="content-panel problem-overview">
       <p>
         Codeforces {detail.contestId}{detail.rating ? ` · ${t("problem.rating", { rating: detail.rating })}` : ""}
         {" · "}{detail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}
@@ -3331,7 +3331,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
     ) : null}
     <ProblemReviewHistory contestId={contestId} index={index} learningStatus={detail.lifecycle.learningStatus} />
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>{t("problem.statementPending")}</h2><p>{t("problem.statementPendingDescription")}</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>{t("problem.preparingStatement")}</p></section> : <section className="content-panel statement-view"><div className="statement-heading-row"><h2>{t("problem.statementSnapshot")}</h2></div><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
-  </>;
+  </div>;
 }
 
 function NextReviewDue({ localDate }: { localDate: string | null }) {
