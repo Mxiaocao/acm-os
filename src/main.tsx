@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { App } from "./app/App";
 import "./app/app.css";
+import "./app/sakura-theme.css";
 
 const root = document.getElementById("root");
 

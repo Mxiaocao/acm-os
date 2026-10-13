@@ -1,6 +1,31 @@
 # ACM-OS
 
-ACM-OS is in incremental BUILD. The current repository corresponds to M0 through B0.3.
+ACM-OS 是用于算法训练、题目收藏和复习安排的 Windows 桌面应用。当前发布版本为 `v0.1.0`。
+
+## 下载和使用
+
+从 [GitHub Releases](https://github.com/Mxiaocao/acm-os/releases) 下载 Windows 安装包，或解压免安装版并运行 `acm-os.exe`。首次启动按界面提示设置工作区和笔记目录。
+
+- 比赛书架支持分类、系列和年份组织，随窗口宽度调整每层容量。
+- 题库支持比赛题目收藏、Codeforces 单题链接导入和手动录入。
+- 题目列表提供题面预览、LaTeX 公式、首次导入日期和关键词搜索。
+- 学习月历展示每日学习记录及待复习题目。
+- 樱花粉界面搭配“未来知识代码之书”应用图标。
+
+## 从源码构建
+
+安装 Node.js 和 Rust，以及 Windows 上的 Tauri 构建依赖后执行：
+
+```bash
+npm ci
+npm run check:boundaries
+npm run build
+cargo test --workspace --locked --manifest-path src-tauri/Cargo.toml
+npm run test:dom-shells
+npm run tauri -- build --bundles nsis
+```
+
+安装包输出到 `src-tauri/target/release/bundle/nsis/`。以下保留早期阶段的检查说明，当前功能以发布说明和源码为准。
 
 ## B0.1 checks
 

@@ -676,6 +676,8 @@ pub struct ContestAiAnalysisPreviewDto {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightweightProblemItemDto {
+    imported_at_utc: Option<String>,
+    statement_html: Option<String>,
     contest_id: u64,
     index: String,
     title: String,
@@ -2221,6 +2223,102 @@ pub async fn save_contest_ai_analysis(
         .map_err(contest_ai_analysis_error_code)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SingleProblemInput {
+    mode: String,
+    request_id: String,
+    title: String,
+    source_url: String,
+    rating: Option<u32>,
+    statement_text: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndependentProblemDto {
+    imported_at_utc: String,
+    statement_html: Option<String>,
+    problem_id: String,
+    title: String,
+    source_url: String,
+    rating: Option<u32>,
+    has_statement_snapshot: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleProblemResultDto { problem_id: String }
+
+fn codeforces_single_identity(url: &url::Url) -> Result<acm_os_domain::CodeforcesProblemIdentity, &'static str> {
+    if !matches!(url.host_str(), Some("codeforces.com" | "www.codeforces.com")) || url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
+        return Err("single_problem_invalid_codeforces_url");
+    }
+    let parts: Vec<_> = url.path().trim_end_matches('/').split('/').collect();
+    let (contest, index) = match parts.as_slice() {
+        ["", "problemset", "problem", contest, index] | ["", "contest", contest, "problem", index] => (*contest, *index),
+        _ => return Err("single_problem_invalid_codeforces_url"),
+    };
+    let contest = acm_os_domain::CodeforcesContestIdentity::new(contest.parse().map_err(|_| "single_problem_invalid_codeforces_url")?)
+        .map_err(|_| "single_problem_invalid_codeforces_url")?;
+    acm_os_domain::CodeforcesProblemIdentity::new(contest, index).map_err(|_| "single_problem_invalid_codeforces_url")
+}
+
+#[tauri::command]
+pub async fn import_single_problem(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: SingleProblemInput,
+) -> Result<SingleProblemResultDto, &'static str> {
+    use acm_os_application::{ContestImportSource, single_problem::{SingleProblemDraft, SingleProblemPort}};
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    let source = input.source_url.trim();
+    let url = if source.is_empty() { None } else {
+        if source.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err("single_problem_invalid_url"); }
+        let mut url = url::Url::parse(source).map_err(|_| "single_problem_invalid_url")?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() { return Err("single_problem_invalid_url"); }
+        url.set_fragment(None);
+        Some(url)
+    };
+    let draft = match input.mode.as_str() {
+        "codeforces" => {
+            let identity = codeforces_single_identity(url.as_ref().ok_or("single_problem_invalid_codeforces_url")?)?;
+            let adapter = acm_os_infrastructure::codeforces::CodeforcesHttpAdapter::new().map_err(|_| "single_problem_remote_unavailable")?;
+            let manifest = adapter.fetch_manifest(identity.contest()).await.map_err(|_| "single_problem_remote_unavailable")?;
+            let slot = manifest.slots.iter().find(|slot| slot.problem == identity).ok_or("single_problem_remote_not_found")?;
+            let snapshot = adapter.fetch_snapshot(&identity).await.map_err(|_| "single_problem_remote_unavailable")?;
+            SingleProblemDraft::from_codeforces(slot, snapshot).map_err(|e| e.code())?
+        }
+        "manual" => {
+            let mut draft = SingleProblemDraft::manual(&input.title, url.as_ref().map(|u| u.as_str()).unwrap_or(""), &input.request_id, input.rating, &input.statement_text).map_err(|e| e.code())?;
+            if let Some(url) = url.as_ref().filter(|url| matches!(url.host_str(), Some("codeforces.com" | "www.codeforces.com"))) {
+                let identity = codeforces_single_identity(url)?;
+                draft.platform = "codeforces".into(); draft.scope = identity.contest().contest_id().to_string(); draft.key = identity.index().into();
+            }
+            draft
+        }
+        _ => return Err("single_problem_invalid_input"),
+    };
+    let id = database.inner().import_single_problem(&draft).await.map_err(|e| e.code())?;
+    Ok(SingleProblemResultDto { problem_id: id.to_string() })
+}
+
+#[tauri::command]
+pub async fn independent_problems(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+) -> Result<Vec<IndependentProblemDto>, &'static str> {
+    use acm_os_application::single_problem::SingleProblemPort;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    database.inner().independent_problems().await.map_err(|e| e.code()).map(|items| items.into_iter().map(|item| IndependentProblemDto {
+        imported_at_utc: item.imported_at_utc, statement_html: item.statement_html,
+        problem_id: item.problem_id.to_string(), title: item.title, source_url: item.source_url,
+        rating: item.rating, has_statement_snapshot: item.has_statement_snapshot,
+    }).collect())
+}
+
 #[tauri::command]
 pub async fn lightweight_problems(
     manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
@@ -2544,6 +2642,69 @@ fn validate_internal_problem_id(value: &str) -> Result<String, &'static str> {
         return Err("invalid_problem_id");
     }
     Ok(parsed.to_string())
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningCalendarInput {
+    pub year: u32,
+    pub month: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningCalendarEntryDto {
+    pub date: String,
+    pub problem_id: String,
+    pub problem_title: String,
+    pub kind: String,
+    pub status: String,
+    pub due_date: Option<String>,
+    pub judgement: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningCalendarDto {
+    pub today: String,
+    pub entries: Vec<LearningCalendarEntryDto>,
+}
+
+#[tauri::command]
+pub async fn learning_calendar(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: LearningCalendarInput,
+) -> Result<LearningCalendarDto, &'static str> {
+    use acm_os_application::learning_calendar::{calendar_month_range, LearningCalendarPort};
+    let (start, end) =
+        calendar_month_range(input.year, input.month).map_err(|_| "invalid_calendar_month")?;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager
+        .database(&vault_context)
+        .await
+        .map_err(|e| e.code())?;
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    let entries = database
+        .inner()
+        .load_learning_calendar(start, end, today)
+        .await
+        .map_err(today_error_code)?;
+    Ok(LearningCalendarDto {
+        today: today.to_iso_string(),
+        entries: entries
+            .into_iter()
+            .map(|entry| LearningCalendarEntryDto {
+                date: entry.date,
+                problem_id: entry.problem_id.to_string(),
+                problem_title: entry.problem_title,
+                kind: entry.kind,
+                status: entry.status,
+                due_date: entry.due_date,
+                judgement: entry.judgement,
+            })
+            .collect(),
+    })
 }
 
 #[tauri::command]
@@ -4584,6 +4745,8 @@ fn lightweight_problem_item_dto(
     item: acm_os_application::LightweightProblemItem,
 ) -> LightweightProblemItemDto {
     LightweightProblemItemDto {
+        imported_at_utc: item.imported_at_utc,
+        statement_html: item.statement_html,
         contest_id: item.problem.contest().contest_id(),
         index: item.problem.index().to_owned(),
         title: item.title,

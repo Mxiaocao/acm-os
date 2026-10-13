@@ -49,7 +49,7 @@ test("programmatically focused route headings keep a content-sized focus ring", 
 
 test("fullscreen normal pages share one centered content rail", async () => {
   const css = await readFile(cssUrl, "utf8");
-  assert.match(css, /\.normal-content\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*1280px;[\s\S]*?justify-self:\s*center;/);
+  assert.match(css, /\.normal-content\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*1600px;[\s\S]*?justify-self:\s*center;/);
   assert.match(css, /\.content-panel\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*none;/);
   assert.match(css, /\.contest-add-panel\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?overflow:\s*hidden;/);
 });
@@ -111,18 +111,16 @@ test("Contest Add panel consolidates quick and manual import without touching th
   assert.equal(shells.match(/className="content-panel contest-add-panel"/g)?.length, 1);
   assert.equal(shells.match(/className="manual-import-panel"/g)?.length, 1);
   assert.match(shells, /<section aria-labelledby="contest-add-heading"[\s\S]*?<form className="contest-import-form"[\s\S]*?<details className="manual-import-panel"/);
-  assert.match(shells, /<ContestCabinet items=\{items\.slice\(0, CONTEST_CABINET_CAPACITY\)\} navigate=\{navigate\} totalCount=\{items\.length\} \/>/);
+  assert.match(shells, /<ContestCabinet items=\{visibleItems \?\? \[\]\} navigate=\{navigate\} totalCount=\{visibleItems\?\.length \?\? 0\} \/>/);
   assert.match(css, /\.contest-import-form\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
   assert.match(css, /@media\s*\(max-width:\s*560px\)[\s\S]*?\.contest-import-form\s*\{\s*grid-template-columns:\s*1fr;/);
   assert.match(css, /\.contest-add-panel \.manual-import-panel\s*\{[^}]*border-top:\s*1px solid var\(--line\);[^}]*box-shadow:\s*none;/);
 });
 
-test("Contest cabinet switches only between full and compact column presentation", async () => {
+test("Contest cabinet keeps every column visible at all window widths", async () => {
   const [css, shells] = await Promise.all([readFile(cssUrl, "utf8"), readFile(shellsUrl, "utf8")]);
-  assert.match(css, /\.contest-cabinet-prototype\s*\{[\s\S]*?container-name:\s*contest-cabinet-presentation;[\s\S]*?container-type:\s*inline-size;/);
-  assert.match(css, /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/);
-  assert.match(css, /@container\s+contest-cabinet-presentation\s*\(min-width:\s*950px\)[\s\S]*?data-compact-active="false"\][\s\S]*?display:\s*block;[\s\S]*?\.contest-cabinet-pager\s*\{\s*display:\s*none;/);
+  assert.doesNotMatch(css, /data-compact-active|contest-cabinet-pager/);
+  assert.doesNotMatch(shells, /compactColumn|CONTEST_BOOKS_PER_TIER|CONTEST_CABINET_CAPACITY/);
+  assert.match(shells, /new window\.ResizeObserver/);
   assert.match(shells, /data-logical-column=\{index \+ 1\}/);
-  assert.match(shells, /aria-label=\{t\("contest\.compactNav"\)\}/);
-  assert.doesNotMatch(shells, /tier === 1 && index === 0/);
 });

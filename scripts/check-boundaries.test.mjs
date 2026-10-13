@@ -57,6 +57,7 @@ const validRustPackages = () => [
 
 const validFrontendPackage = () => ({
   dependencies: {
+    "@phosphor-icons/react": "^2",
     "@tauri-apps/api": "^2",
     katex: "^0.18.1",
     react: "^19.1.0",

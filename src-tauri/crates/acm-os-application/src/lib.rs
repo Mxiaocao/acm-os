@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod codeforces;
+pub mod learning_calendar;
+pub mod single_problem;
 
 use std::path::{Component, Path};
 
@@ -1475,6 +1477,8 @@ pub fn validate_contest_facts_input(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LightweightProblemItem {
+    pub imported_at_utc: Option<String>,
+    pub statement_html: Option<String>,
     pub problem: acm_os_domain::CodeforcesProblemIdentity,
     pub title: String,
     pub rating: Option<u32>,

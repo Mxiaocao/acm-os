@@ -13,4 +13,6 @@ src-tauri/gen/
 .idea/
 
 /.dom-shells-vite-cache/
+/.playwright-cli/
+/output/
 /docs/verification/r6-phase2/*.log

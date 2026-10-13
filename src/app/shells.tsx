@@ -1,3 +1,10 @@
+import { ProblemLibrary } from "./ProblemLibrary";
+import { SingleProblemImport } from "./SingleProblemImport";
+import { getIndependentProblems, type IndependentProblemDto } from "../ipc/single-problem";
+import { Books, CalendarDots, Flower, Gear, House, Notebook, Graph, Trophy } from "@phosphor-icons/react";
+import { TodayOverview } from "./TodayOverview";
+import sakuraStudy from "../assets/sakura-study.png";
+import { LearningCalendar } from "./LearningCalendar";
 import { ProblemLibrarySelection } from "./ProblemLibrarySelection";
 import { ProblemActions } from "./ProblemActions";
 import { displayPath } from "./display-path";
@@ -8,6 +15,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -411,14 +419,16 @@ export function NormalAppShell({
         <Brand />
       <a className="skip-link" href="#main-content">{t("shell.skipContent")}</a>
         <nav aria-label={t("shell.primaryNav")}>
-          <ShellLink active={route.kind === "normal" && route.page === "today"} href="/today" navigate={navigate}>{t("nav.today")}</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}>{t("nav.contests")}</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}>{t("nav.problems")}</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}>{t("nav.knowledge")}</ShellLink>
-          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}>{t("nav.reward")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "today"} href="/today" navigate={navigate}><House size={19} weight="regular" aria-hidden="true" />{t("nav.today")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "calendar"} href="/calendar" navigate={navigate}><CalendarDots size={19} weight="regular" aria-hidden="true" />{t("nav.calendar")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "contests"} href="/contests" navigate={navigate}><Books size={19} weight="regular" aria-hidden="true" />{t("nav.contests")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "problems"} href="/problems" navigate={navigate}><Notebook size={19} weight="regular" aria-hidden="true" />{t("nav.problems")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "knowledge"} href="/knowledge" navigate={navigate}><Graph size={19} weight="regular" aria-hidden="true" />{t("nav.knowledge")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "reward"} href="/reward" navigate={navigate}><Trophy size={19} weight="regular" aria-hidden="true" />{t("nav.reward")}</ShellLink>
         </nav>
+        <div className="sidebar-study"><img alt="" aria-hidden="true" src={sakuraStudy} /><p>每天学一点，把题真正学会。</p></div>
         <nav aria-label={t("shell.toolsNav")} className="tool-nav">
-          <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}>{t("nav.settings")}</ShellLink>
+          <ShellLink active={route.kind === "normal" && route.page === "settings"} href="/settings" navigate={navigate}><Gear size={19} weight="regular" aria-hidden="true" />{t("nav.settings")}</ShellLink>
         </nav>
         <p className="system-caption">
           {t("shell.systemFacts")} {foundationCaption(foundation)}
@@ -662,7 +672,7 @@ export function ReviewFocusShell({ attemptId, navigate }: { attemptId: string; n
               {reviewAttemptTypeLabel(focus.attempt.attemptType)} · 计划日期 {focus.attempt.scheduledDueLocalDate}
               {focus.attempt.startedEarly ? " · 已提前开始" : ""}
             </p>
-            <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">{t("review.openOj")}</a>
+            {/^https?:\/\//.test(focus.sourceUrl) ? <a href={focus.sourceUrl} onClick={openOriginalOjFromReview} rel="noreferrer" target="_blank">{t("review.openOj")}</a> : null}
             {ojOpenError ? <p role="alert">{ojOpenError}</p> : null}
             <button className="secondary-action" onClick={openHelpDrawer} ref={helpButtonRef} type="button">{t("review.openHelp")}</button>
             <p className="safe-note">旧笔记、提示、题解、比赛历史和复习历史不会加载到此专注视图。</p>
@@ -766,6 +776,12 @@ function NormalPageContent({ page, workspace, navigate }: { page: NormalPage; wo
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   if (page === "today") {
     return <TodayPage navigate={navigate} />;
+  }
+  if (page === "calendar") {
+    return <div className="learning-calendar-page">
+      <PageHeader eyebrow={t("calendar.eyebrow")} headingRef={headingRef} title={t("nav.calendar")} />
+      <LearningCalendar navigate={navigate} />
+    </div>;
   }
   if (page === "settings") {
     return (
@@ -1686,6 +1702,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
 
   return <>
     <PageHeader eyebrow={t("today.dailyExecution")} headingRef={headingRef} title={t("today.pageTitle")} />
+    <div className="today-workspace"><div className="today-workspace__main">
     <p aria-atomic="true" aria-live="polite" className="sr-only">{announcement}</p>
     {loading ? <p aria-live="polite">{t("today.loadingPlan")}</p> : null}
     {error ? <p aria-live="assertive" className="error-message">{error}</p> : null}
@@ -1695,7 +1712,9 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
       <section className="today-toolbar" aria-label={t("today.summaryAria")}>
         <dl><div><dt>{t("today.date")}</dt><dd>{snapshot.localDate}</dd></div><div><dt>{t("today.planned")}</dt><dd>{snapshot.plannedMinutes} 分钟</dd></div><div><dt>{t("today.budget")}</dt><dd>{snapshot.budgetMinutes} 分钟</dd></div><div><dt>{t("today.over")}</dt><dd>{snapshot.overBudgetMinutes} 分钟</dd></div></dl>
         <form noValidate onSubmit={previewBudget}><label>{t("today.override")}<input aria-label={t("today.budgetMinutesAria")} min="0" onInput={(event) => setBudgetDraft(event.currentTarget.value)} required type="number" value={budgetDraft} /></label><button className="secondary-action" ref={replanTriggerRef} type="submit">{t("today.previewReplan")}</button></form>
+        <div className="today-budget-visual" aria-label={`已计划 ${snapshot.plannedMinutes} 分钟，预算 ${snapshot.budgetMinutes} 分钟`}><div aria-hidden="true"><span style={{ width: `${snapshot.budgetMinutes ? Math.min(100, snapshot.plannedMinutes / snapshot.budgetMinutes * 100) : 0}%` }} /></div><span>今日时间安排</span><strong>{snapshot.plannedMinutes} / {snapshot.budgetMinutes} 分钟</strong></div>
       </section>
+      <div className="today-task-heading"><h2>系统推荐任务</h2><span>根据当前学习状态安排</span></div>
       {snapshot.entries.length === 0 ? <section className="empty-state"><h2>{t("today.noTasks")}</h2><p>{t("today.completeBlocksOnly")}</p></section> :
         <ol className="today-list">{snapshot.entries.map((entry, index) => <li className={`today-entry today-entry--${entry.status}`} data-entry-id={entry.entryId} key={entry.entryId} onKeyDown={(event) => { if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); void move(index, -1); } if (event.altKey && event.key === "ArrowDown") { event.preventDefault(); void move(index, 1); } }} tabIndex={0}>
           <div className="today-entry__order"><button aria-label={t("today.drag", { reason: todayReasonLabel(entry.reason) })} className="today-drag-handle" onPointerCancel={clearPointerDrag} onPointerDown={(event) => startPointerDrag(event, entry.entryId)} onPointerMove={movePointerDrag} onPointerUp={finishPointerDrag} title={t("today.dragTitle")} type="button">⋮⋮</button><button aria-label={t("today.moveUp", { reason: todayReasonLabel(entry.reason) })} disabled={index === 0} onClick={() => void move(index, -1)} type="button">↑</button><button aria-label={t("today.moveDown", { reason: todayReasonLabel(entry.reason) })} disabled={index === snapshot.entries.length - 1} onClick={() => void move(index, 1)} type="button">↓</button></div>
@@ -1704,6 +1723,7 @@ function TodayPage({ navigate }: { navigate: Navigate }) {
         </li>)}</ol>}
       {suggestions && suggestions.suggestions.length > 0 ? <section className="today-suggestions"><h2>额外建议</h2><p>还剩 {suggestions.remainingBudgetMinutes} 分钟。未经确认不会自动加入。</p><ul>{suggestions.suggestions.map((item) => <li key={item.problemId}><span><strong>{displayProblemTitle("", item.problemTitle)}</strong><small>{item.problemRating === null ? "未评级" : `评分 ${item.problemRating}`} · {todayReasonLabel(item.reason)} · {item.planningCostMinutes} 分钟</small></span><button className="secondary-action" disabled={busyEntry === item.problemId} onClick={() => void acceptSuggestion(item.problemId)} type="button">加入今日计划</button></li>)}</ul></section> : null}
     </> : null}
+    </div><TodayOverview snapshot={snapshot} navigate={navigate} /></div>
     {replan ? <div className="modal-backdrop"><div aria-describedby="today-replan-description" aria-labelledby="today-replan-title" aria-modal="true" ref={replanDialogRef} role="dialog"><h2 id="today-replan-title">应用这次重新规划</h2><p id="today-replan-description">预算从 {replan.expectedSnapshot.budgetMinutes} 调整为 {replan.proposedBudgetMinutes} 分钟。这是仅限今天的覆盖设置；每周默认值和下周同一天不变。计划任务将变为 {replan.proposedPlannedMinutes} 分钟，共 {replan.entries.length} 项。已完成、进行中和手动任务会受到保护。</p><div className="button-row"><button className="primary-action" onClick={() => void applyBudget()} ref={replanApplyRef} type="button">应用重新规划</button><button className="secondary-action" onClick={() => { setBudgetDraft(String(snapshot?.budgetMinutes ?? Number(initialBudgetDraft))); setReplan(null); queueMicrotask(() => replanTriggerRef.current?.focus()); }} type="button">取消</button></div></div></div> : null}
   </>;
 }
@@ -1744,10 +1764,28 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
   const placements = item.placements ?? [];
   const coverTitle = contestBookCoverTitle(title);
   const [assetFailed, setAssetFailed] = useState(false);
+  const [factsStatus, setFactsStatus] = useState<ContestDetailDto["factsStatus"] | null>(null);
+  const [hasUpsolve, setHasUpsolve] = useState(false);
+  useEffect(() => {
+    let active = true;
+    getContestDetail(item.contestId).then((detail) => {
+      if (!active) return;
+      setFactsStatus(detail.factsStatus);
+      setHasUpsolve(detail.problems.some((problem) => problem.upsolveDecision === "planned"));
+    }).catch(() => {
+      if (active) { setFactsStatus(null); setHasUpsolve(false); }
+    });
+    return () => { active = false; };
+  }, [item.contestId]);
+  const statusBadges = [
+    factsStatus === "completed" ? <span aria-label="已完成" className="contest-book__status contest-book__status--completed" key="completed">已完成</span> : null,
+    hasUpsolve ? <span aria-label="补题" className="contest-book__status contest-book__status--upsolve" key="upsolve">补题</span> : null,
+    item.archived ? <span aria-label="已归档" className="contest-book__status contest-book__status--archived" key="archived">已归档</span> : null,
+  ].filter(Boolean);
   return (
     <button
       aria-label={t("contest.open", { title })}
-      className={assetFailed ? "contest-book" : "contest-book contest-book--asset"}
+      className={`${assetFailed ? "contest-book" : "contest-book contest-book--asset"}${item.archived ? " contest-book--archived" : ""}${factsStatus === "completed" ? " contest-book--completed" : ""}${hasUpsolve ? " contest-book--upsolve" : ""}`}
       data-contest-id={item.contestId}
       onClick={() => navigate(`/contests/${item.contestId}`)}
       type="button"
@@ -1768,6 +1806,7 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
             <span className="contest-book__round-number">{coverTitle.roundNumber}</span>
           </strong> : <strong className="contest-book__title contest-book__title--fallback">{title}</strong>}
           <span className="contest-book__placements">{placements.length > 0 ? placements.map(contestPlacementMetadata) : t("contest.needsRepair")}</span>
+          {statusBadges.length > 0 ? <span aria-label="比赛状态" className="contest-book__statuses">{statusBadges}</span> : null}
           {coverTitle.subtitle ? <span className="contest-book__subtitle">{coverTitle.subtitle}</span> : null}
           <span className="contest-book__footer">
             <span className="contest-book__identity">CF {item.contestId}</span>
@@ -1780,8 +1819,6 @@ function ContestBookPrototype({ item, navigate }: { item: ContestShelfItemDto; n
 }
 
 const CONTEST_CABINET_TIER_COUNT = 3;
-const CONTEST_BOOKS_PER_TIER = 4;
-const CONTEST_CABINET_CAPACITY = CONTEST_CABINET_TIER_COUNT * CONTEST_BOOKS_PER_TIER;
 const CONTEST_CABINET_SHELF_FOREGROUNDS = [
   contestCabinetShelfForeground1,
   contestCabinetShelfForeground2,
@@ -1795,14 +1832,13 @@ function ContestDisplayStand() {
   </>;
 }
 
-function ContestCabinetTier({ compactColumn, items, navigate, tier }: { compactColumn: number; items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
+function ContestCabinetTier({ items, navigate, tier }: { items: ContestShelfItemDto[]; navigate: Navigate; tier: number }) {
   return (
     <section aria-label={t("contest.shelfTier", { tier })} className="contest-cabinet__tier" data-tier={tier}>
       <div className="contest-cabinet__back">
         <div className="contest-shelf-books">
           {items.map((item, index) => <div
             className="contest-book-slot"
-            data-compact-active={index === compactColumn ? "true" : "false"}
             data-logical-column={index + 1}
             key={item.contestId}
           >
@@ -1822,16 +1858,38 @@ function ContestCabinetTier({ compactColumn, items, navigate, tier }: { compactC
 }
 
 function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfItemDto[]; navigate: Navigate; totalCount: number }) {
-  const [compactColumn, setCompactColumn] = useState(0);
-  const cabinetItemKey = items.map((item) => item.contestId).join(":");
-  const tiers = Array.from({ length: CONTEST_CABINET_TIER_COUNT }, (_, tier) =>
-    items.slice(tier * CONTEST_BOOKS_PER_TIER, (tier + 1) * CONTEST_BOOKS_PER_TIER));
-  const compactPageCount = items.length === 0 ? 0 : Math.max(...tiers.map((tier) => tier.length));
-  useEffect(() => {
-    setCompactColumn((column) => Math.min(column, Math.max(0, compactPageCount - 1)));
-  }, [cabinetItemKey, compactPageCount]);
+  const presentationRef = useRef<HTMLElement>(null);
+  const [booksPerTier, setBooksPerTier] = useState(1);
+  useLayoutEffect(() => {
+    const presentation = presentationRef.current;
+    const booksArea = presentation?.querySelector<HTMLElement>(".contest-shelf-books");
+    if (!booksArea) return;
+    const measure = () => {
+      const slot = presentation?.querySelector<HTMLElement>(".contest-book-slot");
+      if (!slot) return;
+      const width = booksArea.getBoundingClientRect().width;
+      const slotWidth = slot.getBoundingClientRect().width;
+      const gap = Number.parseFloat(window.getComputedStyle(booksArea).columnGap) || 0;
+      if (width > 0 && slotWidth > 0) {
+        setBooksPerTier(Math.max(1, Math.floor((width + gap) / (slotWidth + gap))));
+      }
+    };
+    measure();
+    if (typeof window.ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const observer = new window.ResizeObserver(measure);
+    observer.observe(booksArea);
+    const slot = presentation?.querySelector<HTMLElement>(".contest-book-slot");
+    if (slot) observer.observe(slot);
+    return () => observer.disconnect();
+  }, [items.length === 0]);
+  const capacity = CONTEST_CABINET_TIER_COUNT * booksPerTier;
+  const cabinets = Array.from({ length: Math.max(1, Math.ceil(items.length / capacity)) }, (_, index) =>
+    items.slice(index * capacity, (index + 1) * capacity));
   return (
-    <section aria-labelledby="contest-cabinet-title" className="contest-cabinet-prototype">
+    <section aria-labelledby="contest-cabinet-title" className="contest-cabinet-prototype" ref={presentationRef}>
       <div className="contest-cabinet-prototype__heading">
         <div>
           <p className="eyebrow">{t("contest.archiveEyebrow")}</p>
@@ -1839,7 +1897,7 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
         </div>
         <p>{t("contest.count", { count: totalCount })}</p>
       </div>
-      <div aria-label={t("contest.cabinetAria")} className="contest-cabinet contest-cabinet--asset">
+      {cabinets.map((cabinetItems, cabinetIndex) => <div aria-label={t("contest.cabinetAria")} className="contest-cabinet contest-cabinet--asset" key={cabinetIndex}>
         <div aria-hidden="true" className="contest-cabinet__shell">
           <img alt="" className="contest-cabinet__shell-piece contest-cabinet__shell-piece--left" src={contestCabinetLeft} />
           <img alt="" className="contest-cabinet__shell-piece contest-cabinet__shell-piece--center" src={contestCabinetCenter} />
@@ -1850,8 +1908,8 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
             <div className="contest-cabinet__body">
               <div aria-hidden="true" className="contest-cabinet__stile contest-cabinet__stile--left" />
               <div className="contest-cabinet__tiers">
-                {tiers.map((tierItems, index) => (
-                  <ContestCabinetTier compactColumn={compactColumn} items={tierItems} key={index} navigate={navigate} tier={index + 1} />
+                {Array.from({ length: CONTEST_CABINET_TIER_COUNT }, (_, index) => (
+                  <ContestCabinetTier items={cabinetItems.slice(index * booksPerTier, (index + 1) * booksPerTier)} key={index} navigate={navigate} tier={index + 1} />
                 ))}
                 {items.length === 0 ? <p className="contest-cabinet__empty">{t("contest.emptyView")}</p> : null}
               </div>
@@ -1859,12 +1917,7 @@ function ContestCabinet({ items, navigate, totalCount }: { items: ContestShelfIt
             </div>
             <div aria-hidden="true" className="contest-cabinet__plinth"><span /></div>
         </div>
-      </div>
-      {compactPageCount > 1 ? <nav aria-label={t("contest.compactNav")} className="contest-cabinet-pager">
-        <button aria-label={t("contest.previousColumn")} className="secondary-action" disabled={compactColumn === 0} onClick={() => setCompactColumn((column) => Math.max(0, column - 1))} type="button">{t("contest.previous")}</button>
-        <output aria-live="polite" aria-label={t("contest.columnStatus", { current: compactColumn + 1, total: compactPageCount })}>{compactColumn + 1} / {compactPageCount}</output>
-        <button aria-label={t("contest.nextColumn")} className="secondary-action" disabled={compactColumn === compactPageCount - 1} onClick={() => setCompactColumn((column) => Math.min(compactPageCount - 1, column + 1))} type="button">{t("contest.next")}</button>
-      </nav> : null}
+      </div>)}
     </section>
   );
 }
@@ -2045,9 +2098,9 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     ? value.filter((item): item is ContestLibraryYearDto => typeof item === "object" && item !== null && typeof (item as ContestLibraryYearDto).yearId === "number" && typeof (item as ContestLibraryYearDto).value === "number")
     : [];
 
-  const reconcileYearFilter = (filter: ContestLibraryYearFilterDto, available: ContestLibraryYearDto[]): ContestLibraryYearFilterDto => {
+  const reconcileYearFilter = (filter: ContestLibraryYearFilterDto, available: ContestLibraryYearDto[], entities = yearEntities): ContestLibraryYearFilterDto => {
     if (filter.kind === "any") return filter;
-    return available.some((year) => year.yearId === filter.yearId) ? filter : { kind: "any" };
+    return [...entities, ...available].some((year) => year.yearId === filter.yearId) ? filter : { kind: "any" };
   };
   const restoreCreationFocus = useCallback((mode: "category" | "series" | "year") => {
     const trigger = mode === "category" ? categoryCreateTriggerRef : mode === "series" ? seriesCreateTriggerRef : yearCreateTriggerRef;
@@ -2236,7 +2289,23 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const createYear = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (creationPendingRef.current) return;
     creationPendingRef.current = true; setManagementBusy(true); setManagementMessage(null);
-    try { const created = await createContestLibraryYear(Number(createYearDraft)); setYearEntities(await listContestLibraryYearEntities()); setCreateYearDraft(""); setCreationMode(null); setYearFilter({ kind: "exact", yearId: created.yearId }); restoreCreationFocus("year"); }
+    try {
+      const value = Number(createYearDraft);
+      let created = yearEntities.find((year) => year.value === value);
+      if (!created) {
+        try { created = await createContestLibraryYear(value); }
+        catch (error) {
+          if (!String(error).includes("duplicate_year_value")) throw error;
+          const available = validYears(await listContestLibraryYearEntities());
+          setYearEntities(available);
+          created = available.find((year) => year.value === value);
+          if (!created) throw error;
+        }
+      }
+      const selected = created;
+      setYearEntities((current) => [...current.filter((year) => year.yearId !== selected.yearId), selected].sort((a, b) => b.value - a.value));
+      setCreateYearDraft(""); setCreationMode(null); setYearFilter({ kind: "exact", yearId: selected.yearId }); restoreCreationFocus("year");
+    }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
     finally { creationPendingRef.current = false; setManagementBusy(false); }
   };
@@ -2262,7 +2331,7 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       setYearEntities(nextYears); setYearDraft(""); managementSubviewReturnRef.current = true; setEditingYear(null);
       if (familyId !== null) {
         const available = await listContestLibraryYears(familyId, seriesFilter);
-        setYears(available); setYearFilter(reconcileYearFilter(yearFilter, available));
+        setYears(available); setYearFilter(reconcileYearFilter(yearFilter, available, nextYears));
       }
     }
     catch (error) { setManagementMessage(contestLibraryErrorMessage(error)); }
@@ -2288,14 +2357,20 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       if (familyId !== null) {
         const available = await listContestLibraryYears(familyId, seriesFilter);
         const nextFilter = yearFilter.kind === "exact" && yearFilter.yearId === id
-          ? (replacementYearId !== null && available.some((year) => year.yearId === replacementYearId)
+          ? (replacementYearId !== null && nextEntities.some((year) => year.yearId === replacementYearId)
             ? { kind: "exact", yearId: replacementYearId } as const
             : { kind: "any" } as const)
-          : reconcileYearFilter(yearFilter, available);
+          : reconcileYearFilter(yearFilter, available, nextEntities);
         setYears(available); setYearFilter(nextFilter);
         await reloadArchive(familyId, seriesFilter, nextFilter);
       } else {
-        await reloadArchive(familyId, seriesFilter, yearFilter);
+        const nextFilter = yearFilter.kind === "exact" && yearFilter.yearId === id
+          ? (replacementYearId !== null && nextEntities.some((year) => year.yearId === replacementYearId)
+            ? { kind: "exact", yearId: replacementYearId } as const
+            : { kind: "any" } as const)
+          : reconcileYearFilter(yearFilter, nextEntities, nextEntities);
+        setYearFilter(nextFilter);
+        await reloadArchive(familyId, seriesFilter, nextFilter);
       }
     }
     catch (error) { if (replacementYearId === null && String(error).includes("year_in_use")) setDeleteReplacementRequired(true); setManagementMessage(contestLibraryErrorMessage(error)); }
@@ -2421,6 +2496,10 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
   const deleteSeriesItem = managedSeries.find((item) => item.seriesId === deleteSeriesTarget) ?? null;
   const deleteSeriesFamily = families?.find((item) => item.familyId === managedSeriesFamilyId) ?? null;
   const deleteYearItem = yearEntities.find((item) => item.yearId === deleteYearTarget) ?? null;
+  const availableYears = [...yearEntities, ...years.filter((year) => !yearEntities.some((item) => item.yearId === year.yearId))].sort((a, b) => b.value - a.value);
+  const visibleItems = items && familyId === null && yearFilter.kind === "exact"
+    ? items.filter((item) => item.placements?.some((placement) => placement.yearId === yearFilter.yearId))
+    : items;
   const deleteDialogOpen = deleteFamilyTarget !== null || deleteSeriesTarget !== null || deleteYearTarget !== null;
 
   return (
@@ -2440,12 +2519,13 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
           </div>
           <div className="taxonomy-filter-group">
             <div className="taxonomy-filter-group__header"><span className="filter-label">{t("contest.year")}</span><button aria-label={t("contest.manageYear")} className="text-button taxonomy-manage-trigger" onClick={() => openManagementDialog("year")} ref={yearManageTriggerRef} type="button">{t("contest.edit")}</button></div>
-            <div className="filter-options"><button className={yearFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "any" })} type="button">全部年份</button>{years.map((year) => <button className={yearFilter.kind === "exact" && yearFilter.yearId === year.yearId ? "filter-option filter-option--selected" : "filter-option"} key={year.yearId} onClick={() => setYearFilter({ kind: "exact", yearId: year.yearId })} type="button">{year.value}</button>)}<button aria-label={t("contest.createYear")} className="filter-option filter-option--create" onClick={() => openCreationDialog("year")} ref={yearCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div>
+            <div className="filter-options"><button className={yearFilter.kind === "any" ? "filter-option filter-option--selected" : "filter-option"} onClick={() => setYearFilter({ kind: "any" })} type="button">全部年份</button>{availableYears.map((year) => <button className={yearFilter.kind === "exact" && yearFilter.yearId === year.yearId ? "filter-option filter-option--selected" : "filter-option"} key={year.yearId} onClick={() => setYearFilter({ kind: "exact", yearId: year.yearId })} type="button">{year.value}</button>)}<button aria-label={t("contest.createYear")} className="filter-option filter-option--create" onClick={() => openCreationDialog("year")} ref={yearCreateTriggerRef} type="button"><span aria-hidden="true">+</span></button></div>
           </div>
         </div>
         {families === null && !failed ? <p aria-busy="true">{t("contest.loading")}</p> : null}
         {managementMessage && !deleteDialogOpen ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
         {creationMode ? <div className="modal-backdrop"><div aria-labelledby="contest-taxonomy-create-title" aria-modal="true" className="contest-taxonomy-create-dialog" ref={creationDialogRef} role="dialog"><form className="contest-taxonomy-create-form" onSubmit={creationMode === "category" ? createFamily : creationMode === "series" ? createSeries : createYear}>
+          {creationMode === "year" ? <p>年份在所有分类中共用，已有年份可以直接选用。</p> : null}
           <h2 id="contest-taxonomy-create-title">{creationMode === "category" ? t("contest.createFamily") : creationMode === "series" ? t("contest.createSeries") : t("contest.createYear")}</h2>
           {creationMode === "category" ? <label>{t("contest.familyName")}<input disabled={managementBusy} onInput={(event) => setCreateFamilyDraft(event.currentTarget.value)} ref={categoryCreateInputRef} required value={createFamilyDraft} /></label> : creationMode === "series" ? <><label>{t("contest.family")}<select disabled={managementBusy} onChange={(event) => setCreateSeriesFamilyId(event.currentTarget.value ? Number(event.currentTarget.value) : null)} ref={seriesCreateFamilyRef} required value={createSeriesFamilyId ?? ""}><option disabled value="">{t("contest.selectedFamily")}</option>{families?.map((family) => <option key={family.familyId} value={family.familyId}>{family.displayName}</option>)}</select></label><label>{t("contest.seriesName")}<input disabled={managementBusy} onInput={(event) => setCreateSeriesDraft(event.currentTarget.value)} required value={createSeriesDraft} /></label></> : <label>{t("contest.year")}<input disabled={managementBusy} min="1" onInput={(event) => setCreateYearDraft(event.currentTarget.value)} ref={yearCreateInputRef} required type="number" value={createYearDraft} /></label>}
           {managementMessage ? <p aria-live="polite" className="error-message">{managementMessage}</p> : null}
@@ -2485,17 +2565,16 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
       {loading && !failed ? <section className="empty-state" aria-busy="true"><p>{t("contest.loading")}</p></section> : null}
       {!loading && !failed && items ? (
         <>
-          <ContestCabinet items={items.slice(0, CONTEST_CABINET_CAPACITY)} navigate={navigate} totalCount={items.length} />
-          {items.slice(0, CONTEST_CABINET_CAPACITY).some((item) => !item.archived && item.importStatus === "incomplete") ? (
+          <ContestCabinet items={visibleItems ?? []} navigate={navigate} totalCount={visibleItems?.length ?? 0} />
+          {items.some((item) => !item.archived && item.importStatus === "incomplete") ? (
             <div aria-label={t("contest.retrySnapshots")} className="contest-shelf-maintenance">
-              {items.slice(0, CONTEST_CABINET_CAPACITY).filter((item) => !item.archived && item.importStatus === "incomplete").map((item) => (
+              {items.filter((item) => !item.archived && item.importStatus === "incomplete").map((item) => (
                 <button className="secondary-action" disabled={importing} key={item.contestId} onClick={() => void retryMissing(item.contestId)} type="button">
                   {t("contest.retrySnapshotsFor", { title: item.title })}
                 </button>
               ))}
             </div>
           ) : null}
-          {items.length > CONTEST_CABINET_CAPACITY ? <section className="content-panel contest-library-remainder" aria-label={t("contest.remainingAria")}><div><p className="eyebrow">{t("contest.moreView")}</p><h2>{t("contest.remaining")}</h2></div><ul className="detail-list">{items.slice(CONTEST_CABINET_CAPACITY).map((item) => <li key={item.contestId}><button className="list-link" onClick={() => navigate(`/contests/${item.contestId}`)} type="button"><strong>{item.title}</strong>{(item.placements ?? []).map(contestPlacementMetadata)}<span>Codeforces {item.contestId} · {t("contest.problemsCount", { count: item.problemCount })} · {item.archived ? t("contest.statusArchived") : item.importStatus === "complete" ? t("contest.statusImported") : t("contest.missingSnapshots", { count: item.missingSnapshotCount })}</span></button>{!item.archived && item.importStatus === "incomplete" ? <button className="secondary-action" disabled={importing} onClick={() => void retryMissing(item.contestId)} type="button">{t("contest.retrySnapshots")}</button> : null}</li>)}</ul></section> : null}
         </>
       ) : null}
     </>
@@ -2614,15 +2693,24 @@ function ProblemIndex({ navigate }: { navigate: Navigate }) {
   const headingRef = useRouteFocus<HTMLHeadingElement>();
   const [items, setItems] = useState<LightweightProblemItemDto[] | null>(null);
   const [failed, setFailed] = useState(false);
-  useEffect(() => { getLightweightProblems().then(setItems).catch(() => setFailed(true)); }, []);
+  const [independent, setIndependent] = useState<IndependentProblemDto[] | null>(null);
+  const reload = async () => {
+    const [nextItems, nextIndependent] = await Promise.all([getLightweightProblems(), getIndependentProblems()]);
+    setItems(nextItems); setIndependent(nextIndependent); setFailed(false);
+  };
+  useEffect(() => { void reload().catch(() => setFailed(true)); }, []);
   return (
-    <>
+    <div className="problem-index-page">
       <PageHeader eyebrow={t("problem.indexEyebrow")} headingRef={headingRef} title="我的题库" />
+      <SingleProblemImport onImported={async (id) => { await reload(); navigate(`/problems/id/${id}`); }} />
       {failed ? <section className="empty-state" role="alert"><h2>{t("problem.indexUnavailable")}</h2><p>{t("problem.noStateChanged")}</p></section> : null}
-      {items?.length === 0 ? <section className="empty-state"><h2>{t("problem.noLightweight")}</h2><p>比赛中的题目不会自动加入。请在比赛详情中选择题目，加入我的题库。</p></section> : null}
-      {items?.length ? <section className="content-panel" aria-label="轻量题目"><ul className="detail-list">{items.map((item) => <li key={`${item.contestId}-${item.index}`}><button className="list-link" onClick={() => navigate(`/problems/${item.contestId}/${item.index}`)} type="button"><strong>{item.index}. {displayProblemTitle(item.index, item.title)}</strong><span>Codeforces {item.contestId}{item.rating ? ` · ${item.rating}` : ""} · {item.hasStatementSnapshot ? "题面已保存" : "题面待获取"}</span></button></li>)}</ul></section> : null}
+      {items !== null && independent !== null ? <ProblemLibrary navigate={navigate} items={[
+        ...items.map((item) => ({ id: `cf-${item.contestId}-${item.index}`, code: `${item.contestId}${item.index}`, title: displayProblemTitle(item.index, item.title), source: "Codeforces", rating: item.rating, importedAtUtc: item.importedAtUtc, statementHtml: item.statementHtml, hasStatementSnapshot: item.hasStatementSnapshot, route: `/problems/${item.contestId}/${item.index}` })),
+        ...independent.map((item) => ({ id: item.problemId, code: null, title: displayProblemTitle("", item.title), source: "单题录入", rating: item.rating, importedAtUtc: item.importedAtUtc, statementHtml: item.statementHtml, hasStatementSnapshot: item.hasStatementSnapshot, route: `/problems/id/${item.problemId}` })),
+      ]} /> : null}
+      {items?.length === 0 && independent?.length === 0 ? <section className="empty-state"><h2>{t("problem.noLightweight")}</h2><p>可以在上方导入单题，也可以从比赛详情中选择题目加入题库。</p></section> : null}
       {items === null && !failed ? <section className="empty-state" aria-busy="true"><p>{t("problem.loadingLocal")}</p></section> : null}
-    </>
+    </div>
   );
 }
 
@@ -3147,7 +3235,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <PageHeader eyebrow={t("problem.canonicalEyebrow")} headingRef={headingRef} title={displayProblemTitle("", canonicalDetail.title)} />
       <section className="content-panel problem-overview">
         <p>{canonicalDetail.rating ? t("problem.rating", { rating: canonicalDetail.rating }) : ""} · {canonicalDetail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}</p>
-        <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
+        {/^https?:\/\//.test(canonicalDetail.sourceUrl) ? <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a> : <p className="system-caption">本地录入题目</p>}
         <ProblemActions key={problemId} value={canonicalDetail} target={{ problemId: problemId! }} onSaved={async () => setCanonicalDetail(await getCanonicalProblemDetail(problemId!))} onDeleted={() => navigate("/problems", { replace: true })} />
         {canonicalDetail.identityType === "lightweight" ? <button className="primary-action" disabled={creatingNote} onClick={() => void createNote()} type="button">{creatingNote ? t("problem.creating") : t("problem.createPersonal")}</button> : null}
         {canonicalDetail.personalNote ? <p className="safe-note">{t("problem.personalMarkdown")}：<code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
@@ -3694,7 +3782,7 @@ function ShellLink({
   href: string;
   active: boolean;
   navigate: Navigate;
-  children: string;
+  children: ReactNode;
 }) {
   const follow = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
@@ -3710,7 +3798,7 @@ function PageHeader({ eyebrow, title, headingRef }: { eyebrow: string; title: st
 }
 
 function Brand() {
-  return <div className="brand-mark" aria-label="ACM-OS">ACM<span>OS</span></div>;
+  return <div className="brand-mark" aria-label="ACM-OS"><Flower size={29} weight="duotone" aria-hidden="true" /><span className="brand-name">ACM-OS</span></div>;
 }
 
 function focusField(

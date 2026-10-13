@@ -29,16 +29,10 @@ test("core layout has narrow-viewport fallbacks for zoomed keyboard use", async 
   assert.match(css, /\.contest-facts-list\s+li\s*\{\s*grid-template-columns:\s*1fr;/);
 });
 
-test("inactive Compact cabinet columns stay out of the interactive accessibility set", async () => {
+test("responsive cabinet books remain accessible without hidden columns", async () => {
   const css = await readFile(new URL("../src/app/app.css", import.meta.url), "utf8");
-  assert.match(
-    css,
-    /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/,
-  );
-  assert.match(
-    css,
-    /@container\s+contest-cabinet-presentation\s*\(min-width:\s*950px\)[\s\S]*?\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*block;/,
-  );
+  assert.doesNotMatch(css, /data-compact-active/);
+  assert.match(css, /\.contest-book:focus-visible\s*\{/);
 });
 
 test("Contest taxonomy destructive workflow exposes labelled dialog and contained focus states", async () => {

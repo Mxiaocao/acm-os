@@ -1,3 +1,6 @@
+mod learning_calendar;
+mod single_problem;
+
 const MAX_EXACT_REWARD_AMOUNT: i64 = 9_007_199_254_740_991;
 const MAX_PENDING_REWARD_SOURCES: usize = 256;
 use std::collections::HashMap;
@@ -7610,9 +7613,10 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
     ) -> Result<(), acm_os_application::ProblemUpdateError> {
         use acm_os_application::{ProblemLibraryTarget, ProblemUpdateError as Error};
         // Parse the display URL locally; it never changes external identity or fetches a snapshot.
+        let is_local = changes.source_url().starts_with("acmos://local-problem/");
         let url = reqwest::Url::parse(changes.source_url()).map_err(|_| Error::InvalidUrl)?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-            || !url.username().is_empty() || url.password().is_some()
+        if !is_local && (!matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+            || !url.username().is_empty() || url.password().is_some())
         {
             return Err(Error::InvalidUrl);
         }
@@ -7629,6 +7633,10 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM problems WHERE id = ?1 AND deleted_at_utc IS NULL)")
             .bind(id).fetch_one(pool).await.map_err(|_| Error::Unavailable)?;
         if !exists { return Err(Error::NotFound); }
+        if is_local {
+            let current: String = sqlx::query_scalar("SELECT source_url FROM problems WHERE id = ?1").bind(id).fetch_one(pool).await.map_err(|_| Error::Unavailable)?;
+            if current != changes.source_url() { return Err(Error::InvalidUrl); }
+        }
         let today = crate::current_local_date().map_err(|_| Error::Unavailable)?;
         self.ensure_daily_backup(today).await.map_err(|_| Error::Unavailable)?;
         let result = sqlx::query("UPDATE problems SET title = ?1, source_url = ?2, rating = ?3 WHERE id = ?4 AND deleted_at_utc IS NULL")
@@ -8227,6 +8235,8 @@ impl ContestReadPort for DatabaseRuntime {
                 )| {
                     Ok(ContestProblemDetailItem {
                         problem: LightweightProblemItem {
+                            imported_at_utc: None,
+                            statement_html: None,
                             problem: acm_os_domain::CodeforcesProblemIdentity::new(
                                 contest.clone(),
                                 index,
@@ -8297,12 +8307,13 @@ impl ContestReadPort for DatabaseRuntime {
     async fn list_lightweight_problems(
         &self,
     ) -> Result<Vec<LightweightProblemItem>, ContestReadError> {
-        let rows: Vec<(String, String, String, Option<i64>, i64, String)> = sqlx::query_as(
+        let rows: Vec<(String, String, String, Option<i64>, i64, String, String, Option<String>)> = sqlx::query_as(
             "SELECT identities.external_contest_key, identities.external_problem_key, p.title, p.rating, \
                     EXISTS(SELECT 1 FROM problem_statement_snapshots ss WHERE ss.problem_id = p.id), \
-                    p.identity_type \
+                    p.identity_type, p.created_at_utc, ss.sanitized_html \
              FROM problems p JOIN problem_external_identities identities \
                ON identities.problem_id = p.id AND identities.platform = 'codeforces' \
+             LEFT JOIN problem_statement_snapshots ss ON ss.problem_id = p.id \
              WHERE p.deleted_at_utc IS NULL AND EXISTS(SELECT 1 FROM problem_library_items li WHERE li.problem_id = p.id) \
                AND identities.rowid = (SELECT MIN(pi.rowid) FROM problem_external_identities pi WHERE pi.problem_id = p.id AND pi.platform = 'codeforces') \
              ORDER BY identities.external_contest_key DESC, identities.external_problem_key ASC",
@@ -8312,8 +8323,10 @@ impl ContestReadPort for DatabaseRuntime {
         .map_err(|_| ContestReadError::Unavailable)?;
         rows.into_iter()
             .map(
-                |(contest_id, index, title, rating, snapshot, identity_type)| {
+                |(contest_id, index, title, rating, snapshot, identity_type, imported_at_utc, statement_html)| {
                     Ok(LightweightProblemItem {
+                        imported_at_utc: Some(imported_at_utc),
+                        statement_html,
                         problem: acm_os_domain::CodeforcesProblemIdentity::new(
                             parse_codeforces_contest_identity(&contest_id)
                                 .map_err(|_| ContestReadError::Unavailable)?,
@@ -16828,6 +16841,151 @@ mod tests {
                 .expect("remove fixture setup backup");
         }
         (directory, runtime, vault, problems, problem)
+    }
+
+    #[tokio::test]
+    async fn single_problem_asset_failure_rolls_back_every_database_write() {
+        use acm_os_application::single_problem::{SingleProblemDraft, SingleProblemPort};
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let mut draft = SingleProblemDraft::manual("Exercise", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", None, "Statement").unwrap();
+        draft.assets.push(acm_os_application::StatementAssetDraft { local_ref: "asset-one".into(), media_type: "image/png".into(), bytes: vec![] });
+        assert!(runtime.import_single_problem(&draft).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM problems) + (SELECT COUNT(*) FROM problem_external_identities) + (SELECT COUNT(*) FROM problem_library_items) + (SELECT COUNT(*) FROM problem_learning_states) + (SELECT COUNT(*) FROM problem_statement_snapshots)").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(count, 0);
+        draft.assets.clear();
+        runtime.import_single_problem(&draft).await.unwrap();
+        assert_eq!(runtime.independent_problems().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_problem_codeforces_import_deduplicates_without_a_contest_manifest() {
+        use acm_os_application::single_problem::{SingleProblemDraft, SingleProblemPort};
+        use acm_os_application::ContestReadPort;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        configure_temporary_workspace(&runtime, &directory).await;
+        let manifest = contest_draft();
+        let draft = SingleProblemDraft::from_codeforces(&manifest.slots[0], snapshot("A", "first", "<p>First snapshot</p>")).unwrap();
+        let id = runtime.import_single_problem(&draft).await.unwrap();
+        assert_eq!(runtime.import_single_problem(&draft).await.unwrap(), id);
+        let items = runtime.list_lightweight_problems().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].problem.index(), "A");
+        assert!(items[0].has_statement_snapshot);
+        let imported: String = sqlx::query_scalar("SELECT created_at_utc FROM problems WHERE id = ?1").bind(id).fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(items[0].imported_at_utc.as_deref(), Some(imported.as_str()));
+        assert_eq!(items[0].statement_html.as_deref(), Some("<p>First snapshot</p>"));
+        assert!(runtime.independent_problems().await.unwrap().is_empty());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contests").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(count, 0);
+        runtime.persist_manifest(&manifest).await.unwrap();
+        assert_eq!(runtime.import_single_problem(&draft).await.unwrap(), id);
+        let first: String = sqlx::query_scalar("SELECT sanitized_html FROM problem_statement_snapshots WHERE problem_id = ?1").bind(id).fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(first, "<p>First snapshot</p>");
+        let identity_id: i64 = sqlx::query_scalar("SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(identity_id, id);
+        assert_eq!(runtime.list_lightweight_problems().await.unwrap()[0].imported_at_utc.as_deref(), Some(imported.as_str()));
+    }
+
+    #[tokio::test]
+    async fn single_problem_import_without_contest_is_idempotent_and_enters_review_lifecycle() {
+        use acm_os_application::single_problem::{SingleProblemDraft, SingleProblemPort};
+        use acm_os_application::{ContestReadPort, ProblemLibraryPort, ProblemLibraryTarget, ProblemUpdate};
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        let (_vault, _problems, _knowledge) = configure_temporary_workspace(&runtime, &directory).await;
+        let mut draft = SingleProblemDraft::manual("Book exercise", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", Some(1400), "<script>bad()</script>\nFind x").unwrap();
+        let id = runtime.import_single_problem(&draft).await.unwrap();
+        let imported: String = sqlx::query_scalar("SELECT created_at_utc FROM problems WHERE id = ?1").bind(id).fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        draft.title = "Do not overwrite existing metadata".into();
+        draft.sanitized_html = "Do not overwrite the first capture".into();
+        assert_eq!(runtime.import_single_problem(&draft).await.unwrap(), id);
+        let listed = runtime.independent_problems().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].problem_id, id);
+        assert_eq!(listed[0].title, "Book exercise");
+        assert_eq!(listed[0].imported_at_utc, imported);
+        assert!(listed[0].statement_html.as_ref().unwrap().contains("Find x"));
+        let detail = runtime.canonical_problem_detail(&id.to_string()).await.unwrap();
+        match detail.statement { acm_os_application::StatementReadState::Ready {sanitized_html} => {
+            assert!(sanitized_html.contains("&lt;script&gt;"));
+            assert!(!sanitized_html.contains("Do not overwrite"));
+        }, _ => panic!("statement must be ready") }
+        let pool = runtime._pool.as_ref().unwrap();
+        let contest_rows: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM contests) + (SELECT COUNT(*) FROM contest_problems) + (SELECT COUNT(*) FROM contest_external_identities)").fetch_one(pool).await.unwrap();
+        assert_eq!(contest_rows, 0, "no contest scaffold created");
+        let changes = ProblemUpdate::validated("Updated book title", &listed[0].source_url, None).unwrap();
+        runtime.update_problem(&ProblemLibraryTarget::Canonical(id), &changes).await.unwrap();
+        assert_eq!(runtime.independent_problems().await.unwrap()[0].title, "Updated book title");
+        acm_os_application::create_personal_note_by_id(&runtime, id).await.unwrap();
+        let day = acm_os_domain::LocalDate::parse_iso("2026-10-12").unwrap();
+        for action in [acm_os_domain::ProblemLifecycleAction::JoinUpsolve, acm_os_domain::ProblemLifecycleAction::StartLearning, acm_os_domain::ProblemLifecycleAction::MarkUnderstood] {
+            acm_os_application::transition_problem_lifecycle_by_id(&runtime, id, action, day).await.unwrap();
+        }
+        let due: String = sqlx::query_scalar("SELECT next_due_local_date FROM review_cycles WHERE problem_id = ?1 AND cycle_status = 'active'").bind(id).fetch_one(pool).await.unwrap();
+        assert!(due.as_str() > "2026-10-12");
+        runtime.delete_problem(&ProblemLibraryTarget::Canonical(id)).await.unwrap();
+        assert!(runtime.independent_problems().await.unwrap().is_empty());
+        assert_eq!(runtime.import_single_problem(&draft).await.unwrap(), id);
+        assert_eq!(runtime.independent_problems().await.unwrap().len(), 1);
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let restored = restarted.independent_problems().await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].imported_at_utc, imported);
+        let detail = restarted.canonical_problem_detail(&id.to_string()).await.unwrap();
+        assert_eq!(detail.identity_type, acm_os_application::ProblemIdentityType::Personal);
+        assert_eq!(detail.lifecycle.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+    }
+
+    #[tokio::test]
+    async fn learning_calendar_reads_history_and_next_due_without_mutating_plans() {
+        use acm_os_application::learning_calendar::{calendar_month_range, LearningCalendarPort};
+        use chrono::TimeZone;
+        let (_directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let day = acm_os_domain::LocalDate::parse_iso("2026-10-08").unwrap();
+        for action in [acm_os_domain::ProblemLifecycleAction::JoinUpsolve,
+            acm_os_domain::ProblemLifecycleAction::StartLearning,
+            acm_os_domain::ProblemLifecycleAction::MarkUnderstood] {
+            transition_problem_lifecycle(&runtime, &problem, action, day).await.unwrap();
+        }
+        let pool = runtime._pool.as_ref().unwrap();
+        let (cycle_id, problem_id): (String, i64) = sqlx::query_as("SELECT id, problem_id FROM review_cycles WHERE cycle_status = 'active'")
+            .fetch_one(pool).await.unwrap();
+        let created = chrono::Local.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).single().unwrap()
+            .with_timezone(&chrono::Utc).to_rfc3339();
+        sqlx::query("UPDATE review_cycles SET created_at_utc = ?1, next_due_local_date = '2026-10-08' WHERE id = ?2")
+            .bind(created).bind(&cycle_id).execute(pool).await.unwrap();
+        let plan_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO today_plans (id, local_date, budget_minutes, planned_minutes, over_budget_minutes, review_only_streak) VALUES (?1, '2026-10-08', 60, 60, 0, 0)")
+            .bind(&plan_id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO today_plan_entries (id, today_plan_id, problem_id, lane, reason, planning_cost_minutes, position, entry_status) VALUES (?1, ?2, ?3, 'study', 'upsolve', 60, 0, 'completed')")
+            .bind(uuid::Uuid::now_v7().to_string()).bind(&plan_id).bind(problem_id).execute(pool).await.unwrap();
+        for status in ["completed", "void"] {
+            sqlx::query("INSERT INTO review_attempts (id, problem_id, review_cycle_id, attempt_type, attempt_status, scheduled_due_local_date, started_early, judgement_rule_version, completed_at_utc, completed_local_date, judgement) VALUES (?1, ?2, ?3, 'early_check', ?4, '2026-10-08', 1, 1, '2026-10-08T10:00:00Z', '2026-10-08', 'mastered')")
+                .bind(uuid::Uuid::now_v7().to_string()).bind(problem_id).bind(&cycle_id).bind(status).execute(pool).await.unwrap();
+        }
+        let today = acm_os_domain::LocalDate::parse_iso("2026-10-09").unwrap();
+        let (start, end) = calendar_month_range(2026, 10).unwrap();
+        let records = runtime.load_learning_calendar(start, end, today).await.unwrap();
+        assert_eq!(records.len(), 3, "study deduplication, one completed review, one overdue review");
+        assert_eq!(records.iter().filter(|e| e.kind == "study").count(), 1);
+        assert!(records.iter().any(|e| e.kind == "early_check" && e.date == "2026-10-08" && e.judgement.as_deref() == Some("mastered")));
+        assert!(records.iter().any(|e| e.status == "scheduled" && e.date == "2026-10-09" && e.due_date.as_deref() == Some("2026-10-08")));
+        sqlx::query("UPDATE review_cycles SET next_due_local_date = '2026-11-01' WHERE id = ?1").bind(&cycle_id).execute(pool).await.unwrap();
+        assert_eq!(runtime.load_learning_calendar(start, end, today).await.unwrap().len(), 2);
+        let (start, end) = calendar_month_range(2026, 11).unwrap();
+        let future = runtime.load_learning_calendar(start, end, today).await.unwrap();
+        assert_eq!(future.len(), 1);
+        assert_eq!(future[0].date, "2026-11-01");
+        sqlx::query("UPDATE review_cycles SET cycle_status = 'cancelled', next_due_local_date = NULL, ended_at_utc = '2026-10-09T00:00:00Z' WHERE id = ?1").bind(&cycle_id).execute(pool).await.unwrap();
+        assert!(runtime.load_learning_calendar(start, end, today).await.unwrap().is_empty());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM today_plans").fetch_one(pool).await.unwrap();
+        assert_eq!(count, 1, "calendar reads never generate plans");
+        let status: String = sqlx::query_scalar("SELECT entry_status FROM today_plan_entries WHERE today_plan_id = ?1").bind(plan_id).fetch_one(pool).await.unwrap();
+        assert_eq!(status, "completed");
     }
 
     #[tokio::test]

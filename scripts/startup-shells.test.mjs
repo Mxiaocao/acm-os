@@ -5,6 +5,8 @@ import { parseAppRoute } from "../src/app/routing.ts";
 test("maps the frozen normal application routes", () => {
   assert.deepEqual(parseAppRoute("/"), { kind: "normal", page: "today" });
   assert.deepEqual(parseAppRoute("/today"), { kind: "normal", page: "today" });
+  assert.deepEqual(parseAppRoute("/calendar"), { kind: "normal", page: "calendar" });
+  assert.deepEqual(parseAppRoute("/calendar/"), { kind: "normal", page: "calendar" });
   assert.deepEqual(parseAppRoute("/contests/"), { kind: "normal", page: "contests" });
   assert.deepEqual(parseAppRoute("problems"), { kind: "normal", page: "problems" });
   assert.deepEqual(parseAppRoute("/knowledge"), { kind: "normal", page: "knowledge" });

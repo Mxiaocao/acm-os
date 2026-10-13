@@ -362,10 +362,25 @@ async function settle() {
   });
 }
 
-async function renderApp(ipc, pathname = "/", strict = false) {
+async function renderApp(ipc, pathname = "/", strict = false, shelfWidth = 699, calendarIpc = null, independentIpc = null) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     url: `https://acm-os.test${pathname}`,
   });
+  const resizeObservers = new Set();
+  dom.window.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; resizeObservers.add(this); }
+    observe() {}
+    disconnect() { resizeObservers.delete(this); }
+  };
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const width = this.classList.contains("contest-shelf-books") ? shelfWidth
+      : this.classList.contains("contest-book-slot") ? 168 : null;
+    return width === null ? originalRect.call(this) : { width, height: 218.4, top: 0, left: 0, right: width, bottom: 218.4 };
+  };
+  const originalStyle = dom.window.getComputedStyle.bind(dom.window);
+  dom.window.getComputedStyle = (element) => element.classList.contains("contest-shelf-books")
+    ? { columnGap: "9px" } : originalStyle(element);
   dom.window.HTMLElement.prototype.attachEvent ??= () => {};
   dom.window.HTMLElement.prototype.detachEvent ??= () => {};
   const globals = {
@@ -386,6 +401,8 @@ async function renderApp(ipc, pathname = "/", strict = false) {
   }
   const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
   mockIPC((command, args) => {
+    if (command === "learning_calendar") return calendarIpc ? calendarIpc(args) : { today: "2026-08-11", entries: [] };
+    if (command === "independent_problems") return independentIpc ? independentIpc(args) : [];
     if (command === "vault_manager_status") return managerFixture;
     if (command === "plugin:event|listen") return 1;
     if (command === "plugin:event|unlisten") return null;
@@ -397,6 +414,13 @@ async function renderApp(ipc, pathname = "/", strict = false) {
   await act(async () => root.render(strict ? React.createElement(React.StrictMode, null, app) : app));
   await settle();
   return {
+    resizeShelf: async (width) => {
+      shelfWidth = width;
+      await act(async () => {
+        for (const observer of resizeObservers) observer.callback([]);
+      });
+      await settle();
+    },
     document: dom.window.document,
     window: dom.window,
     cleanup: async () => {
@@ -439,14 +463,14 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
     const cabinet = view.document.querySelector('[aria-label="三层比赛收藏柜"]');
     assert.ok(cabinet);
     assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent, /13 场比赛/);
-    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece").length, 3);
-    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece[alt='']").length, 3);
+    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece").length, 6);
+    assert.equal(view.document.querySelectorAll(".contest-cabinet__shell-piece[alt='']").length, 6);
     assert.equal(view.document.querySelector(".contest-cabinet__shell")?.getAttribute("aria-hidden"), "true");
     assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--left")?.getAttribute("src")?.endsWith("contest-cabinet-left.png"), true);
     assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--center")?.getAttribute("src")?.endsWith("contest-cabinet-center.png"), true);
     assert.equal(view.document.querySelector(".contest-cabinet__shell-piece--right")?.getAttribute("src")?.endsWith("contest-cabinet-right.png"), true);
-    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground").length, 3);
-    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground[alt='']").length, 3);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground").length, 6);
+    assert.equal(view.document.querySelectorAll(".contest-shelf__foreground[alt='']").length, 6);
     assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[0]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-1.png"), true);
     assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[1]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-2.png"), true);
     assert.equal(view.document.querySelectorAll(".contest-shelf__foreground")[2]?.getAttribute("src")?.endsWith("contest-cabinet-shelf-foreground-3.png"), true);
@@ -460,7 +484,7 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
     assert.equal(cabinet.querySelectorAll(".contest-cabinet__back").length, 3);
     assert.equal(cabinet.querySelectorAll(".contest-shelf").length, 3);
     assert.equal(cabinet.querySelectorAll(".contest-shelf__bottom-shadow").length, 3);
-    assert.equal(books.length, 12);
+    assert.equal(books.length, 13);
     const slots = [...cabinet.querySelectorAll(".contest-book-slot")];
     assert.equal(slots.length, 12);
     assert.equal(cabinet.querySelectorAll(".contest-display-stand--rear").length, 12);
@@ -497,38 +521,15 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
     assert.equal(books[0].querySelector(".contest-book__identity")?.textContent, "CF 1979");
     assert.equal(books[1].querySelector(".contest-book__series")?.textContent, "教育系列");
     assert.equal(books[1].querySelector(".contest-book__round-number")?.textContent, "166");
-    const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
-    assert.ok(pager);
-    assert.equal(cabinet.contains(pager), false);
-    const previous = [...pager.querySelectorAll("button")].find((button) => button.textContent === "上一列");
-    const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
-    const pageStatus = pager.querySelector("output");
-    assert.equal(previous.disabled, true);
-    assert.equal(next.disabled, false);
-    assert.equal(pageStatus.textContent.trim(), "1 / 4");
-    assert.equal(pageStatus.getAttribute("aria-label"), "收藏柜第 1 列，共 4 列");
-    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1979", "1983", "1987"]);
-    await act(async () => next.click()); await settle();
-    assert.equal(pageStatus.textContent.trim(), "2 / 4");
-    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1980", "1984", "1988"]);
-    await act(async () => next.click()); await settle();
-    await act(async () => next.click()); await settle();
-    assert.equal(pageStatus.textContent.trim(), "4 / 4");
-    assert.equal(previous.disabled, false);
-    assert.equal(next.disabled, true);
-    assert.deepEqual([...cabinet.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].map((book) => book.dataset.contestId), ["1982", "1986", "1990"]);
-    assert.deepEqual(tiers.map((tier) => [...tier.querySelectorAll("button.contest-book")].map((book) => book.dataset.contestId)), [
-      ["1979", "1980", "1981", "1982"],
-      ["1983", "1984", "1985", "1986"],
-      ["1987", "1988", "1989", "1990"],
-    ]);
-    const remaining = view.document.querySelector('[aria-label="其余比赛列表"]');
-    assert.ok(remaining);
-    assert.match(remaining.textContent, /Codeforces Round 965/);
+    assert.equal(view.document.querySelector(".contest-cabinet-pager"), null);
+    const cabinets = [...view.document.querySelectorAll(".contest-cabinet--asset")];
+    assert.equal(cabinets.length, 2);
+    assert.deepEqual([...cabinets[1].querySelectorAll(".contest-cabinet__tier")].map((tier) => tier.querySelectorAll("button.contest-book").length), [1, 0, 0]);
+    assert.equal(view.document.querySelector(".contest-library-remainder"), null);
     assert.ok(view.document.querySelector('[aria-label="比赛库导航"]'));
     assert.ok(view.document.querySelector(".contest-import-form"));
 
-    const retry = [...remaining.querySelectorAll("button")].find((button) => button.textContent === "重试缺失题面");
+    const retry = view.document.querySelector(".contest-shelf-maintenance button");
     await act(async () => retry.click()); await settle();
     assert.equal(view.window.location.pathname, "/contests");
     assert.deepEqual(retryCalls, ["https://codeforces.com/contest/1991"]);
@@ -547,7 +548,7 @@ test("Contest Library D2-A preserves full-mode identity navigation and keeps ove
       await settle();
     }
 
-    const remainderLink = view.document.querySelector('[aria-label="其余比赛列表"] button.list-link');
+    const remainderLink = [...view.document.querySelectorAll("button.contest-book")][12];
     await act(async () => remainderLink.click()); await settle();
     assert.equal(view.window.location.pathname, "/contests/1991");
   } finally { await view.cleanup(); }
@@ -578,59 +579,10 @@ test("Contest Library D2-A keeps one real contest in the first position of a com
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library Compact page count follows populated logical columns", { concurrency: false }, async () => {
-  const makeItems = (count) => Array.from({ length: count }, (_, index) => ({
-    contestId: 3000 + index,
-    title: `Codeforces Round ${1200 + index}`,
-    importStatus: "complete",
-    problemCount: 1,
-    missingSnapshotCount: 0,
-    archived: false,
-  }));
-  for (const count of [1, 2, 3, 4, 5, 12, 13]) {
-    const items = makeItems(count);
-    const view = await renderApp((command) => {
-      if (command === "foundation_status") return { status: "ready", core: "acm-os" };
-      if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
-      if (command === "contest_library_list_families") return [];
-      if (command === "contest_library_list_contests") return items;
-      throw new Error(`unexpected command ${command}`);
-    }, "/contests");
-    try {
-      await settle();
-      const expectedPages = Math.min(count, 4);
-      const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
-      if (expectedPages === 1) {
-        assert.equal(pager, null);
-      } else {
-        assert.ok(pager);
-        assert.equal(pager.querySelector("output")?.textContent.trim(), `1 / ${expectedPages}`);
-      }
-      assert.match(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", new RegExp(`${count} 场比赛`));
-      assert.doesNotMatch(view.document.querySelector(".contest-cabinet-prototype__heading")?.textContent ?? "", /当前视图没有比赛/);
-      if (expectedPages === 1) continue;
-      const previous = pager.querySelector("button");
-      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
-      assert.equal(previous.disabled, true);
-      for (let page = 1; page < expectedPages; page += 1) {
-        await act(async () => next.click()); await settle();
-        assert.equal(pager.querySelector("output")?.textContent.trim(), `${page + 1} / ${expectedPages}`);
-        assert.ok([...view.document.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')].length > 0);
-      }
-      assert.equal(next.disabled, true);
-      if (count === 13) assert.ok(view.document.querySelector('[aria-label="其余比赛列表"]'));
-    } finally { await view.cleanup(); }
-  }
-});
-
-test("Contest Library Compact column 4 opens the real tier 1, 2, and 3 Contest identities", { concurrency: false }, async () => {
-  const items = Array.from({ length: 12 }, (_, index) => ({
-    contestId: 4101 + index,
-    title: `Codeforces Contract Round ${index + 1}`,
-    importStatus: "complete",
-    problemCount: index + 1,
-    missingSnapshotCount: 0,
-    archived: false,
+test("Contest Library reflows all books on resize and fills three tiers before another cabinet", { concurrency: false }, async () => {
+  const items = Array.from({ length: 16 }, (_, index) => ({
+    contestId: 4101 + index, title: `Codeforces Round ${1200 + index}`,
+    importStatus: "complete", problemCount: 1, missingSnapshotCount: 0, archived: false,
   }));
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
@@ -640,40 +592,29 @@ test("Contest Library Compact column 4 opens the real tier 1, 2, and 3 Contest i
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
-    for (const position of [3, 7, 11]) {
-      const pager = view.document.querySelector('[aria-label="紧凑收藏柜列导航"]');
-      const next = [...pager.querySelectorAll("button")].find((button) => button.textContent === "下一列");
-      for (let page = 1; page < 4; page += 1) {
-        await act(async () => next.click()); await settle();
-      }
-
-      const activeBooks = [...view.document.querySelectorAll('.contest-book-slot[data-compact-active="true"] button.contest-book')];
-      assert.deepEqual(activeBooks.map((book) => book.dataset.contestId), ["4104", "4108", "4112"]);
-      assert.equal(view.document.querySelectorAll('.contest-book-slot[data-compact-active="false"]').length, 9);
-
-      const item = items[position];
-      const book = activeBooks.find((candidate) => candidate.dataset.contestId === String(item.contestId));
-      assert.equal(book.getAttribute("aria-label"), `打开比赛“${item.title}”`);
-      await act(async () => book.click()); await settle();
-      assert.equal(view.window.location.pathname, `/contests/${item.contestId}`);
-
-      await act(async () => {
-        view.window.history.pushState(null, "", "/contests");
-        view.window.dispatchEvent(new view.window.PopStateEvent("popstate"));
-      });
-      await settle();
+    // Include exact-fit and just-below boundaries, shrink and grow on the same mounted view.
+    for (const [width, expected] of [
+      [876, [[5, 5, 5], [1, 0, 0]]],
+      [875, [[4, 4, 4], [4, 0, 0]]],
+      [522, [[3, 3, 3], [3, 3, 1]]],
+      [345, [[2, 2, 2], [2, 2, 2], [2, 2, 0]]],
+      [168, [[1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 0, 0]]],
+      [1053, [[6, 6, 4]]],
+      [876, [[5, 5, 5], [1, 0, 0]]],
+    ]) {
+      await view.resizeShelf(width);
+      const cabinets = [...view.document.querySelectorAll(".contest-cabinet--asset")];
+      assert.deepEqual(cabinets.map((cabinet) => [...cabinet.querySelectorAll(".contest-cabinet__tier")].map((tier) => tier.querySelectorAll("button.contest-book").length)), expected);
+      assert.deepEqual([...view.document.querySelectorAll("button.contest-book")].map((book) => Number(book.dataset.contestId)), items.map((item) => item.contestId));
+      assert.equal(view.document.querySelector(".contest-cabinet-pager"), null);
+      assert.equal(view.document.querySelector('[data-compact-active="false"]'), null);
     }
+    const lastBook = [...view.document.querySelectorAll("button.contest-book")].at(-1);
+    await act(async () => lastBook.click()); await settle();
+    assert.equal(view.window.location.pathname, "/contests/4116");
   } finally { await view.cleanup(); }
 });
 
-test("Contest Library Compact page state clamps when populated column count shrinks", async () => {
-  const css = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/app/app.css", import.meta.url), "utf8"));
-  const shells = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/app/shells.tsx", import.meta.url), "utf8"));
-  assert.match(shells, /Math\.min\(column, Math\.max\(0, compactPageCount - 1\)\)/);
-  assert.match(shells, /compactColumn === compactPageCount - 1/);
-  assert.match(shells, /compactPageCount = items\.length === 0 \? 0 : Math\.max/);
-  assert.match(css, /\.contest-book-slot\[data-compact-active="false"\]\s*\{\s*display:\s*none;/);
-});
 test("Contest Library D2-A preserves all three tiers for an empty filtered result", { concurrency: false }, async () => {
   const view = await renderApp((command) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
@@ -1307,6 +1248,55 @@ test("Contest Library manages Year entities through stable IDs", { concurrency: 
   } finally { await view.cleanup(); }
 });
 
+test("Contest Library shares years across categories, reuses existing years and immediately shows unused new years", { concurrency: false }, async () => {
+  let years = [{ yearId: 21, value: 2026 }];
+  const created = [];
+  const scopes = [];
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "contest_library_list_families") return [{ familyId: 1, displayName: "Codeforces" }, { familyId: 2, displayName: "牛客" }];
+    if (command === "contest_library_list_year_entities") return years;
+    if (command === "contest_library_list_series" || command === "contest_library_list_years") return [];
+    if (command === "contest_library_create_year") { const year = { yearId: 22, value: args.input.value }; created.push(year); years = [...years, year]; return year; }
+    if (command === "contest_library_list_contests") { scopes.push(args.input.scope); return args.input.scope.kind === "all" ? [{ contestId: 2275, title: "Round", importStatus: "complete", problemCount: 1, missingSnapshotCount: 0, archived: false, placements: [{ placementId: 1, familyId: 1, familyName: "Codeforces", seriesId: null, seriesName: null, yearId: 21, year: 2026, ordinal: null }] }] : []; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/contests");
+  try {
+    const yearButton = (value) => [...view.document.querySelectorAll("button.filter-option")].find((button) => button.textContent === String(value));
+    const select = async (label) => { await act(async () => [...view.document.querySelectorAll("button.filter-option")].find((button) => button.textContent === label).click()); await settle(); };
+    const createYear = async (value) => {
+      await act(async () => view.document.querySelector('button[aria-label="创建年份"]').click()); await settle();
+      const form = view.document.querySelector(".contest-taxonomy-create-form");
+      const input = form.querySelector("input");
+      await act(async () => { input.value = String(value); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+      await act(async () => form.dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    };
+    await settle();
+    assert.ok(yearButton(2026));
+    await select("Codeforces");
+    assert.ok(yearButton(2026));
+    await select("牛客");
+    assert.ok(yearButton(2026));
+    await createYear(2026);
+    assert.equal(created.length, 0);
+    assert.equal(view.document.querySelector(".contest-taxonomy-create-form"), null);
+    assert.equal(yearButton(2026).classList.contains("filter-option--selected"), true);
+    assert.deepEqual(scopes.at(-1), { kind: "family", familyId: 2, series: { kind: "any" }, year: { kind: "exact", yearId: 21 } });
+    await createYear(2027);
+    assert.equal(created.length, 1);
+    assert.ok(yearButton(2027));
+    assert.equal(view.document.querySelectorAll("button.contest-book").length, 0);
+    await select("全部比赛");
+    assert.ok(yearButton(2027));
+    assert.equal(view.document.querySelectorAll("button.contest-book").length, 1);
+    await select("2027");
+    assert.equal(view.document.querySelectorAll("button.contest-book").length, 0);
+    await select("2026");
+    assert.equal(view.document.querySelectorAll("button.contest-book").length, 1);
+  } finally { await view.cleanup(); }
+});
+
 test("Contest Library filters with Category, Series, and Year IDs without repair buckets", { concurrency: false }, async () => {
   const contestCalls = [];
   const view = await renderApp((command, args) => {
@@ -1523,7 +1513,7 @@ test("Normal shell exposes its frozen navigation, skip link, and focused route h
   try {
     assert.deepEqual(
       [...view.document.querySelectorAll("nav a")].map((link) => link.textContent),
-      ["今日", "比赛", "我的题库", "知识库", "奖励", "设置"],
+      ["今日", "学习月历", "比赛", "我的题库", "知识库", "奖励", "设置"],
     );
     assert.equal(view.document.querySelector(".skip-link")?.getAttribute("href"), "#main-content");
     assert.equal(view.document.activeElement?.textContent, "今日计划");
@@ -1916,7 +1906,7 @@ test("Location Anomaly confirms a missing file only through an explicit conseque
     const confirm = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "确认已删除");
     await act(async () => confirm.click()); await settle();
-    assert.match(view.document.body.textContent, /轻量题目/);
+    assert.match(view.document.body.textContent, /我的题库/);
     assert.doesNotMatch(view.document.body.textContent, /笔记位置需要处理/);
     assert.equal(calls.filter(([command]) => command === "confirm_personal_note_deleted").length, 1);
   } finally {
@@ -2362,7 +2352,7 @@ test("Problem lifecycle actions and personal-note consequence preview use author
     await act(async () => confirmDelete.click());
     await settle();
     assert.equal(deleteCalls, 1);
-    assert.match(view.document.body.textContent, /轻量题目/);
+    assert.match(view.document.body.textContent, /我的题库/);
     assert.match(view.document.body.textContent, /历史事实已保留/);
   } finally {
     await view.cleanup();
@@ -3512,4 +3502,232 @@ test("Problem library selection marks membership, batches only checked items, an
     assert.equal(added.length, 1);
     assert.equal(view.document.querySelector('[aria-label="加入我的题库"]'), null);
   } finally { await view.cleanup(); }
+});
+
+
+test("Learning calendar shows history, overdue and future reviews and ignores stale month replies", { concurrency: false }, async () => {
+  const snapshot = { planId: "calendar-plan", localDate: "2026-10-09", budgetMinutes: 60, plannedMinutes: 0, overBudgetMinutes: 0, reviewOnlyStreak: 0, entries: [] };
+  const entries = [
+    { date: "2026-10-08", problemId: "51", problemTitle: "Recorded learning", kind: "study", status: "completed", dueDate: null, judgement: null },
+    { date: "2026-10-09", problemId: "52", problemTitle: "Overdue review", kind: "long_term_review", status: "scheduled", dueDate: "2026-10-05", judgement: null },
+    { date: "2026-10-10", problemId: "53", problemTitle: "Next cold start", kind: "first_cold_start", status: "scheduled", dueDate: "2026-10-10", judgement: null },
+  ];
+  let resolveNovember;
+  let rejectJanuary = true;
+  const calls = [];
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "today_snapshot") return snapshot;
+    throw new Error(`unexpected command ${command}`);
+  }, "/calendar", false, 699, ({ input }) => {
+    calls.push(input);
+    if (input.month === 11) return new Promise((resolve) => { resolveNovember = resolve; });
+    if (input.month === 1 && rejectJanuary) return Promise.reject(new Error("calendar unavailable"));
+    return { today: snapshot.localDate, entries: input.month === 10 ? entries : [] };
+  });
+  try {
+    await settle();
+    assert.equal(view.document.querySelector("h1")?.textContent, "学习月历");
+    assert.equal(view.document.activeElement, view.document.querySelector("h1"));
+    assert.match(view.document.title, /学习月历/);
+    assert.equal(view.document.querySelector('a[href="/calendar"]').getAttribute("aria-current"), "page");
+    assert.equal(view.document.querySelector(".today-toolbar"), null);
+    const root = view.document.querySelector(".learning-calendar");
+    const detail = () => root.querySelector(".calendar-detail");
+    const day = (key) => root.querySelector(`[data-calendar-date="${key}"]`);
+    assert.equal(day("2026-10-09").getAttribute("aria-current"), "date");
+    assert.match(detail().textContent, /已逾期.*2026-10-05/);
+    const upcoming = [...root.querySelectorAll('[data-calendar-upcoming]')];
+    assert.deepEqual(upcoming.map((row) => row.dataset.calendarUpcoming), ["2026-10-09", "2026-10-10"]);
+    assert.match(upcoming[1].textContent, /Next cold start/);
+    await act(async () => upcoming[1].click());
+    assert.equal(day("2026-10-10").getAttribute("aria-pressed"), "true");
+    assert.match(detail().textContent, /Next cold start/);
+
+    await act(async () => day("2026-10-08").click());
+    assert.match(detail().textContent, /Recorded learning/);
+    assert.doesNotMatch(detail().textContent, /Next cold start/);
+    await act(async () => day("2026-10-10").click());
+    assert.match(detail().textContent, /Next cold start.*首次冷启动/);
+    await act(async () => day("2026-10-10").dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
+    assert.equal(view.document.activeElement, day("2026-10-09"));
+    const next = () => root.querySelector('[aria-label="下个月"]');
+    await act(async () => next().click()); await settle();
+    assert.equal(root.querySelectorAll("[data-calendar-date]").length, 30);
+    assert.match(detail().textContent, /正在读取/);
+    await act(async () => next().click()); await settle();
+    assert.equal(root.querySelectorAll("[data-calendar-date]").length, 31);
+    await act(async () => resolveNovember({ today: snapshot.localDate, entries: [{ ...entries[0], date: "2026-12-09", problemTitle: "Stale response" }] }));
+    assert.doesNotMatch(root.textContent, /Stale response/);
+    await act(async () => next().click()); await settle();
+    assert.match(root.textContent, /2027 年 1 月/);
+    assert.match(detail().textContent, /月历读取失败/);
+    assert.doesNotMatch(detail().textContent, /没有已完成/);
+    rejectJanuary = false;
+    await act(async () => [...detail().querySelectorAll("button")].find((button) => button.textContent === "重试").click()); await settle();
+    assert.match(detail().textContent, /没有已完成/);
+    await act(async () => [...root.querySelectorAll("button")].find((button) => button.textContent === "回到今天").click()); await settle();
+    assert.equal(day("2026-10-09").getAttribute("aria-pressed"), "true");
+    assert.ok(calls.some((call) => call.year === 2027 && call.month === 1));
+    await act(async () => day("2026-10-10").click());
+    await act(async () => detail().querySelector(".calendar-problem-link").click()); await settle();
+    assert.equal(view.window.location.pathname, "/problems/id/53");
+  } finally { await view.cleanup(); }
+});
+
+
+test("Today keeps its plan and opens the calendar through the sidebar without generating another plan", { concurrency: false }, async () => {
+  let planReads = 0;
+  let calendarReads = 0;
+  const view = await renderApp((command) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
+    if (command === "today_snapshot") { planReads++; return { planId: "calendar-nav", localDate: "2026-10-09", budgetMinutes: 60, plannedMinutes: 0, overBudgetMinutes: 0, reviewOnlyStreak: 0, entries: [] }; }
+    throw new Error(`unexpected command ${command}`);
+  }, "/today", false, 699, () => { calendarReads++; return { today: "2026-10-09", entries: [] }; });
+  try {
+    assert.ok(view.document.querySelector(".today-toolbar"));
+    assert.equal(view.document.querySelector(".learning-calendar"), null);
+    assert.equal(calendarReads, 0);
+    const before = planReads;
+    await act(async () => view.document.querySelector('a[href="/calendar"]').click()); await settle();
+    assert.equal(view.window.location.pathname, "/calendar");
+    assert.ok(view.document.querySelector(".learning-calendar"));
+    assert.equal(planReads, before);
+    assert.ok(calendarReads > 0);
+    await act(async () => { view.window.history.back(); await new Promise((resolve) => view.window.addEventListener("popstate", resolve, { once: true })); });
+    await settle();
+    assert.equal(view.window.location.pathname, "/today");
+    assert.ok(view.document.querySelector(".today-toolbar"));
+    assert.equal(view.document.querySelector(".learning-calendar"), null);
+  } finally { await view.cleanup(); }
+});
+
+
+test("Today overview derives real counts and resumes the canonical active review", { concurrency: false }, async () => {
+  const { TodayOverview } = await moduleRunner.import("/src/app/TodayOverview.tsx");
+  const navigations=[];
+  const snapshot={planId:"overview",localDate:"2026-10-12",budgetMinutes:90,plannedMinutes:90,overBudgetMinutes:0,reviewOnlyStreak:0,entries:[
+    {entryId:"completed",problemId:"51",problemTitle:"Completed study",problemRating:null,lane:"study",reason:"upsolve",planningCostMinutes:60,position:0,origin:"auto",status:"completed",reviewAttemptId:null},
+    {entryId:"active",problemId:"52",problemTitle:"Active review",problemRating:1300,lane:"carryIn",reason:"continueReview",planningCostMinutes:30,position:1,origin:"auto",status:"inProgress",reviewAttemptId:"018f0d8e-4a5b-7c6d-8e9f-0123456789ab"}
+  ]};
+  const view=await render(React.createElement(TodayOverview,{snapshot,navigate:(path)=>navigations.push(path)}));
+  try {
+    const metrics=[...view.document.querySelectorAll(".today-metrics > div")].map(item=>item.textContent);
+    assert.deepEqual(metrics,["计划任务2项","已完成1项","进行中1项","待处理1项","计划用时90分钟","剩余预算0分钟"]);
+    assert.equal(view.document.querySelector(".today-composition").getAttribute("aria-label"),"学习 60 分钟，复习 30 分钟");
+    await act(async()=>[...view.document.querySelectorAll("button")].find(button=>button.textContent==="继续学习").click());
+    assert.deepEqual(navigations,["/review/018f0d8e-4a5b-7c6d-8e9f-0123456789ab"]);
+  } finally {await view.cleanup();}
+});
+
+
+test("Problem library searches statement text and shows real import dates without injecting HTML", { concurrency: false }, async () => {
+  const { ProblemLibrary } = await moduleRunner.import("/src/app/ProblemLibrary.tsx");
+  const routes = [];
+  const items = [
+    { id: "cf", code: "2275A", title: "In Search of Convenience", source: "Codeforces", rating: 1200, importedAtUtc: "2026-10-09T04:05:06Z", statementHtml: '<div class="header">Duplicated title and limits</div><p>Find the shortest path &amp; its length.</p><img src="https://invalid.example/tracker.png"><script>bad()</script>', hasStatementSnapshot: true, route: "/problems/2275/A" },
+    { id: "local", code: null, title: "Book exercise", source: "单题录入", rating: null, importedAtUtc: null, statementHtml: "<p>Count intervals</p>", hasStatementSnapshot: true, route: "/problems/id/77" },
+  ];
+  const view = await render(React.createElement(ProblemLibrary, { items, navigate: (route) => routes.push(route) }));
+  try {
+    assert.match(view.document.querySelector("time").textContent, /2026-10-09/);
+    assert.equal(view.document.querySelector("time").getAttribute("datetime"), items[0].importedAtUtc);
+    assert.match(view.document.body.textContent, /导入日期未记录/);
+    assert.match(view.document.body.textContent, /2275A/);
+    assert.match(view.document.body.textContent, /难度 1200/);
+    assert.match(view.document.querySelector(".problem-library-preview").textContent, /path & its length/);
+    assert.doesNotMatch(view.document.body.textContent, /Duplicated title|bad\(\)/);
+    assert.equal(view.document.querySelector("img, script"), null);
+    const input = view.document.querySelector('input[type="search"]');
+    const search = async (value) => act(async () => { input.value = value; input.dispatchEvent(new view.document.defaultView.Event("input", { bubbles: true })); });
+    await search("SHORTEST path");
+    assert.equal(view.document.querySelectorAll(".problem-library-row").length, 1);
+    await act(async () => view.document.querySelector(".problem-library-row").click());
+    assert.deepEqual(routes, ["/problems/2275/A"]);
+    await search("2275A");
+    assert.equal(view.document.querySelectorAll(".problem-library-row").length, 1);
+    await search("intervals");
+    await act(async () => view.document.querySelector(".problem-library-row").click());
+    assert.equal(routes[1], "/problems/id/77");
+    await search("absent");
+    assert.match(view.document.body.textContent, /没有找到匹配/);
+  } finally { await view.cleanup(); }
+});
+
+test("Problem library renders LaTeX and keeps a complete formula across the preview cutoff", { concurrency: false }, async () => {
+  const { ProblemLibrary } = await moduleRunner.import("/src/app/ProblemLibrary.tsx");
+  const item = { id: "formula", code: "2275A", title: "Formula", source: "Codeforces", rating: null, hasStatementSnapshot: true, route: "/problems/2275/A" };
+  const items = [
+    { ...item, statementHtml: '<p>Point $$$(x_0,y_0)$$$, $n$, $$a^2$$ and \\(\\frac{1}{2}\\).</p>' },
+    { ...item, id: "cutoff", statementHtml: `<p>${"x".repeat(174)} $$$\\frac{a_1+a_2}{b_1+b_2}$$$ trailing text.</p>` },
+    { ...item, id: "unsafe", statementHtml: '<p>$$$\\href{javascript:alert(1)}{x}$$$ and $$$\\invalidcommand$$$</p>' },
+  ];
+  const view = await render(React.createElement(ProblemLibrary, { items, navigate: () => {} }));
+  try {
+    const previews = view.document.querySelectorAll(".problem-library-preview");
+    assert.equal(previews[0].querySelectorAll(".katex").length, 4);
+    assert.doesNotMatch(previews[0].textContent, /\$/);
+    assert.equal(previews[1].querySelectorAll(".katex").length, 1);
+    assert.equal(previews[1].querySelector("annotation").textContent, "\\frac{a_1+a_2}{b_1+b_2}");
+    assert.match(previews[1].textContent, /…$/);
+    assert.equal(view.document.querySelector('a[href^="javascript:"], img, script'), null);
+    assert.equal(previews[2].querySelectorAll(".problem-library-math").length, 2);
+    assert.match(previews[2].textContent, /invalidcommand/);
+  } finally { await view.cleanup(); }
+});
+
+test("Single problem import accepts a book exercise without a contest and blocks duplicate submits", { concurrency: false }, async () => {
+  const calls=[];
+  let finish;
+  const independent=[{problemId:"77",title:"Earlier book exercise",sourceUrl:"acmos://local-problem/earlier",rating:null,hasStatementSnapshot:true}];
+  const view=await renderApp((command,args)=>{
+    if(command==="foundation_status")return{status:"ready",core:"acm-os"};
+    if(command==="app_shell_status")return{state:"normal",recoveryReason:null,supportedSchemaVersion:null,foundSchemaVersion:null,workspace:configuredWorkspace};
+    if(command==="lightweight_problems")return[];
+    if(command==="import_single_problem"){calls.push(args.input);return new Promise(resolve=>{finish=resolve;});}
+    if(command==="statement_assets_by_id")return[];
+    if(command==="lightweight_problem_detail_by_id")return{problemId:"88",externalIdentities:[],title:"My book exercise",rating:null,sourceUrl:"acmos://local-problem/local",statement:{state:"ready",sanitizedHtml:"<p>Find x</p>"},identityType:"lightweight",personalNote:null,lifecycle:lightweightLifecycle};
+    throw new Error('unexpected command '+command);
+  },"/problems",false,699,null,()=>independent);
+  try {
+    assert.match(view.document.querySelector('[aria-label="独立题目"]').textContent,/Earlier book exercise/);
+    assert.equal(view.document.querySelector('.empty-state'),null);
+    const form=view.document.querySelector('form[aria-label="单题导入"]');
+    const field=(text)=>[...form.querySelectorAll('label')].find(label=>label.textContent.startsWith(text)).querySelector('input,textarea');
+    await act(async()=>{field('题目标题').value='My book exercise';field('题目标题').dispatchEvent(new view.window.Event('input',{bubbles:true}));field('题面正文').value='Find x';field('题面正文').dispatchEvent(new view.window.Event('input',{bubbles:true}));});
+    await act(async()=>{form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true}));form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true}));});
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].mode,'manual');assert.equal(calls[0].title,'My book exercise');assert.equal(calls[0].sourceUrl,'');assert.equal(calls[0].statementText,'Find x');
+    assert.equal('contestId' in calls[0],false);
+    assert.match(calls[0].requestId,/^[0-9a-f-]{36}$/);
+    await act(async()=>finish({problemId:'88'}));await settle();
+    assert.equal(view.window.location.pathname,'/problems/id/88');
+    assert.match(view.document.body.textContent,/本地录入题目/);
+    assert.equal(view.document.querySelector('a[href^="acmos:"]'),null);
+  }finally{await view.cleanup();}
+});
+
+test("Single problem link import validates its URL and preserves the input after a remote error", { concurrency: false }, async () => {
+  const calls=[];
+  const view=await renderApp((command,args)=>{
+    if(command==="foundation_status")return{status:"ready",core:"acm-os"};
+    if(command==="app_shell_status")return{state:"normal",recoveryReason:null,supportedSchemaVersion:null,foundSchemaVersion:null,workspace:configuredWorkspace};
+    if(command==="lightweight_problems")return[];
+    if(command==="import_single_problem"){calls.push(args.input);throw 'single_problem_remote_unavailable';}
+    throw new Error('unexpected command '+command);
+  },"/problems");
+  try{
+    const root=view.document.querySelector('.single-problem-import');
+    await act(async()=>[...root.querySelectorAll('button')].find(button=>button.textContent==='Codeforces 题目链接').click());
+    const form=root.querySelector('form');const input=form.querySelector('input[type="url"]');
+    const setUrl=async(value)=>act(async()=>{input.value=value;input.dispatchEvent(new view.window.Event('input',{bubbles:true}));});
+    const submit=async()=>{await act(async()=>form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true})));await settle();};
+    await setUrl('https://example.com/problem/1');await submit();assert.equal(calls.length,0);
+    await setUrl('https://codeforces.com/problemset/problem/1900/A');await submit();assert.equal(calls.length,1);
+    assert.equal(calls[0].mode,'codeforces');assert.match(root.textContent,/自动获取题面失败/);
+    assert.equal(input.value,'https://codeforces.com/problemset/problem/1900/A');
+    await submit();assert.equal(calls.length,2);assert.equal(calls[1].requestId,calls[0].requestId);
+  }finally{await view.cleanup();}
 });

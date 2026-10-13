@@ -8,6 +8,7 @@ export function ProblemActions({ value, target, onSaved, onDeleted }: {
   onSaved: () => Promise<void>;
   onDeleted: () => void;
 }) {
+  const isLocal = value.sourceUrl.startsWith("acmos://local-problem/");
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
@@ -29,9 +30,11 @@ export function ProblemActions({ value, target, onSaved, onDeleted }: {
     if (!saved) {
       if (!title.trim()) { setError("标题不能为空。"); return; }
       try {
+        if (!(isLocal && sourceUrl.trim() === "")) {
         const url = new URL(sourceUrl.trim());
         if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password
           || /\s|[\u0000-\u001f\u007f]/.test(sourceUrl.trim())) throw new Error();
+        }
       } catch { setError("请输入有效的 HTTP 或 HTTPS 题目链接。"); return; }
       const text = rating.trim();
       const numericRating = text === "" ? null : Number(text);
@@ -39,7 +42,7 @@ export function ProblemActions({ value, target, onSaved, onDeleted }: {
         || numericRating <= 0 || numericRating > 4294967295)) {
         setError("难度必须是正整数，或留空。"); return;
       }
-      changes = { title: title.trim(), sourceUrl: sourceUrl.trim(), rating: numericRating };
+      changes = { title: title.trim(), sourceUrl: isLocal && !sourceUrl.trim() ? value.sourceUrl : sourceUrl.trim(), rating: numericRating };
     }
     inFlight.current = true; setPending(true); setError(null);
     let persisted = saved;
@@ -65,14 +68,14 @@ export function ProblemActions({ value, target, onSaved, onDeleted }: {
   };
   if (!editing) return <div className="action-row problem-actions">
     <button className="secondary-action" ref={trigger} type="button" onClick={() => {
-      setTitle(value.title); setSourceUrl(value.sourceUrl); setRating(value.rating?.toString() ?? "");
+      setTitle(value.title); setSourceUrl(isLocal ? "" : value.sourceUrl); setRating(value.rating?.toString() ?? "");
       setSaved(false); setError(null); setEditing(true);
     }}>编辑题目</button>
     <ProblemDeleteButton title={value.title} target={target} onDeleted={onDeleted} />
   </div>;
   return <form className="manual-import-form" aria-label="编辑题目" aria-busy={pending} noValidate onSubmit={save}>
     <label>标题<input autoFocus disabled={pending || saved} required value={title} onInput={(event) => setTitle(event.currentTarget.value)} /></label>
-    <label>链接<input disabled={pending || saved} required type="url" value={sourceUrl} onInput={(event) => setSourceUrl(event.currentTarget.value)} /></label>
+    <label>{isLocal ? "链接（可选）" : "链接"}<input disabled={pending || saved} required={!isLocal} type="url" value={sourceUrl} onInput={(event) => setSourceUrl(event.currentTarget.value)} /></label>
     <label>难度（可留空）<input disabled={pending || saved} inputMode="numeric" value={rating} onInput={(event) => setRating(event.currentTarget.value)} /></label>
     {error ? <p role="alert">{error}</p> : null}
     <div className="action-row">

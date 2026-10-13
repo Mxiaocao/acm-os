@@ -101,6 +101,8 @@ export type ContestUpsolveDecisionDto = "planned" | "notPlanned" | "undecided";
 export interface ContestProblemDetailItemDto extends LightweightProblemItemDto { finalContestResult: ContestFinalResultDto | null; upsolveDecision: ContestUpsolveDecisionDto; liveLearningStatus: LearningStatusDto; }
 
 export interface LightweightProblemItemDto {
+  importedAtUtc?: string | null;
+  statementHtml?: string | null;
   contestId: number;
   index: string;
   title: string;

@@ -178,6 +178,7 @@ function routePageLabel(route: ReturnType<typeof parseAppRoute>): string {
 function normalPageLabel(page: NormalPage): string {
   const labels = {
     today: t("nav.today"),
+    calendar: t("nav.calendar"),
     contests: t("nav.contests"),
     problems: t("nav.problems"),
     knowledge: t("nav.knowledge"),
