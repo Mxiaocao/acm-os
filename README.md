@@ -1,16 +1,72 @@
 # ACM-OS
 
-ACM-OS 是用于算法训练、题目收藏和复习安排的 Windows 桌面应用。当前发布版本为 `v0.1.0`。
+[下载 v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0) · [发布说明](docs/RELEASE_NOTES_v0.1.0.md)
 
-## 下载和使用
+ACM-OS 是一个面向算法竞赛与日常刷题的 Windows 桌面学习工作台，围绕“参加比赛 → 赛后补题 → 整理个人题解 → 冷启动复习 → 长期复习”组织训练。它将题目、学习状态、每日安排和 Obsidian 笔记连接起来，方便你回顾做过的题，也知道下一步该学什么、复习什么。
 
-从 [GitHub Releases](https://github.com/Mxiaocao/acm-os/releases) 下载 Windows 安装包，或解压免安装版并运行 `acm-os.exe`。首次启动按界面提示设置工作区和笔记目录。
+## 核心功能
 
-- 比赛书架支持分类、系列和年份组织，随窗口宽度调整每层容量。
-- 题库支持比赛题目收藏、Codeforces 单题链接导入和手动录入。
-- 题目列表提供题面预览、LaTeX 公式、首次导入日期和关键词搜索。
-- 学习月历展示每日学习记录及待复习题目。
-- 樱花粉界面搭配“未来知识代码之书”应用图标。
+### 比赛管理与赛后补题
+
+导入 Codeforces 比赛及题面，记录比赛结果和赛后事实，并为需要继续学习的题目安排补题。比赛可以按分类、系列和年份组织，支持归档；书架会随窗口宽度调整每层容量，依次填满三层。年份在各分类间共用。
+
+比赛导入后，可以选择需要的题目加入个人题库。题库还支持通过 Codeforces 单题链接导入，或手动录入其他平台、书本及自拟题。
+
+### 个人题库与题解
+
+题目列表展示完整题号、标题、难度、题面摘要和首次导入日期，支持按题号、标题及题面关键词搜索。题面保存在本地，预览和详情支持 LaTeX 公式。
+
+可以编辑题目基础信息、创建个人题解，并记录从待补题、学习中到等待冷启动和长期复习的学习状态。
+
+### Obsidian 笔记联动
+
+使用自己的 Obsidian Vault 管理 Markdown 题解和知识笔记。ACM-OS 可以创建个人题解、读取约定章节，并打开对应的 Obsidian 笔记；你仍然在 Obsidian 中编写推导、整理思路和维护知识内容。
+
+题解中的前置知识链接可以关联到知识库。软件提供知识笔记发现、搜索、理解等级记录和关联查看；图谱入口打开 Obsidian 的原生图谱，需要启用 Obsidian 的命令行接口。笔记路径出现异常时提供重新绑定等修复操作。
+
+### 冷启动与长期复习
+
+学习理解后进入首次冷启动复习，再根据复习结果安排后续复习。专注复习界面支持记录提交事实、查看帮助、记录失败原因以及查看历史结果；依据掌握情况更新复习阶段，未掌握的题目可以重新学习。
+
+支持首次冷启动、提前检查和长期复习，帮助你检验能否独立重做一道题，并持续跟踪掌握情况。
+
+### 今日计划与学习月历
+
+按每日可用时间组织学习、补题和复习任务。可以设置每周默认时间预算、调整当天预算、重排任务、标记完成，并预览后重新规划。
+
+学习月历按日期展示完成的学习记录和当前已安排的下一次复习，方便回顾每天做了什么、查看近期需要复习的题目。
+
+### 奖励与自定义兑换
+
+启用奖励模式后，符合条件的按期复习可获得经验与金币。可以查看等级和余额，创建自己的奖励及兑换价格，并管理兑换、退款记录。
+
+### 本地工作区与数据管理
+
+支持多个工作区的注册、切换和隔离。题解与知识内容使用 Markdown，学习状态和计划等信息保存在本地数据库；提供数据库备份与相关管理功能。Markdown 笔记需要另行备份。
+
+## 推荐使用流程
+
+1. 连接自己的 Obsidian Vault，设置题解目录和知识目录。
+2. 导入比赛，记录赛后结果，挑选需要补题的题目；也可以直接导入单题。
+3. 创建个人题解，将题目加入补题流程，在 Obsidian 中整理推导和前置知识。
+4. 学习理解后进行冷启动复习，记录实际完成情况，再进入后续复习安排。
+5. 在今日计划中执行任务，通过学习月历回顾记录；逐步积累题解与知识笔记。
+
+## 下载与首次使用
+
+本版本面向 **Windows x64**，提供安装包、免安装 ZIP 和 SHA-256 校验文件。
+
+- 安装包：运行安装程序，按提示完成安装。
+- 免安装版：解压 ZIP 后运行 `acm-os.exe`，需要 Microsoft Edge WebView2 Runtime。
+- 首次启动：按界面提示连接工作区，并提前在 Vault 内准备题解目录和知识目录。
+- Obsidian 联动：需要安装 Obsidian；打开原生图谱还需在 Obsidian 设置中启用命令行接口。
+
+工作区和个人学习数据不包含在发布附件中。安装包目前未进行 Windows 代码签名。
+
+## 当前版本范围
+
+自动获取题面主要支持 Codeforces；其他来源可以手动录入。知识图谱展示使用 Obsidian 的原生图谱。赛后分析支持粘贴文本并保存，没有接入自动生成式 AI 分析服务。
+
 
 ## 从源码构建
 
@@ -25,46 +81,6 @@ npm run test:dom-shells
 npm run tauri -- build --bundles nsis
 ```
 
-安装包输出到 `src-tauri/target/release/bundle/nsis/`。以下保留早期阶段的检查说明，当前功能以发布说明和源码为准。
+安装包输出到 `src-tauri/target/release/bundle/nsis/`。
 
-## B0.1 checks
-
-```bash
-npm ci
-npm run check:boundaries
-npm run build
-cd src-tauri
-cargo check --workspace --locked
-cd ..
-npm run tauri build -- --debug --no-bundle
-```
-
-`check:boundaries` uses only Node built-ins plus `cargo metadata --locked`. It validates the current Rust and frontend dependency allowlists and rejects direct Domain/Application or frontend authority escapes. The commands above remain the locked Windows scaffold verification path; release installer bundling is intentionally outside this check.
-
-## B0.2 SQLite startup gate
-
-```bash
-cd src-tauri
-cargo test --workspace --locked
-cd ..
-```
-
-B0.2 stores the SQLite database in Tauri App Local Data, runs forward-only embedded SQLx migrations, verifies database and foreign-key integrity, creates a SQLite-consistent pre-migration backup when required, and blocks unsupported or damaged schemas behind a typed recovery status.
-
-Frontend and desktop builds require the Node and Rust/Tauri prerequisites described by the current official Tauri documentation.
-
-## B0.3 workspace configuration
-
-B0.3 adds the initial Active Vault, Problem Notes Root, and Knowledge Root configuration. All three paths must already exist as directories. The two roots must be strict descendants of the resolved Vault and may not be equal or contain one another. Validation is owned by Application, filesystem resolution and SQLite persistence are owned by Infrastructure, and React uses typed IPC only.
-
-The initial configuration is create-only. Replacing an Active Vault remains blocked until the later Validate → Preview → Confirm → Commit flow exists. B0.3 does not scan Markdown, adopt existing notes, create problem files, or add B0.4 workspace shells.
-
-## B0.4 startup shells
-
-The Application startup gate selects Recovery, Setup, or Normal before React applies URL state. Recovery and Setup never expose normal navigation. A configured workspace enters the Normal shell at Today; `/review/:attemptId` uses a separate full-screen Focus shell with ordinary navigation hidden.
-
-```bash
-npm run test:shells
-```
-
-B0.4 provides layout and routing boundaries only. Contest, Problem, Knowledge, Review execution, and Today planning behavior remain outside M0.
+技术栈：React、TypeScript、Tauri、Rust、SQLite。
