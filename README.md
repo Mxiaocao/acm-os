@@ -2,6 +2,8 @@
 
 [下载 v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0) · [发布说明](docs/RELEASE_NOTES_v0.1.0.md)
 
+开发接续入口：[项目记忆](MEMORY.md) · [开发记录](docs/DEVELOPMENT_LOG.md)。
+
 ACM-OS 是一个面向算法竞赛与日常刷题的 Windows 桌面学习工作台，围绕“参加比赛 → 赛后补题 → 整理个人题解 → 冷启动复习 → 长期复习”组织训练。它将题目、学习状态、每日安排和 Obsidian 笔记连接起来，方便你回顾做过的题，也知道下一步该学什么、复习什么。
 
 ## 核心功能
