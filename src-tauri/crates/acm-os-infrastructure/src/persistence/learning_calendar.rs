@@ -11,7 +11,7 @@ impl LearningCalendarPort for DatabaseRuntime {
         today: LocalDate,
     ) -> Result<Vec<LearningCalendarEntry>, TodaySnapshotError> {
         let pool = self._pool.as_ref().ok_or(TodaySnapshotError::PersistenceUnavailable)?;
-        // One read statement gives a consistent snapshot across all three sources.
+        // One read statement gives a consistent snapshot across all sources.
         // DISTINCT combines study completions in a plan and cycle creation for
         // the same problem/day. Review completions use their recorded local date.
         let rows: Vec<(String, i64, String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
@@ -24,6 +24,13 @@ impl LearningCalendarPort for DatabaseRuntime {
                 UNION
                 SELECT date(rc.created_at_utc, 'localtime'), rc.problem_id FROM review_cycles rc
             ), events AS (
+                SELECT date(li.added_at_utc, 'localtime') AS date,
+                       p.id AS problem_id, p.title AS problem_title,
+                       'library_added' AS kind, 'completed' AS status,
+                       NULL AS due_date, NULL AS judgement
+                FROM problem_library_items li JOIN problems p ON p.id = li.problem_id
+                WHERE li.origin = 'explicit'
+                UNION ALL
                 SELECT s.date, p.id AS problem_id, p.title AS problem_title,
                        'study' AS kind, 'completed' AS status,
                        NULL AS due_date, NULL AS judgement

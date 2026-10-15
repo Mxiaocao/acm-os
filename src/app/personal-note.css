@@ -1,0 +1,18 @@
+.note-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.note-heading-row h2 { margin: 0; }
+.note-route-list { display: grid; gap: 10px; padding-left: 24px; }
+.personal-note-panel .note-route-button { display: inline; width: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--accent); font-weight: 750; text-align: left; cursor: pointer; }
+.personal-note-panel .note-route-button:hover { background: transparent; text-decoration: underline; text-underline-offset: 4px; }
+.personal-note-panel details { margin-top: 24px; }
+.personal-note-panel summary { cursor: pointer; font-weight: 600; }
+.note-prompt-panel { margin-top: 24px; }
+.note-prompt-panel summary { cursor: pointer; font-weight: 600; }
+.note-ai-assistant label { display: grid; gap: 8px; margin: 16px 0; }
+.note-ai-assistant textarea { box-sizing: border-box; width: 100%; max-width: 100%; resize: vertical; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; }
+.modal-backdrop > .note-route-dialog { width: min(900px, 100%); }
+.note-route-content { margin-top: 24px; line-height: 1.8; overflow-wrap: anywhere; }
+.note-route-content pre { overflow-x: auto; padding: 16px; background: var(--surface-muted, #fff2f6); border-radius: 8px; line-height: 1.6; }
+.note-route-content table { display: block; overflow-x: auto; border-collapse: collapse; }
+.note-route-content th, .note-route-content td { padding: 8px 12px; border: 1px solid var(--line); }
+.note-route-content .katex-display { overflow-x: auto; overflow-y: hidden; }
+@media (max-width: 600px) { .note-heading-row { flex-wrap: wrap; } }

@@ -1406,6 +1406,8 @@ pub struct PersonalNoteRelocationCandidateDto {
 #[serde(rename_all = "camelCase")]
 pub struct ProblemMarkdownProjectionDto {
     content_digest: String,
+    introduction_html: String,
+    document_sections: Vec<SolutionRouteDto>,
     known_sections: Vec<KnownMarkdownSectionDto>,
     solution_routes: Vec<SolutionRouteDto>,
     warnings: Vec<MarkdownParseWarningDto>,
@@ -1444,6 +1446,8 @@ pub struct SolutionRouteDto {
     name: String,
     start_offset: usize,
     end_offset: usize,
+    content_markdown: String,
+    content_html: String,
 }
 
 #[derive(serde::Serialize)]
@@ -5332,6 +5336,11 @@ fn problem_markdown_projection_dto(
 ) -> ProblemMarkdownProjectionDto {
     ProblemMarkdownProjectionDto {
         content_digest: projection.content_digest,
+        introduction_html: projection.introduction_html,
+        document_sections: projection.document_sections.into_iter().map(|section| SolutionRouteDto {
+            name: section.name, start_offset: section.start_offset, end_offset: section.end_offset,
+            content_markdown: section.content_markdown, content_html: section.content_html,
+        }).collect(),
         known_sections: projection
             .known_sections
             .into_iter()
@@ -5348,6 +5357,8 @@ fn problem_markdown_projection_dto(
                 name: route.name,
                 start_offset: route.start_offset,
                 end_offset: route.end_offset,
+                content_markdown: route.content_markdown,
+                content_html: route.content_html,
             })
             .collect(),
         warnings: projection
@@ -7097,6 +7108,8 @@ mod tests {
             relocated: true,
             projection: ProblemMarkdownProjection {
                 content_digest: "abc123".to_owned(),
+                introduction_html: "<p>题意</p>".to_owned(),
+                document_sections: vec![],
                 known_sections: vec![KnownMarkdownSection {
                     name: "题解".to_owned(),
                     start_offset: 10,
@@ -7106,6 +7119,8 @@ mod tests {
                     name: "Route ×".to_owned(),
                     start_offset: 18,
                     end_offset: 42,
+                    content_markdown: "body".to_owned(),
+                    content_html: "<p>body</p>".to_owned(),
                 }],
                 warnings: vec![MarkdownParseWarning::DuplicateKnownSection {
                     name: "题解".to_owned(),
@@ -7121,8 +7136,10 @@ mod tests {
                 "relocated": true,
                 "projection": {
                     "contentDigest": "abc123",
+                    "introductionHtml": "<p>题意</p>",
+                    "documentSections": [],
                     "knownSections": [{ "name": "题解", "startOffset": 10, "endOffset": 42 }],
-                    "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42 }],
+                    "solutionRoutes": [{ "name": "Route ×", "startOffset": 18, "endOffset": 42, "contentMarkdown": "body", "contentHtml": "<p>body</p>" }],
                     "warnings": [{ "code": "duplicate_known_section", "name": "题解", "count": 2 }]
                 }
             })

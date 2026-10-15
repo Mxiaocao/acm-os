@@ -1802,6 +1802,10 @@ test("Problem detail creates a Personal Markdown through business IPC and re-que
     const createButton = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "创建个人 Markdown");
     assert.ok(createButton);
+    const promptBeforeNote = view.document.querySelector('#external-personal-note-heading').closest('section').querySelector('.note-prompt-panel');
+    assert.ok(promptBeforeNote);
+    assert.match(promptBeforeNote.querySelector('textarea').value, /## 大致题意/);
+    assert.equal(createCalls, 0);
     await act(async () => createButton.click());
     await settle();
     assert.equal(createCalls, 1);
@@ -2138,6 +2142,12 @@ test("Unbound canonical Problem creates Personal Markdown only through problem_i
   try {
     await settle();
     assert.match(view.document.body.textContent, /Unbound Canonical Problem/);
+    const promptBeforeNote = view.document.querySelector('#canonical-personal-note-heading').closest('section').querySelector('.note-prompt-panel');
+    assert.ok(promptBeforeNote);
+    const copyBeforeNote = [...promptBeforeNote.querySelectorAll('button')].find(button => button.textContent === '复制提示词');
+    await act(async () => copyBeforeNote.click());
+    assert.match(promptBeforeNote.querySelector('textarea').value, /## 大致题意/);
+    assert.equal(calls.filter(([command]) => command === 'create_personal_note_by_id').length, 0);
     const create = [...view.document.querySelectorAll("button")]
       .find((button) => button.textContent === "创建个人 Markdown");
     assert.ok(create);
@@ -2246,8 +2256,16 @@ test("Canonical Personal Note renders parsed sections routes and warnings", {
       state: "ready", vaultRelativePath: "Problems/Problem-47.md", relocated: true,
       projection: {
         contentDigest: "c".repeat(64),
+        introductionHtml: "<p>完整题意摘要</p>",
+        documentSections: [
+          { name: "前置知识", startOffset: 0, endOffset: 10, contentMarkdown: "二分图", contentHtml: "<p>二分图</p>" },
+          { name: "Hints", startOffset: 10, endOffset: 30, contentMarkdown: "先染色", contentHtml: "<p>先染色</p>" },
+          { name: "题解", startOffset: 30, endOffset: 80, contentMarkdown: "", contentHtml: "" },
+          { name: "额外题目", startOffset: 80, endOffset: 90, contentMarkdown: "暂无", contentHtml: "<p>暂无</p>" },
+          { name: "Prompt", startOffset: 90, endOffset: 120, contentMarkdown: "用户保存的原始 Prompt\n请保留我的思路。", contentHtml: "<p>用户保存的原始 Prompt</p>" },
+        ],
         knownSections: [{ name: "Prerequisite Knowledge", startOffset: 10, endOffset: 30 }],
-        solutionRoutes: [{ name: "Binary search route", startOffset: 31, endOffset: 60 }],
+        solutionRoutes: [{ name: "Binary search route", startOffset: 31, endOffset: 60, contentMarkdown: "#### Proof\nOnly this route $n^2$\n```cpp\nint n;\n```", contentHtml: '<h4>Proof</h4><p>Only this route $n^2$ <span class="math math-inline">a_i+b_j</span></p><span class="math math-display">x^2</span><pre><code>int n;</code></pre><img src="https://tracker.test/x" onerror="alert(1)"><a href="javascript:alert(1)">unsafe link</a>' }, { name: "Empty alternative", startOffset: 60, endOffset: 70, contentMarkdown: "", contentHtml: "" }],
         warnings: [{ code: "duplicate_known_section", name: "Solution", count: 2 }],
       },
     };
@@ -2258,10 +2276,41 @@ test("Canonical Personal Note renders parsed sections routes and warnings", {
     await settle();
     const projection = view.document.querySelector('[aria-label="个人 Markdown 内容"]');
     assert.ok(projection);
-    assert.match(projection.textContent, /Prerequisite Knowledge/);
+    assert.match(projection.textContent, /完整题意摘要/);
+    assert.deepEqual([...projection.querySelectorAll("summary")].map(summary => summary.textContent), ["前置知识", "Hints", "题解", "额外题目"]);
+    assert.equal(projection.querySelector('.note-prompt-panel'), null);
+    assert.equal(projection.querySelector("details[open]"), null);
+    const solutionSection = [...projection.querySelectorAll("details")].find(details => details.querySelector("summary").textContent === "题解");
+    solutionSection.open = true;
     assert.match(projection.textContent, /Binary search route/);
     assert.match(projection.textContent, /重复章节：Solution（2 处）/);
     assert.match(projection.textContent, /笔记绑定已恢复到当前位置/);
+    assert.equal(view.document.querySelector('[role="dialog"]'), null);
+    const route = [...projection.querySelectorAll("button")].find(button => button.textContent.includes("Binary search route"));
+    await act(async () => route.click());
+    const dialog = view.document.querySelector('[role="dialog"]');
+    assert.match(dialog.textContent, /Only this route/);
+    assert.equal(dialog.querySelector("pre code").textContent, "int n;");
+    assert.ok(dialog.querySelector(".katex"));
+    assert.ok(dialog.querySelector(".math-inline .katex"));
+    assert.ok(dialog.querySelector(".math-display .katex-display"));
+    assert.equal(dialog.querySelector("img"), null);
+    assert.equal(dialog.querySelector("a").getAttribute("href"), "#");
+    assert.equal(view.document.activeElement.textContent, "关闭");
+    await act(async () => view.document.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    assert.equal(view.document.querySelector('[role="dialog"]'), null);
+    assert.equal(view.document.activeElement, route);
+    const emptyRoute = [...projection.querySelectorAll("button")].find(button => button.textContent.includes("Empty alternative"));
+    await act(async () => emptyRoute.click());
+    assert.match(view.document.querySelector('[role="dialog"]').textContent, /这个方法还没有正文/);
+    assert.doesNotMatch(view.document.querySelector('[role="dialog"]').textContent, /Only this route/);
+    await act(async () => [...view.document.querySelectorAll('[role="dialog"] button')].find(button => button.textContent === "关闭").click());
+    const promptPanel = view.document.querySelector('#canonical-personal-note-heading').closest('section').querySelector('.note-prompt-panel');
+    const copy = [...promptPanel.querySelectorAll("button")].find(button => button.textContent === "复制提示词");
+    await act(async () => copy.click());
+    await settle();
+    const prompt = promptPanel.querySelector("textarea[readonly]").value;
+    assert.equal(prompt, "用户保存的原始 Prompt\n请保留我的思路。");
   } finally {
     await view.cleanup();
   }
@@ -3509,6 +3558,10 @@ test("Learning calendar shows history, overdue and future reviews and ignores st
   const snapshot = { planId: "calendar-plan", localDate: "2026-10-09", budgetMinutes: 60, plannedMinutes: 0, overBudgetMinutes: 0, reviewOnlyStreak: 0, entries: [] };
   const entries = [
     { date: "2026-10-08", problemId: "51", problemTitle: "Recorded learning", kind: "study", status: "completed", dueDate: null, judgement: null },
+    { date: "2026-10-08", problemId: "51", problemTitle: "Recorded learning", kind: "library_added", status: "completed", dueDate: null, judgement: null },
+    { date: "2026-10-08", problemId: "51", problemTitle: "Recorded learning", kind: "early_check", status: "completed", dueDate: "2026-10-08", judgement: "partial" },
+    { date: "2026-10-08", problemId: "54", problemTitle: "Just added", kind: "library_added", status: "completed", dueDate: null, judgement: null },
+    { date: "2026-10-07", problemId: "51", problemTitle: "Recorded learning", kind: "study", status: "completed", dueDate: null, judgement: null },
     { date: "2026-10-09", problemId: "52", problemTitle: "Overdue review", kind: "long_term_review", status: "scheduled", dueDate: "2026-10-05", judgement: null },
     { date: "2026-10-10", problemId: "53", problemTitle: "Next cold start", kind: "first_cold_start", status: "scheduled", dueDate: "2026-10-10", judgement: null },
   ];
@@ -3547,6 +3600,13 @@ test("Learning calendar shows history, overdue and future reviews and ignores st
 
     await act(async () => day("2026-10-08").click());
     assert.match(detail().textContent, /Recorded learning/);
+    assert.equal(day("2026-10-08").getAttribute("aria-label"), "2026-10-08，做题 2 道，待复习 0 道");
+    assert.match(root.querySelector(".calendar-overview").textContent, /本月做题 3 道 · 待复习 2 道/);
+    const doneLinks = detail().querySelectorAll("a.calendar-problem-link");
+    assert.equal(doneLinks.length, 2, "same-day activities share one problem row");
+    assert.match(doneLinks[0].textContent, /学习完成.*加入题库.*提前检验.*部分掌握/);
+    assert.equal(doneLinks[1].getAttribute("href"), "/problems/id/54");
+    assert.match(doneLinks[1].textContent, /Just added.*查看题解/);
     assert.doesNotMatch(detail().textContent, /Next cold start/);
     await act(async () => day("2026-10-10").click());
     assert.match(detail().textContent, /Next cold start.*首次冷启动/);

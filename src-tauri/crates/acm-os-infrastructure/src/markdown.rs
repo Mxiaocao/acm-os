@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use acm_os_application::{
-    KnownMarkdownSection, MarkdownParseWarning, ProblemMarkdownProjection, SolutionRoute,
+    KnownMarkdownSection, MarkdownDocumentSection, MarkdownParseWarning, ProblemMarkdownProjection, SolutionRoute,
 };
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
@@ -28,10 +28,22 @@ pub(crate) fn parse_problem_markdown(
     let headings = collect_headings(markdown);
     let mut known_sections = Vec::new();
     let mut solution_routes = Vec::new();
+    let mut document_sections = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
 
     for (index, heading) in headings.iter().enumerate() {
         let end_offset = section_end(&headings, index, markdown.len());
+        if heading.level == HeadingLevel::H2 {
+            let content_markdown = markdown[heading.heading_end..end_offset].trim().to_owned();
+            // Methods retain their own modal bodies; only the solution preamble is inline.
+            let body_end = if heading.name == "题解" {
+                headings.iter().find(|child| child.level == HeadingLevel::H3 && child.start >= heading.heading_end && child.start < end_offset).map_or(end_offset, |child| child.start)
+            } else { end_offset };
+            document_sections.push(MarkdownDocumentSection {
+                name: heading.name.clone(), start_offset: heading.start, end_offset,
+                content_html: render_markdown(markdown[heading.heading_end..body_end].trim()), content_markdown,
+            });
+        }
         if heading.level == HeadingLevel::H2 && KNOWN_SECTIONS.contains(&heading.name.as_str()) {
             *counts.entry(heading.name.clone()).or_default() += 1;
             known_sections.push(KnownMarkdownSection {
@@ -43,10 +55,14 @@ pub(crate) fn parse_problem_markdown(
         if heading.level == HeadingLevel::H3
             && direct_parent_h2(&headings, index).is_some_and(|name| name == "题解")
         {
+            let content_markdown = markdown[heading.heading_end..end_offset].trim().to_owned();
+            let content_html = render_markdown(&content_markdown);
             solution_routes.push(SolutionRoute {
                 name: heading.name.clone(),
                 start_offset: heading.start,
                 end_offset,
+                content_markdown,
+                content_html,
             });
         }
     }
@@ -59,16 +75,41 @@ pub(crate) fn parse_problem_markdown(
 
     ProblemMarkdownProjection {
         content_digest,
+        introduction_html: render_markdown(introduction(markdown, &headings)),
+        document_sections,
         known_sections,
         solution_routes,
         warnings,
     }
 }
 
+fn render_markdown(markdown: &str) -> String {
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, Parser::new_ext(markdown,
+        pulldown_cmark::Options::ENABLE_TABLES | pulldown_cmark::Options::ENABLE_STRIKETHROUGH | pulldown_cmark::Options::ENABLE_MATH));
+    html
+}
+
+fn introduction<'a>(markdown: &'a str, headings: &[Heading]) -> &'a str {
+    let end = headings.iter().find(|heading| heading.level == HeadingLevel::H2).map_or(markdown.len(), |heading| heading.start);
+    let title_end = headings.iter().find(|heading| heading.level == HeadingLevel::H1 && heading.start < end).map(|heading| heading.heading_end);
+    let metadata_end = if markdown.starts_with("---\n") || markdown.starts_with("---\r\n") {
+        let first_line = markdown.find('\n').unwrap_or(0) + 1;
+        let mut offset = first_line;
+        let mut result = first_line;
+        for line in markdown[first_line..].split_inclusive('\n') {
+            offset += line.len();
+            if line.trim() == "---" { result = offset; break; }
+        }
+        result
+    } else { 0 };
+    markdown[title_end.unwrap_or(metadata_end).min(end)..end].trim()
+}
+
 fn collect_headings(markdown: &str) -> Vec<Heading> {
     let mut headings = Vec::new();
     let mut current: Option<Heading> = None;
-    for (event, range) in Parser::new(markdown).into_offset_iter() {
+    for (event, range) in Parser::new_ext(markdown, pulldown_cmark::Options::ENABLE_YAML_STYLE_METADATA_BLOCKS).into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 current = Some(Heading {
@@ -287,6 +328,43 @@ mod tests {
             ["双指针 ×", "动态规划"]
         );
         assert!(projection.warnings.is_empty());
+        assert_eq!(
+            projection.solution_routes[0].content_markdown,
+            "body\n\n#### 证明\nbody"
+        );
+        assert!(projection.solution_routes[0]
+            .content_html
+            .contains("<h4>证明</h4>"));
+        assert_eq!(projection.solution_routes[1].content_markdown, "");
+    }
+
+    #[test]
+    fn route_content_preserves_math_code_and_unicode_boundaries() {
+        let projection = parse_problem_markdown("# 题目\n## 题解\n### 标准推导\n公式 $a_i+b_j$\n\n$$x^2$$\n\n```cpp\n// $code$\n```\n### 另一个方法\n不同正文\n## 额外题目\n不可混入", "digest".to_owned());
+        let route = &projection.solution_routes[0];
+        assert!(route.content_html.contains("math-inline\">a_i+b_j"));
+        assert!(route.content_html.contains("math-display\">x^2"));
+        assert!(route.content_html.contains("// $code$"));
+        assert!(!route.content_markdown.contains("不同正文"));
+        assert_eq!(projection.solution_routes[1].content_markdown, "不同正文");
+    }
+
+    #[test]
+    fn document_projection_preserves_order_introduction_and_prompt() {
+        let markdown = "---\nproblem_id: 42\n---\n# Problem\n这是完整题意 $n^2$。\n\n## 前置知识\n- 二分图\n## Hints\n### Hint 1\n尝试染色\n## 题解\n方法总览\n### 标准推导\n正确性证明\n## 额外题目\n暂无\n## Prompt\n我的原始提示词\n## 自定义章节\n保留正文\n";
+        let projection = parse_problem_markdown(markdown, "digest".to_owned());
+        assert!(projection.introduction_html.contains("这是完整题意"));
+        assert!(!projection.introduction_html.contains("problem_id"));
+        assert!(!projection.introduction_html.contains("Problem"));
+        assert_eq!(projection.document_sections.iter().map(|section| section.name.as_str()).collect::<Vec<_>>(), ["前置知识", "Hints", "题解", "额外题目", "Prompt", "自定义章节"]);
+        assert!(projection.document_sections[1].content_html.contains("尝试染色"));
+        assert!(projection.document_sections[2].content_html.contains("方法总览"));
+        assert!(!projection.document_sections[2].content_html.contains("正确性证明"));
+        assert_eq!(projection.document_sections[4].content_markdown, "我的原始提示词");
+        assert_eq!(projection.solution_routes[0].content_markdown, "正确性证明");
+        let no_title = parse_problem_markdown("---\r\nkey: value\r\n---\r\n题意正文\r\n## Hints\r\n提示", "digest".to_owned());
+        assert!(no_title.introduction_html.contains("题意正文"));
+        assert!(!no_title.introduction_html.contains("key:"));
     }
 
     #[test]

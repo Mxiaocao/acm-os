@@ -13,7 +13,7 @@ pub struct LearningCalendarEntry {
 
 #[allow(async_fn_in_trait)]
 pub trait LearningCalendarPort {
-    /// Read recorded learning and the next authoritative review due date only.
+    /// Read first explicit library additions, recorded learning and next review dates.
     /// Opening a calendar must never generate daily plans or advance scheduling.
     async fn load_learning_calendar(
         &self,

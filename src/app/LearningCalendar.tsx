@@ -6,9 +6,24 @@ import { calendarDateKey, calendarMonthCells, parseCalendarDate } from "./calend
 import "./learning-calendar.css";
 
 const kindLabels = {
+  library_added: "calendar.libraryAdded",
   study: "calendar.study", first_cold_start: "calendar.coldStart",
   long_term_review: "calendar.review", early_check: "calendar.earlyCheck",
 } as const;
+
+// One problem can be added, studied and reviewed on the same day.
+// Keep its activities, but count and list it only once in that day's work.
+function completedProblems(entries: LearningCalendarEntryDto[]) {
+  const groups = new Map<string, LearningCalendarEntryDto[]>();
+  for (const entry of entries) {
+    if (entry.status !== "completed") continue;
+    const key = entry.date + ":" + entry.problemId;
+    const group = groups.get(key) ?? [];
+    group.push(entry);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
 const judgementLabels = {
   mastered: "calendar.mastered", partial: "calendar.partial", fail: "calendar.fail",
 } as const;
@@ -79,30 +94,36 @@ export function LearningCalendar({ navigate }: { navigate: (path: string) => voi
 
   const entries = calendar?.entries ?? [];
   const selectedEntries = entries.filter((entry) => entry.date === selected);
-  const completed = selectedEntries.filter((entry) => entry.status === "completed");
+  const completed = completedProblems(selectedEntries);
   const reviews = selectedEntries.filter((entry) => entry.status !== "completed");
   const cells = calendarMonthCells(year, monthNumber);
   const firstDayOffset = cells.findIndex(Boolean);
-  const maxDayCount = Math.max(1, ...cells.map((date) => entries.filter((entry) => entry.date === date).length));
-  const completedCount = entries.filter((entry) => entry.status === "completed").length;
-  const reviewCount = entries.length - completedCount;
+  const maxDayCount = Math.max(1, ...cells.map((date) => {
+    const day = entries.filter((entry) => entry.date === date);
+    return completedProblems(day).length + day.filter((entry) => entry.status !== "completed").length;
+  }));
+  const completedCount = completedProblems(entries).length;
+  const reviewCount = entries.filter((entry) => entry.status !== "completed").length;
   const upcomingDates = [...new Set(entries.filter((entry) => entry.status !== "completed" && entry.date >= today).map((entry) => entry.date))].sort().slice(0, 7);
   const weekdayLabel = (date: string) => t((["calendar.sun", "calendar.mon", "calendar.tue", "calendar.wed", "calendar.thu", "calendar.fri", "calendar.sat"] as const)[parseCalendarDate(date).getDay()]);
   const dateLabel = (date: string) => t("calendar.dateLabel", { month: Number(date.slice(5, 7)), day: Number(date.slice(-2)), weekday: weekdayLabel(date) });
-  const renderEntry = (entry: LearningCalendarEntryDto, index: number) => (
+  const renderEntry = (entry: LearningCalendarEntryDto, index: number, activities = [entry]) => (
     <li key={entry.problemId + "-" + entry.kind + "-" + index}>
-      <button className="calendar-problem-link" onClick={() => navigate("/problems/id/" + entry.problemId)} type="button">
+      <a className="calendar-problem-link" href={"/problems/id/" + entry.problemId} onClick={(event) => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); navigate("/problems/id/" + entry.problemId);
+      }}>
         <span aria-hidden="true" className="calendar-problem-number">{String(index + 1).padStart(2, "0")}</span>
         <span className="calendar-problem-main">
           <strong>{displayProblemTitle("", entry.problemTitle)}</strong>
-          <span>{t(kindLabels[entry.kind])}{entry.status === "inProgress" ? " · " + t("calendar.inProgress") : ""}</span>
+          <span>{[...new Set(activities.map((activity) => t(kindLabels[activity.kind]) + (activity.judgement ? " · " + t(judgementLabels[activity.judgement]) : "")))].join(" · ")}{entry.status === "inProgress" ? " · " + t("calendar.inProgress") : ""}</span>
           {entry.status !== "completed" && entry.dueDate && entry.dueDate < today
             ? <small className="calendar-overdue">{t("calendar.overdue", { date: entry.dueDate })}</small> : null}
         </span>
         <span className={"calendar-problem-status calendar-problem-status--" + entry.status}>
-          {entry.judgement ? t(judgementLabels[entry.judgement]) : t(entry.status === "completed" ? "calendar.completed" : "calendar.toReview")}
+          {t("calendar.viewSolution")}
         </span>
-      </button>
+      </a>
     </li>
   );
 
@@ -131,8 +152,8 @@ export function LearningCalendar({ navigate }: { navigate: (path: string) => voi
               </div>;
             }
             const dayEntries = entries.filter((entry) => entry.date === date);
-            const done = dayEntries.filter((entry) => entry.status === "completed").length;
-            const due = dayEntries.length - done;
+            const done = completedProblems(dayEntries).length;
+            const due = dayEntries.filter((entry) => entry.status !== "completed").length;
             return <button aria-current={date === today ? "date" : undefined} aria-label={loading || failed ? date : t("calendar.daySummary", { date, done, due })}
               aria-pressed={date === selected} className={`calendar-day${date === today ? " calendar-day--today" : ""}`}
               data-calendar-date={date} key={date} onClick={() => choose(date)} onKeyDown={(event) => handleDateKey(event, date)} tabIndex={date === selected ? 0 : -1} type="button">
@@ -153,9 +174,9 @@ export function LearningCalendar({ navigate }: { navigate: (path: string) => voi
         <h3><time dateTime={selected}>{dateLabel(selected)}</time>{selected === today ? <span>{t("calendar.today")}</span> : null}</h3>
         {loading ? <p role="status">{t("calendar.loading")}</p> : failed ? <div role="alert"><p>{t("calendar.error")}</p><button className="secondary-action" onClick={() => setRetry((value) => value + 1)} type="button">{t("common.retry")}</button></div> : <div aria-live="polite">
           <h4>{t("calendar.completed")} <span>{completed.length}</span></h4>
-          {completed.length ? <ul>{completed.map(renderEntry)}</ul> : <p className="calendar-empty">{t("calendar.noCompleted")}</p>}
+          {completed.length ? <ul>{completed.map((activities, index) => renderEntry(activities[0], index, activities))}</ul> : <p className="calendar-empty">{t("calendar.noCompleted")}</p>}
           <h4>{t("calendar.toReview")} <span>{reviews.length}</span></h4>
-          {reviews.length ? <ul>{reviews.map(renderEntry)}</ul> : <p className="calendar-empty">{t("calendar.noReviews")}</p>}
+          {reviews.length ? <ul>{reviews.map((entry, index) => renderEntry(entry, index))}</ul> : <p className="calendar-empty">{t("calendar.noReviews")}</p>}
         </div>}
       </section>
     </div>

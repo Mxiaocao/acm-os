@@ -190,6 +190,8 @@ export interface PersonalNoteBindingDto {
 
 export interface ProblemMarkdownProjectionDto {
   contentDigest: string;
+  introductionHtml: string;
+  documentSections: SolutionRouteDto[];
   knownSections: KnownMarkdownSectionDto[];
   solutionRoutes: SolutionRouteDto[];
   warnings: MarkdownParseWarningDto[];
@@ -205,6 +207,8 @@ export interface SolutionRouteDto {
   name: string;
   startOffset: number;
   endOffset: number;
+  contentMarkdown: string;
+  contentHtml: string;
 }
 
 export interface MarkdownParseWarningDto {

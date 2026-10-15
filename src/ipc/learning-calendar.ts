@@ -4,7 +4,7 @@ export interface LearningCalendarEntryDto {
   date: string;
   problemId: string;
   problemTitle: string;
-  kind: "study" | "first_cold_start" | "long_term_review" | "early_check";
+  kind: "library_added" | "study" | "first_cold_start" | "long_term_review" | "early_check";
   status: "completed" | "scheduled" | "inProgress";
   dueDate: string | null;
   judgement: "mastered" | "partial" | "fail" | null;

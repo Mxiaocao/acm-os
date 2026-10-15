@@ -1,5 +1,7 @@
 export const fallbackMessages = {
-  "calendar.monthSummary": "This month: {done} completed · {due} to review",
+  "calendar.monthSummary": "This month: {done} problems done · {due} to review (each problem counted once per day)",
+  "calendar.libraryAdded": "Added to library · done that day",
+  "calendar.viewSolution": "View solution →",
   "calendar.dateLabel": "{month}/{day} · {weekday}",
   "calendar.barExplanation": "Bar length compares recorded items across days.",
   "calendar.upcoming": "Upcoming reviews",
@@ -9,7 +11,7 @@ export const fallbackMessages = {
 
   "calendar.title": "Learning calendar",
   "calendar.eyebrow": "Learning history and review schedule",
-  "calendar.description": "See completed learning and upcoming reviews by day.",
+  "calendar.description": "Adding a problem to your library records it as done that day. Select a date to see the problems and open their solutions.",
   "calendar.month": "{year}-{month}",
   "calendar.previousMonth": "Previous month",
   "calendar.nextMonth": "Next month",
@@ -24,10 +26,10 @@ export const fallbackMessages = {
   "calendar.sun": "Sun",
   "calendar.dates": "Month dates",
   "calendar.dayDetails": "Selected day details",
-  "calendar.daySummary": "{date}: {done} completed, {due} to review",
+  "calendar.daySummary": "{date}: {done} problems done, {due} to review",
   "calendar.doneCount": "Done {count}",
   "calendar.dueCount": "Review {count}",
-  "calendar.completed": "Completed",
+  "calendar.completed": "Problems done",
   "calendar.toReview": "To review",
   "calendar.loading": "Loading learning records…",
   "calendar.error": "Could not load the calendar. Please retry.",
@@ -42,7 +44,7 @@ export const fallbackMessages = {
   "calendar.fail": "Not mastered",
   "calendar.inProgress": "In progress",
   "calendar.overdue": "Overdue · originally due {date}",
-  "calendar.scheduleNote": "Future dates show each problem’s current next review, which may change after completion. Overdue reviews appear on today.",
+  "calendar.scheduleNote": "Problems are recorded on their first explicit library-add date in local time; reimports do not add another day. Study and completed reviews also count, once per problem per day. Legacy migrated library entries without a reliable add date are excluded. Future dates show the current next review; overdue reviews appear on today.",
 
   "common.save": "Save",
   "common.cancel": "Cancel",
@@ -1026,7 +1028,9 @@ const rewardZhMessages = {
 } as const;
 
 const zhCNBaseMessages = {
-  "calendar.monthSummary": "本月已完成 {done} 项 · 待复习 {due} 项",
+  "calendar.monthSummary": "本月做题 {done} 道 · 待复习 {due} 道（同一天同一道题只计一次）",
+  "calendar.libraryAdded": "加入题库 · 记为当天做题",
+  "calendar.viewSolution": "查看题解 →",
   "calendar.dateLabel": "{month} 月 {day} 日 · 周{weekday}",
   "calendar.barExplanation": "色条长度表示当日记录数量",
   "calendar.upcoming": "接下来的复习",
@@ -1036,7 +1040,7 @@ const zhCNBaseMessages = {
 
   "calendar.title": "学习月历",
   "calendar.eyebrow": "学习回顾与复习安排",
-  "calendar.description": "查看每天完成的学习和待复习题目。",
+  "calendar.description": "加入题库即记为当天做过的题。点击日期，查看当天做了几道、做了哪些题，并打开题目详解。",
   "calendar.month": "{year} 年 {month} 月",
   "calendar.previousMonth": "上个月",
   "calendar.nextMonth": "下个月",
@@ -1051,10 +1055,10 @@ const zhCNBaseMessages = {
   "calendar.sun": "日",
   "calendar.dates": "月历日期",
   "calendar.dayDetails": "所选日期详情",
-  "calendar.daySummary": "{date}，已完成 {done} 项，待复习 {due} 项",
-  "calendar.doneCount": "完成 {count}",
+  "calendar.daySummary": "{date}，做题 {done} 道，待复习 {due} 道",
+  "calendar.doneCount": "做题 {count}",
   "calendar.dueCount": "复习 {count}",
-  "calendar.completed": "已完成",
+  "calendar.completed": "当天做过的题",
   "calendar.toReview": "待复习",
   "calendar.loading": "正在读取学习记录…",
   "calendar.error": "月历读取失败，请重试。",
@@ -1069,7 +1073,7 @@ const zhCNBaseMessages = {
   "calendar.fail": "未掌握",
   "calendar.inProgress": "进行中",
   "calendar.overdue": "已逾期 · 原定 {date}",
-  "calendar.scheduleNote": "未来日期展示每道题当前的下一次复习，完成后会按结果更新。逾期复习汇总在今天。",
+  "calendar.scheduleNote": "入库按首次主动加入题库的本地日期记录，重复导入不新增做题日期；学习完成和复习完成也计入做题，同一天同一道题只计一次。旧版迁移题目缺少可靠入库日期时不补记。未来日期展示当前下一次复习，逾期复习汇总在今天。",
 
   "common.save": "保存",
   "common.cancel": "取消",

@@ -1,4 +1,6 @@
 import { ProblemLibrary } from "./ProblemLibrary";
+import { PersonalNotePanel } from "./PersonalNotePanel";
+import { NotePromptPanel } from "./NotePromptPanel";
 import { SingleProblemImport } from "./SingleProblemImport";
 import { getIndependentProblems, type IndependentProblemDto } from "../ipc/single-problem";
 import { Books, CalendarDots, Flower, Gear, House, Notebook, Graph, Trophy } from "@phosphor-icons/react";
@@ -3237,15 +3239,14 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         <p>{canonicalDetail.rating ? t("problem.rating", { rating: canonicalDetail.rating }) : ""} · {canonicalDetail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}</p>
         {/^https?:\/\//.test(canonicalDetail.sourceUrl) ? <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a> : <p className="system-caption">本地录入题目</p>}
         <ProblemActions key={problemId} value={canonicalDetail} target={{ problemId: problemId! }} onSaved={async () => setCanonicalDetail(await getCanonicalProblemDetail(problemId!))} onDeleted={() => navigate("/problems", { replace: true })} />
-        {canonicalDetail.identityType === "lightweight" ? <button className="primary-action" disabled={creatingNote} onClick={() => void createNote()} type="button">{creatingNote ? t("problem.creating") : t("problem.createPersonal")}</button> : null}
         {canonicalDetail.personalNote ? <p className="safe-note">{t("problem.personalMarkdown")}：<code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
         {canonicalDetail.identityType === "personal" ? <p><strong>{t("problem.currentStatus")}</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
         {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
       </section>
-      {canonicalDetail.identityType === "personal" ? <>
-        {canonicalDetail.personalNote ? <section className="content-panel" aria-labelledby="canonical-personal-note-heading">
+        <section className="content-panel" aria-labelledby="canonical-personal-note-heading">
           <h2 id="canonical-personal-note-heading">{t("problem.personalMarkdown")}</h2>
-          <p className="safe-note"><code>{displayedNotePath}</code></p>
+          {canonicalDetail.identityType === "lightweight" ? <button className="primary-action" disabled={creatingNote} onClick={() => void createNote()} type="button">{creatingNote ? t("problem.creating") : t("problem.createPersonal")}</button> : null}
+          {canonicalDetail.personalNote ? <p className="safe-note"><code>{displayedNotePath}</code></p> : <p className="safe-note">还没有个人笔记，可以先复制提示词整理题解。</p>}
           {noteReadState?.state === "ready" ? <div className="action-row"><button className="secondary-action" disabled={openingNote} onClick={() => void openInObsidian()} type="button">{openingNote ? t("problem.opening") : t("knowledge.openObsidian")}</button><button className="secondary-action" onClick={() => void copyNotePath()} type="button">{t("problem.copyPath")}</button><button className="secondary-action" onClick={() => setShowDeletePreview(true)} type="button">{t("problem.deleteNote")}</button></div> : null}
           {noteReadState?.state === "locationAnomaly" ? <div className="action-row"><button className="secondary-action" onClick={() => void findRelocationCandidates()} type="button">{t("problem.findLocations")}</button><button className="secondary-action" onClick={() => setShowMissingNoteDeleteConfirm(true)} type="button">{t("problem.confirmMissing")}</button></div> : null}
           {relocationCandidates ? <ul>{relocationCandidates.map((candidate) => <li key={candidate.vaultRelativePath}><code>{candidate.vaultRelativePath}</code>{candidate.occupied ? ` (${t("problem.occupied")})` : ""}{!candidate.occupied ? <button className="secondary-action" disabled={repairingPath !== null} onClick={() => void confirmRelocationCandidate(candidate.vaultRelativePath)} type="button">{t("problem.rebind")}</button> : null}</li>)}</ul> : null}
@@ -3253,9 +3254,11 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
           {openNoteFailed ? <p role="alert" className="system-caption">{t("problem.openError")}</p> : null}
           {noteReadFailed ? <p role="alert" className="system-caption">{t("problem.readError")}</p> : null}
           {showDeletePreview ? <div className="action-row"><button className="primary-action" disabled={deletingNote} onClick={() => void confirmDeletePersonalNote()} type="button">{deletingNote ? t("problem.deleting") : t("problem.confirmDelete")}</button><button className="secondary-action" onClick={() => setShowDeletePreview(false)} type="button">{t("common.cancel")}</button></div> : null}
-        </section> : null}
+          <NotePromptPanel key={problemId} readState={noteReadState} />
+        </section>
+      {canonicalDetail.identityType === "personal" ? <>
         {noteReadState?.state === "vaultUnavailable" ? <VaultUnavailableNotice /> : null}
-        {noteReadState?.state === "ready" ? <PersonalNoteProjectionPanel readState={noteReadState} /> : null}
+        {noteReadState?.state === "ready" ? <PersonalNotePanel key={problemId} readState={noteReadState} refresh={refreshPersonalNote} renderContent={renderNoteContent} /> : null}
         <section className="content-panel" aria-labelledby="canonical-learning-lifecycle-heading">
           <h2 id="canonical-learning-lifecycle-heading">{t("problem.lifecycle")}</h2>
           <p><strong>{t("problem.currentStatus")}</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p>
@@ -3284,6 +3287,9 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       </p>
       <a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
       <ProblemActions key={`${contestId}/${index}`} value={detail} target={{ contestId, index }} onSaved={async () => setDetail(await getLightweightProblemDetail(contestId, index))} onDeleted={() => navigate("/problems", { replace: true })} />
+    </section>
+    <section className="content-panel" aria-labelledby="external-personal-note-heading">
+      <h2 id="external-personal-note-heading">{t("problem.personalMarkdown")}</h2>
       {detail.identityType === "lightweight" ? (
         <button className="primary-action" disabled={creatingNote} onClick={createNote} type="button">
           {creatingNote ? t("problem.creating") : t("problem.createPersonal")}
@@ -3313,6 +3319,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         </>
       ) : null}
       {noteMessage ? <p aria-live="polite" className="system-caption">{noteMessage}</p> : null}
+      <NotePromptPanel key={`${contestId}/${index}`} readState={noteReadState} />
     </section>
     {detail.identityType === "personal" ? (
       <section className="content-panel" aria-labelledby="learning-lifecycle-heading">
@@ -3415,7 +3422,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
             </div>
           ) : <button className="danger-action" onClick={() => setShowMissingNoteDeleteConfirm(true)} type="button">{t("problem.confirmFileDeleted")}</button>}
         </section>
-      ) : <PersonalNoteProjectionPanel readState={noteReadState} />
+      ) : <PersonalNotePanel key={`${contestId}/${index}`} readState={noteReadState} refresh={refreshPersonalNote} renderContent={renderNoteContent} />
     ) : null}
     <ProblemReviewHistory contestId={contestId} index={index} learningStatus={detail.lifecycle.learningStatus} />
     {detail.statement.state === "pending" ? <section className="empty-state"><h2>{t("problem.statementPending")}</h2><p>{t("problem.statementPendingDescription")}</p></section> : renderedHtml === null ? <section className="empty-state" aria-busy="true"><p>{t("problem.preparingStatement")}</p></section> : <section className="content-panel statement-view"><div className="statement-heading-row"><h2>{t("problem.statementSnapshot")}</h2></div><div dangerouslySetInnerHTML={{ __html: renderedHtml }} /></section>}
@@ -3428,18 +3435,6 @@ function NextReviewDue({ localDate }: { localDate: string | null }) {
 
 function VaultUnavailableNotice() {
   return <section className="empty-state" role="status"><h2>{t("problem.vaultUnavailable")}</h2><p>{t("problem.vaultUnavailableDescription")}</p></section>;
-}
-
-function PersonalNoteProjectionPanel({ readState }: { readState: Extract<PersonalNoteReadStateDto, { state: "ready" }> }) {
-  return <section className="content-panel" aria-label={t("problem.projectionAria")}>
-    <h2>我的笔记</h2>
-    {readState.relocated ? <p className="safe-note">{t("problem.bindingRestored")}</p> : null}
-    <h3>已识别章节</h3>
-    {readState.projection.knownSections.length ? <ul>{readState.projection.knownSections.map((section, position) => <li key={`${section.name}-${position}`}>{section.name}</li>)}</ul> : <p>没有找到已识别章节。</p>}
-    <h3>解题路线</h3>
-    {readState.projection.solutionRoutes.length ? <ol>{readState.projection.solutionRoutes.map((route, position) => <li key={`${route.name}-${position}`}>{route.name}</li>)}</ol> : <p>没有找到解题路线。</p>}
-    {readState.projection.warnings.map((warning) => <p className="safe-note" key={`${warning.code}-${warning.name}`}>{t("problem.duplicateSection", { name: warning.name, count: warning.count })}</p>)}
-  </section>;
 }
 
 const reviewFailureReasonOptions: ReadonlyArray<readonly [ReviewFailureReasonCodeDto, string]> = [
@@ -3691,19 +3686,32 @@ function sanitizeStatementForRender(html: string, assetUrls: ReadonlyMap<string,
   return document.body.innerHTML;
 }
 
-function renderCodeforcesMath(document: Document): void {
+function renderNoteContent(html: string): string {
+  const document = new DOMParser().parseFromString(sanitizeStatementForRender(html, new Map()), "text/html");
+  for (const formula of document.querySelectorAll(".math-inline, .math-display")) {
+    if (formula.closest("pre, code")) continue;
+    formula.innerHTML = katex.renderToString(formula.textContent ?? "", {
+      displayMode: formula.classList.contains("math-display"),
+      strict: "ignore", throwOnError: false, trust: false,
+    });
+  }
+  renderCodeforcesMath(document, true);
+  return document.body.innerHTML;
+}
+
+function renderCodeforcesMath(document: Document, noteMath = false): void {
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const textNodes: Text[] = [];
   while (walker.nextNode()) {
     const node = walker.currentNode as Text;
-    if (node.data.includes("$$$") && !node.parentElement?.closest("pre, code, .katex")) {
+    if ((node.data.includes("$$$") || noteMath && node.data.includes("$")) && !node.parentElement?.closest("pre, code, .katex")) {
       textNodes.push(node);
     }
   }
 
   for (const node of textNodes) {
     const source = node.data;
-    const pattern = /\$\$\$([\s\S]+?)\$\$\$/g;
+    const pattern = noteMath ? /\$\$([\s\S]+?)\$\$|(?<![\\$])\$(?!\$)([^\n$]+?)\$(?!\$)/g : /\$\$\$([\s\S]+?)\$\$\$/g;
     const fragment = document.createDocumentFragment();
     let cursor = 0;
     let rendered = false;
@@ -3712,8 +3720,8 @@ function renderCodeforcesMath(document: Document): void {
       fragment.append(source.slice(cursor, start));
       const formula = document.createElement("span");
       formula.className = "codeforces-math";
-      formula.innerHTML = katex.renderToString(match[1], {
-        displayMode: source.trim() === match[0],
+      formula.innerHTML = katex.renderToString(match[1] ?? match[2], {
+        displayMode: noteMath ? match[0].startsWith("$$") : source.trim() === match[0],
         strict: "ignore",
         throwOnError: false,
         trust: false,

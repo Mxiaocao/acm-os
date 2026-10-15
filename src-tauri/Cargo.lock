@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acm-os"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acm-os-application",
  "acm-os-domain",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "acm-os-application"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acm-os-domain",
  "chrono",
@@ -29,14 +29,14 @@ dependencies = [
 
 [[package]]
 name = "acm-os-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "acm-os-infrastructure"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acm-os-application",
  "acm-os-domain",

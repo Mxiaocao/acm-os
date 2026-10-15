@@ -16941,6 +16941,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learning_calendar_counts_first_explicit_library_adds_in_local_time() {
+        use acm_os_application::ProblemLibraryPort;
+        use acm_os_application::learning_calendar::{calendar_month_range, LearningCalendarPort};
+        use acm_os_application::single_problem::{SingleProblemDraft, SingleProblemPort};
+        use chrono::TimeZone;
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let today = acm_os_domain::LocalDate::parse_iso("2026-10-09").unwrap();
+        let (start, end) = calendar_month_range(2026, 10).unwrap();
+        assert!(runtime.load_learning_calendar(start, end, today).await.unwrap().is_empty(),
+            "contest import and note creation alone are not problems done");
+        let draft = SingleProblemDraft::manual("Calendar manual", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", None, "Statement").unwrap();
+        let manual_id = runtime.import_single_problem(&draft).await.unwrap();
+        let pool = runtime._pool.as_ref().unwrap();
+        let contest_id: i64 = sqlx::query_scalar("SELECT problem_id FROM problem_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979' AND external_problem_key = 'A'")
+            .fetch_one(pool).await.unwrap();
+        runtime.add_problem_library_items(problem.contest(), &[contest_id]).await.unwrap();
+        let added = chrono::Local.with_ymd_and_hms(2026, 10, 8, 0, 30, 0).single().unwrap()
+            .with_timezone(&chrono::Utc).to_rfc3339();
+        sqlx::query("UPDATE problem_library_items SET added_at_utc = ?1").bind(&added).execute(pool).await.unwrap();
+        sqlx::query("UPDATE problems SET created_at_utc = '2026-09-01T00:00:00Z'").execute(pool).await.unwrap();
+        runtime.import_single_problem(&draft).await.unwrap();
+        runtime.add_problem_library_items(problem.contest(), &[contest_id]).await.unwrap();
+        let records = runtime.load_learning_calendar(start, end, today).await.unwrap();
+        assert_eq!(records.len(), 2, "manual and contest selections both count, reimport does not duplicate");
+        assert!(records.iter().all(|e| e.date == "2026-10-08" && e.kind == "library_added" && e.status == "completed"));
+        assert!(records.iter().any(|e| e.problem_id == manual_id && e.problem_title == "Calendar manual"));
+        // Soft deletion keeps historical work; migration dates must not invent work.
+        sqlx::query("UPDATE problems SET deleted_at_utc = '2026-10-09T00:00:00Z' WHERE id = ?1").bind(manual_id).execute(pool).await.unwrap();
+        assert_eq!(runtime.load_learning_calendar(start, end, today).await.unwrap().len(), 2);
+        sqlx::query("UPDATE problem_library_items SET origin = 'legacy' WHERE problem_id = ?1").bind(contest_id).execute(pool).await.unwrap();
+        assert_eq!(runtime.load_learning_calendar(start, end, today).await.unwrap().len(), 1);
+        let next_month = chrono::Local.with_ymd_and_hms(2026, 11, 1, 0, 30, 0).single().unwrap()
+            .with_timezone(&chrono::Utc).to_rfc3339();
+        sqlx::query("UPDATE problem_library_items SET added_at_utc = ?1 WHERE problem_id = ?2").bind(next_month).bind(manual_id).execute(pool).await.unwrap();
+        assert!(runtime.load_learning_calendar(start, end, today).await.unwrap().is_empty());
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        let (start, end) = calendar_month_range(2026, 11).unwrap();
+        let records = restarted.load_learning_calendar(start, end, today).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].date, "2026-11-01");
+        assert_eq!(records[0].problem_id, manual_id);
+    }
+
+    #[tokio::test]
     async fn learning_calendar_reads_history_and_next_due_without_mutating_plans() {
         use acm_os_application::learning_calendar::{calendar_month_range, LearningCalendarPort};
         use chrono::TimeZone;

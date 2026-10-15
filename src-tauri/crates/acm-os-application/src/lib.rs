@@ -2692,9 +2692,20 @@ pub struct PersonalNoteBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProblemMarkdownProjection {
     pub content_digest: String,
+    pub introduction_html: String,
+    pub document_sections: Vec<MarkdownDocumentSection>,
     pub known_sections: Vec<KnownMarkdownSection>,
     pub solution_routes: Vec<SolutionRoute>,
     pub warnings: Vec<MarkdownParseWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownDocumentSection {
+    pub name: String,
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub content_markdown: String,
+    pub content_html: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2709,6 +2720,8 @@ pub struct SolutionRoute {
     pub name: String,
     pub start_offset: usize,
     pub end_offset: usize,
+    pub content_markdown: String,
+    pub content_html: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -39,6 +39,7 @@
 .calendar-detail li { border-bottom: 1px solid var(--line); }
 .calendar-problem-link { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; width: 100%; align-items: center; gap: 16px; padding: 16px 8px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .calendar-problem-link:hover { background: var(--surface-muted); }
+.calendar-problem-link { text-decoration: none; }
 .calendar-problem-number { color: var(--ink-muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
 .calendar-problem-main { display: flex; min-width: 0; flex-direction: column; gap: 5px; overflow-wrap: anywhere; }
 .calendar-problem-main strong { font-size: .95rem; font-weight: 600; }
