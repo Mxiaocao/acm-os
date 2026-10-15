@@ -4,13 +4,13 @@
 
 ## 1. 当前状态
 
-- 2026-10-15 正在准备 GitHub v0.1.1 发布：应用、Rust workspace 包和对应锁文件版本已同步为 0.1.1，pnpm 锁文件不记录根项目版本且本轮依赖声明未变；本次包括月历、笔记阅读与 Prompt 改进。公开发布状态仍以 GitHub 实际结果为准，不能将本机更新等同于 Release 发布。
+- 2026-10-15 已公开发布 GitHub v0.1.1 并确认为 latest，包含月历做题记录、笔记阅读与 Prompt 改进。应用、Rust workspace 包和对应锁文件版本均为 0.1.1；pnpm 锁文件无根项目版本字段且本轮依赖声明未变。Windows x64 安装包、免安装 ZIP、SHA-256 校验文件均已上传并核验服务端大小和摘要，v0.1.0 原附件保持不变。
 - 2026-10-15 月历优化已正式应用到 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe`。正常关闭旧程序失败后，用户明确要求关闭，随后结束旧进程、替换并重新启动；安装文件与本次 release 构建 SHA-256 一致：`aa76e40c38c43e965e67633de2bf196aaf456471be6b3c98bf2e9f5b0823bcfc`。启动进程响应正常，WebView 显示“今日 · ACM-OS”。替换前备份位于 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-15-before-calendar-update/acm-os.exe`。本轮未修改工作区数据库或个人 Markdown，未更新 GitHub Release。
 - 项目：面向算法竞赛和日常刷题的 Windows 桌面学习工作台。
 - 核心流程：比赛 → 赛后补题 → 个人题解 → 冷启动复习 → 长期复习；通过 Obsidian 管理 Markdown 题解与知识笔记。
 - 仓库：[Mxiaocao/acm-os](https://github.com/Mxiaocao/acm-os)，默认分支 `main`。
-- 已发布：[v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件。
-- 发布二进制对应 `27725d16506d9ea6d51262eae3fb214997e6879d`；发布后的完整项目介绍提交为 `712a9c6`。后续文档提交不改变已发布二进制和标签。
+- 最新发布：[v0.1.1](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.1)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件；构建源码与标签对应 `5e881dde9bccef6c639a0916e585eb46586fff1a`。发布后的记忆与日志提交不改变二进制或标签。本机当前仍是稍早应用的 0.1.0 版本号月历构建，不应与公开 v0.1.1 二进制混淆。
+- 历史 [v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0) 二进制对应 `27725d16506d9ea6d51262eae3fb214997e6879d`；发布后的完整项目介绍提交为 `712a9c6`，原标签与附件未改动。
 - 安装包尚未进行 Windows 代码签名；当前没有产品自动更新插件。
 - 2026-10-14 已将笔记改动的本地 release 构建应用到 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 并启动；本机程序 SHA-256 为 `b8c07f5ea1b33cb34c5aa462413aeeb1aa0fdc436465fd3de5a16a4201bbcd07`。版本号仍为 0.1.0，本次没有更新 GitHub Release 附件或标签。原程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-14-before-note-update/acm-os.exe`。
 - 本地开发路径曾为 `E:/03-Projects/acm-os/acm-os`。本文的源码链接采用仓库相对路径，便于其他环境使用。
@@ -82,10 +82,10 @@
 
 ## 6. 验证记录与常用命令
 
-2026-10-15 v0.1.1 发布准备的本次实际验证：`npm ci` 通过，随后以 0.1.1 包版本执行完整 Rust workspace tests 通过（398 项通过、两个真实网络用例忽略）；完整 DOM 86 项、样式/可访问性/路由/日期 27 项、边界 5 项及静态检查通过；npm 全量依赖审计零漏洞。验证日志在忽略目录 `output/release-v0.1.1/`，不是引用历史通过结果。真实 Codeforces 网络、Obsidian 人工联动及完整桌面 E2E 未执行。
+2026-10-15 v0.1.1 发布的本次实际验证：`npm ci` 通过，随后以 0.1.1 包版本执行完整 Rust workspace tests 通过（398 项通过、两个真实网络用例忽略）；完整 DOM 86 项、样式/可访问性/路由/日期 27 项、边界 5 项及静态检查通过；npm 全量依赖审计零漏洞。前端构建、Tauri release 编译和 NSIS 打包通过；程序资源版本为 0.1.1，ZIP 中程序与构建 SHA-256 一致。GitHub 已公开为 latest，三个附件的服务器大小与 SHA-256 均匹配本地；旧 v0.1.0 附件也已复核未变。验证日志在忽略目录 `output/release-v0.1.1/`，不是引用历史通过结果。真实 Codeforces 网络、Obsidian 人工联动及完整桌面 E2E 未执行。
 2026-10-15 月历做题体验这一轮实际验证：前端 `npm run build` 通过；完整 DOM 86 项通过（扩展月历用例覆盖纯入库显示、同日同题合并、跨日分别计数、题解链接与路由）；Infrastructure 按 `learning_calendar` 筛选的 2 项 Rust 测试通过，覆盖手动题/比赛选题入库、重复入库、本地凌晨日期转换、月份边界、重启、软删除历史、迁移成员排除及原有学习/复习只读查询；边界测试 5 项及静态检查通过；可访问性、视觉样式和日期测试共 20 项通过。首次 workspace 筛选测试因新增测试缺少 trait 导入而编译失败，补齐后按 Infrastructure 范围重跑通过；未重跑完整 Rust workspace、真实桌面 E2E、Obsidian 人工联动或 release 构建，未替换本机安装程序。
 
-最近一次发布验证：2026-10-13。
+以下为 v0.1.0 的历史发布验证：2026-10-13；最新 v0.1.1 验证见上文。
 
 | 检查 | 当次结果 |
 |---|---|
@@ -141,11 +141,21 @@ npm run tauri -- build --bundles nsis
 | `ACM-OS_0.1.0_x64-setup.exe` | `8c2d292c49863f8f92d8c9913162487e8ff72bcdd079e009cff67437bb4e6594` |
 | `ACM-OS_0.1.0_windows-x64_portable.zip` | `4be0e625558181dc6d69d2193d5ca8afe765b0c79e0f67071eaf1678f69fc8ee` |
 
+### v0.1.1 附件记录
+
+构建来源 `5e881dde9bccef6c639a0916e585eb46586fff1a`；release 程序 SHA-256 为 `23ee3d624c730c29e5bd916c4c7cf47007aa98e786a362a39f9f9dea0529e9fa`。
+
+| 文件 | SHA-256 |
+|---|---|
+| `ACM-OS_0.1.1_x64-setup.exe` | `a14020c26f7c92d16e1e60c73fd9bba68578d1a0b5ab632eb57ab940c533a7c5` |
+| `ACM-OS_0.1.1_windows-x64_portable.zip` | `e05340e2325d1e2452dd9ae3f12e18c1d22f3c1be4a0e30813836808697d4c9d` |
+| `SHA256SUMS.txt` | `483ee9f3632f5020f4d5409f2234905858c395826394aeb0d33460fd44164468` |
+
 ## 8. 文档导航和更新方式
 
 - [README](README.md)：面向用户的完整项目介绍与使用方式。
 - [开发记录](docs/DEVELOPMENT_LOG.md)：已确认的变化、关键取舍与发布经过。
-- [发布说明](docs/RELEASE_NOTES_v0.1.0.md)：当前公开 Release 的产品说明。
+- [v0.1.1 发布说明](docs/RELEASE_NOTES_v0.1.1.md)：当前公开 Release；[v0.1.0 发布说明](docs/RELEASE_NOTES_v0.1.0.md) 保留历史产品说明。
 - [架构边界](docs/architecture-boundaries.md)：分层原则；执行检查以当前脚本为准。
 - [旧实现审计](docs/ACM_OS_CURRENT_IMPLEMENTATION.md)：2026-09-22 历史快照，保留供追溯；其中单题导入、搜索、月历和未发布等结论已经过时。
 - [Vault 契约](docs/R6_VAULT_MANAGER_CONTRACT.md)、[个人题库实现报告](docs/CONTEST_PROBLEM_LIBRARY_IMPLEMENTATION_REPORT.md)：对应模块的历史契约和实现背景，需要结合当前源码阅读。
