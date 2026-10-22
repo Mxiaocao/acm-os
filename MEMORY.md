@@ -4,7 +4,9 @@
 
 ## 1. 当前状态
 
-- 2026-10-22 v0.1.2 已完成发布准备并应用到本机。应用、npm/Cargo 锁文件和 Rust workspace 包统一为 0.1.2；Vite 更新为兼容补丁 8.2.4，npm 与 pnpm 锁文件同步。最终 release 程序及 NSIS 安装包构建通过，程序 SHA-256：`3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`。本机 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 与构建一致，版本资源 0.1.2，旧程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-22-before-v0.1.2/acm-os.exe`，旧哈希为 `ed0cc6118dca6382751c3196eda4b9ef73c4dd844a3b302128e10caef3848e00`。替换前旧程序已退出，无需强制结束。启动响应正常，UI Automation 读取到“今日 · ACM-OS”。当前工作区正式迁移 37→38，新增备份 `schema-37-to-38-1792664686611217900.sqlite3` 存在且只读验证结构 37 和完整性正常；升级后完整性正常，题目 15、比赛 1、题库成员 8、笔记绑定 2、复习尝试 0、参赛记录 0 均保持一致，日期覆盖表 0，未补造历史。GitHub 发布结果另记。
+- 2026-10-22 已公开发布 [v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2) 并独立查询确认为 latest。应用和 Rust workspace 版本为 0.1.2；标签对应构建来源 `f7704201f3983fd215dfbb67d96def38952f42cf`，安装包、免安装 ZIP 和 SHA256SUMS 三个附件均已按服务器大小、uploaded 状态和 SHA-256 与本地核对。旧 v0.1.0/v0.1.1 标签和附件保持原样。Windows x64 安装包 SHA-256：`402ec767aa6fd9b67c4aca015caacabe1666d2241df84cd35d3fc1c8486fe883`；免安装 ZIP：`16625ee073a85fcde8b86bf9e2e02d724776acecc84bdbf84d328a1caa7d8672`。本机已安装并启动同一构建，当前工作区结构 38。后续仅补发布记忆与日志，不改变标签或二进制来源。
+
+- 2026-10-22 v0.1.2 已完成发布准备并应用到本机。应用、npm/Cargo 锁文件和 Rust workspace 包统一为 0.1.2；Vite 更新为兼容补丁 8.2.4，npm 与 pnpm 锁文件同步。最终 release 程序及 NSIS 安装包构建通过，程序 SHA-256：`3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`。本机 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 与构建一致，版本资源 0.1.2，旧程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-22-before-v0.1.2/acm-os.exe`，旧哈希为 `ed0cc6118dca6382751c3196eda4b9ef73c4dd844a3b302128e10caef3848e00`。替换前旧程序已退出，无需强制结束。启动响应正常，UI Automation 读取到“今日 · ACM-OS”。当前工作区正式迁移 37→38，新增备份 `schema-37-to-38-1792664686611217900.sqlite3` 存在且只读验证结构 37 和完整性正常；升级后完整性正常，题目 15、比赛 1、题库成员 8、笔记绑定 2、复习尝试 0、参赛记录 0 均保持一致，日期覆盖表 0，未补造历史。GitHub v0.1.2 已公开，结果见本节最新发布记录。
 
 - 2026-10-22 按用户验收后要求完成正式 release 构建：`npm run tauri -- build --no-bundle` 成功，原始程序为 `src-tauri/target/release/acm-os.exe`，交付副本为 `output/completion-release/ACM-OS.exe`，两者 SHA-256 一致：`b9cbf5fe5aa300cbfb6bf841cf24d75e3a2be9e51d8e7876a9a7037602f722e3`。资源产品名 ACM-OS、文件版本 0.1.1、大小 37,593,088 字节；同目录含 README、SHA256SUMS 和验证 JSON。本轮只重新执行前端与正式 release 构建、资源信息和文件一致性检查、Git diff 检查，没有重跑此前 404/89 项测试，也未称为完整桌面 E2E。未启动正式构建、未替换安装目录程序、未修改真实工作区或发布 GitHub；安装 EXE 只读核对仍为 `ed0cc6118dca6382751c3196eda4b9ef73c4dd844a3b302128e10caef3848e00`。构建日志在 `output/completion-release-build.log`。
 
@@ -18,7 +20,7 @@
 - 项目：面向算法竞赛和日常刷题的 Windows 桌面学习工作台。
 - 核心流程：比赛 → 赛后补题 → 个人题解 → 冷启动复习 → 长期复习；通过 Obsidian 管理 Markdown 题解与知识笔记。
 - 仓库：[Mxiaocao/acm-os](https://github.com/Mxiaocao/acm-os)，默认分支 `main`。
-- 最新发布：[v0.1.1](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.1)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件；构建源码与标签对应 `5e881dde9bccef6c639a0916e585eb46586fff1a`。发布后的记忆与日志提交不改变二进制或标签。本机当前已安装 0.1.2、数据库结构 38；公开 v0.1.1 附件保留原样。
+- 最新发布：[v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件；构建源码与标签对应 `f7704201f3983fd215dfbb67d96def38952f42cf`。本机安装版本 0.1.2、当前工作区结构 38，与发布构建一致。发布后的文档提交不改变二进制或标签，旧 v0.1.1 附件保留原样。
 - 历史 [v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0) 二进制对应 `27725d16506d9ea6d51262eae3fb214997e6879d`；发布后的完整项目介绍提交为 `712a9c6`，原标签与附件未改动。
 - 安装包尚未进行 Windows 代码签名；当前没有产品自动更新插件。
 - 2026-10-14 已将笔记改动的本地 release 构建应用到 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 并启动；本机程序 SHA-256 为 `b8c07f5ea1b33cb34c5aa462413aeeb1aa0fdc436465fd3de5a16a4201bbcd07`。版本号仍为 0.1.0，本次没有更新 GitHub Release 附件或标签。原程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-14-before-note-update/acm-os.exe`。

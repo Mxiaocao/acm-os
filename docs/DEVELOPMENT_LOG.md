@@ -2,6 +2,12 @@
 
 本文记录已完成的变化和已确认的取舍。功能当前状态以 [项目记忆](../MEMORY.md) 和源码为准。
 
+## 2026-10-22：v0.1.2 已公开发布
+
+- 2026-10-22 已公开发布 [v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2) 并独立查询确认为 latest。应用和 Rust workspace 版本为 0.1.2；标签对应构建来源 `f7704201f3983fd215dfbb67d96def38952f42cf`，安装包、免安装 ZIP 和 SHA256SUMS 三个附件均已按服务器大小、uploaded 状态和 SHA-256 与本地核对。旧 v0.1.0/v0.1.1 标签和附件保持原样。Windows x64 安装包 SHA-256：`402ec767aa6fd9b67c4aca015caacabe1666d2241df84cd35d3fc1c8486fe883`；免安装 ZIP：`16625ee073a85fcde8b86bf9e2e02d724776acecc84bdbf84d328a1caa7d8672`。本机已安装并启动同一构建，当前工作区结构 38。后续仅补发布记忆与日志，不改变标签或二进制来源。
+- ZIP 内仅包含程序、README 和 VERSION，ZIP 内程序与构建、本机安装程序 SHA-256 一致（`3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`）。本轮未把工作区、个人 Markdown、预览数据、日志或本地打包工具放入附件。
+- ZIP 上传连接超时后保留草稿，清理本次草稿中的失败占位，改用 Node HTTPS 上传；三个附件均校验后再公开，随后重新读取 release/latest/assets 验证结果。旧版本附件上传状态和摘要未变。发布记录保存在忽略目录 `output/release-v0.1.2/published-release.json`；源码、标签已推送，正式发布后的补充文档不移动标签。
+
 ## 2026-10-22：v0.1.2 发布准备与本机更新
 
 - 2026-10-22 v0.1.2 已完成发布准备并应用到本机。应用、npm/Cargo 锁文件和 Rust workspace 包统一为 0.1.2；Vite 更新为兼容补丁 8.2.4，npm 与 pnpm 锁文件同步。最终 release 程序及 NSIS 安装包构建通过，程序 SHA-256：`3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`。本机 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 与构建一致，版本资源 0.1.2，旧程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-22-before-v0.1.2/acm-os.exe`，旧哈希为 `ed0cc6118dca6382751c3196eda4b9ef73c4dd844a3b302128e10caef3848e00`。替换前旧程序已退出，无需强制结束。启动响应正常，UI Automation 读取到“今日 · ACM-OS”。当前工作区正式迁移 37→38，新增备份 `schema-37-to-38-1792664686611217900.sqlite3` 存在且只读验证结构 37 和完整性正常；升级后完整性正常，题目 15、比赛 1、题库成员 8、笔记绑定 2、复习尝试 0、参赛记录 0 均保持一致，日期覆盖表 0，未补造历史。GitHub 发布结果另记。
