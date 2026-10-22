@@ -1,4 +1,5 @@
 mod learning_calendar;
+mod contest_participation;
 mod single_problem;
 
 const MAX_EXACT_REWARD_AMOUNT: i64 = 9_007_199_254_740_991;
@@ -7725,11 +7726,17 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
         })
     }
 
-    async fn add_problem_library_items(
+    async fn add_problem_library_items_on_date(
         &self,
         contest: &acm_os_domain::CodeforcesContestIdentity,
         problem_ids: &[i64],
+        completion_date: Option<acm_os_domain::LocalDate>,
     ) -> Result<(), ContestReadError> {
+        let today = crate::current_local_date().map_err(|_| ContestReadError::Unavailable)?;
+        if let Some(date) = completion_date {
+            acm_os_application::learning_calendar::parse_completion_date(&date.to_iso_string(), today)
+                .map_err(|_| ContestReadError::NotFound)?;
+        }
         let preview = self.preview_problem_library(contest).await?;
         let mut has_new_member = false;
         for id in problem_ids {
@@ -7743,7 +7750,6 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
         if !has_new_member {
             return Ok(());
         }
-        let today = crate::current_local_date().map_err(|_| ContestReadError::Unavailable)?;
         self.ensure_daily_backup(today)
             .await
             .map_err(|_| ContestReadError::Unavailable)?;
@@ -7772,7 +7778,7 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
             if !belongs {
                 return Err(ContestReadError::NotFound);
             }
-            sqlx::query(
+            let member = sqlx::query(
                 "INSERT INTO problem_library_items (problem_id, origin) VALUES (?1, 'explicit') \
                  ON CONFLICT(problem_id) DO NOTHING",
             )
@@ -7780,6 +7786,12 @@ impl acm_os_application::ProblemLibraryPort for DatabaseRuntime {
             .execute(&mut *tx)
             .await
             .map_err(|_| ContestReadError::Unavailable)?;
+            if member.rows_affected() > 0 {
+                if let Some(date) = completion_date {
+                    sqlx::query("INSERT INTO library_completion_dates (problem_id, local_date) VALUES (?1, ?2)")
+                        .bind(problem_id).bind(date.to_iso_string()).execute(&mut *tx).await.map_err(|_| ContestReadError::Unavailable)?;
+                }
+            }
         }
         tx.commit().await.map_err(|_| ContestReadError::Unavailable)
     }
@@ -11390,6 +11402,8 @@ async fn validate_schema_contract(
             | 34
             | 35
             | 36
+            | 37
+            | 38
     ) {
         return Err(StartupRecoveryReason::UnsupportedSchema {
             found: schema_version,
@@ -11542,6 +11556,12 @@ async fn validate_schema_contract(
     }
     if schema_version >= 33 {
         validate_custom_reward_redemption_contract(pool).await?;
+    }
+    if schema_version >= 37 {
+        contest_participation::validate_contract(pool).await?;
+    }
+    if schema_version >= 38 {
+        learning_calendar::validate_contract(pool).await?;
     }
     if schema_version >= 35 {
         validate_table_columns(
@@ -12329,6 +12349,14 @@ fn expected_schema_objects(schema_version: i64) -> Vec<(String, String, String)>
             "problem_library_items".to_owned(),
             "problem_library_items".to_owned(),
         ));
+        expected_objects.sort();
+    }
+    if schema_version >= 37 {
+        expected_objects.push(("table".to_owned(), "contest_participations".to_owned(), "contest_participations".to_owned()));
+        expected_objects.sort();
+    }
+    if schema_version >= 38 {
+        expected_objects.push(("table".to_owned(), "library_completion_dates".to_owned(), "library_completion_dates".to_owned()));
         expected_objects.sort();
     }
     expected_objects
@@ -13323,6 +13351,8 @@ async fn validate_table_columns(
         "contest_series" => "PRAGMA table_xinfo('contest_series')",
         "contest_years" => "PRAGMA table_xinfo('contest_years')",
         "problem_library_items" => "PRAGMA table_xinfo('problem_library_items')",
+        "contest_participations" => "PRAGMA table_xinfo('contest_participations')",
+        "library_completion_dates" => "PRAGMA table_xinfo('library_completion_dates')",
         "contest_placements" => "PRAGMA table_xinfo('contest_placements')",
         "contest_external_identities" => "PRAGMA table_xinfo('contest_external_identities')",
         "problem_external_identities" => "PRAGMA table_xinfo('problem_external_identities')",
@@ -13902,7 +13932,7 @@ mod tests {
 
     #[test]
     fn production_migrator_embeds_the_special_version() {
-        assert_eq!(supported_schema_version(), 36);
+        assert_eq!(supported_schema_version(), 38);
         assert!(MIGRATOR.version_exists(SPECIAL_FK_OFF_MIGRATION_VERSION));
     }
 
@@ -14110,11 +14140,11 @@ mod tests {
             inspect_schema_version(&runtime_pool)
                 .await
                 .expect("version"),
-            36
+            38
         );
-        validate_schema_contract(&runtime_pool, 36)
+        validate_schema_contract(&runtime_pool, 38)
             .await
-            .expect("schema 36 contract");
+            .expect("schema 38 contract");
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM problem_external_identities \
@@ -14130,7 +14160,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
     }
 
@@ -14363,7 +14393,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let mut draft = contest_draft();
         draft.slots = ["A", "B", "C", "D", "E1", "E2", "F"]
@@ -14547,14 +14577,14 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         runtime.persist_manifest(&contest_draft()).await.unwrap();
         let pool = runtime._pool.as_ref().unwrap().clone();
-        sqlx::raw_sql("ALTER TABLE problems DROP COLUMN deleted_at_utc; DROP TABLE problem_library_items; DELETE FROM _sqlx_migrations WHERE version >= 35; UPDATE app_metadata SET schema_generation = 34;").execute(&pool).await.unwrap();
+        sqlx::raw_sql("ALTER TABLE problems DROP COLUMN deleted_at_utc; DROP TABLE library_completion_dates; DROP TABLE contest_participations; DROP TABLE problem_library_items; DELETE FROM _sqlx_migrations WHERE version >= 35; UPDATE app_metadata SET schema_generation = 34;").execute(&pool).await.unwrap();
         validate_schema_contract(&pool, 34).await.unwrap();
         pool.close().await;
         drop(runtime);
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         assert_eq!(upgraded.list_lightweight_problems().await.unwrap().len(), 2);
         let pool = upgraded._pool.as_ref().unwrap();
@@ -14574,7 +14604,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        validate_schema_contract(pool, 36).await.unwrap();
+        validate_schema_contract(pool, 38).await.unwrap();
         pool.close().await;
         drop(upgraded);
         let restarted = start_database(directory.path()).await;
@@ -14626,7 +14656,7 @@ mod tests {
         pool.close().await;
         drop(runtime);
         let restarted = start_database(directory.path()).await;
-        assert_eq!(restarted.status(), &StartupGateStatus::Ready { schema_version: 36 });
+        assert_eq!(restarted.status(), &StartupGateStatus::Ready { schema_version: 38 });
         assert!(restarted.list_lightweight_problems().await.unwrap().is_empty());
         assert_eq!(restarted.contest_detail(&draft.contest).await.unwrap(), contest_before);
         assert_eq!(sqlx::query_scalar::<_, String>("SELECT deleted_at_utc FROM problems WHERE id = ?1").bind(id).fetch_one(restarted._pool.as_ref().unwrap()).await.unwrap(), timestamp);
@@ -14638,15 +14668,15 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         runtime.persist_manifest(&contest_draft()).await.unwrap();
         let pool = runtime._pool.as_ref().unwrap();
-        sqlx::raw_sql("ALTER TABLE problems DROP COLUMN deleted_at_utc; DELETE FROM _sqlx_migrations WHERE version = 36; UPDATE app_metadata SET schema_generation = 35;").execute(pool).await.unwrap();
+        sqlx::raw_sql("DROP TABLE library_completion_dates; DROP TABLE contest_participations; ALTER TABLE problems DROP COLUMN deleted_at_utc; DELETE FROM _sqlx_migrations WHERE version >= 36; UPDATE app_metadata SET schema_generation = 35;").execute(pool).await.unwrap();
         validate_schema_contract(pool, 35).await.unwrap();
         pool.close().await;
         drop(runtime);
         let upgraded = start_database(directory.path()).await;
-        assert_eq!(upgraded.status(), &StartupGateStatus::Ready { schema_version: 36 });
+        assert_eq!(upgraded.status(), &StartupGateStatus::Ready { schema_version: 38 });
         let pool = upgraded._pool.as_ref().unwrap();
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM problems WHERE deleted_at_utc IS NULL").fetch_one(pool).await.unwrap(), 2);
-        validate_schema_contract(pool, 36).await.unwrap();
+        validate_schema_contract(pool, 38).await.unwrap();
     }
 
     fn contest_draft() -> ContestImportDraft {
@@ -16850,13 +16880,54 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         configure_temporary_workspace(&runtime, &directory).await;
         let mut draft = SingleProblemDraft::manual("Exercise", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ab", None, "Statement").unwrap();
+        draft.completion_date = Some(acm_os_domain::LocalDate::parse_iso("2026-09-30").unwrap());
         draft.assets.push(acm_os_application::StatementAssetDraft { local_ref: "asset-one".into(), media_type: "image/png".into(), bytes: vec![] });
         assert!(runtime.import_single_problem(&draft).await.is_err());
-        let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM problems) + (SELECT COUNT(*) FROM problem_external_identities) + (SELECT COUNT(*) FROM problem_library_items) + (SELECT COUNT(*) FROM problem_learning_states) + (SELECT COUNT(*) FROM problem_statement_snapshots)").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM problems) + (SELECT COUNT(*) FROM problem_external_identities) + (SELECT COUNT(*) FROM problem_library_items) + (SELECT COUNT(*) FROM problem_learning_states) + (SELECT COUNT(*) FROM problem_statement_snapshots) + (SELECT COUNT(*) FROM library_completion_dates)").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
         assert_eq!(count, 0);
         draft.assets.clear();
         runtime.import_single_problem(&draft).await.unwrap();
         assert_eq!(runtime.independent_problems().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn library_import_completion_dates_are_atomic_and_preserve_existing_dates() {
+        use acm_os_application::{ProblemLibraryPort, single_problem::{SingleProblemDraft, SingleProblemPort}};
+        use acm_os_application::learning_calendar::LearningCalendarPort;
+        use acm_os_domain::LocalDate;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        let date = LocalDate::parse_iso("2026-09-30").unwrap();
+        let other = LocalDate::parse_iso("2026-10-01").unwrap();
+        let mut single = SingleProblemDraft::manual("Late book exercise", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ad", None, "Statement").unwrap();
+        single.completion_date = Some(LocalDate::parse_iso("9998-12-31").unwrap());
+        assert!(runtime.import_single_problem(&single).await.is_err());
+        assert!(runtime.independent_problems().await.unwrap().is_empty());
+        single.completion_date = Some(date);
+        let id = runtime.import_single_problem(&single).await.unwrap();
+        single.completion_date = Some(other);
+        assert_eq!(runtime.import_single_problem(&single).await.unwrap(), id);
+        assert_eq!(runtime.library_completion_dates().await.unwrap()[0].date.as_deref(), Some("2026-09-30"));
+        let draft = contest_draft();
+        runtime.persist_manifest(&draft).await.unwrap();
+        let preview = runtime.preview_problem_library(&draft.contest).await.unwrap();
+        let ids = [preview.problems[0].problem_id, preview.problems[1].problem_id];
+        let pool = runtime._pool.as_ref().unwrap();
+        // Fail the second date insert after the first member and date were inserted.
+        sqlx::raw_sql("CREATE TRIGGER reject_completion BEFORE INSERT ON library_completion_dates WHEN (SELECT COUNT(*) FROM library_completion_dates) >= 2 BEGIN SELECT RAISE(ABORT, 'test failure'); END").execute(pool).await.unwrap();
+        assert!(runtime.add_problem_library_items_on_date(&draft.contest, &ids, Some(date)).await.is_err());
+        assert!(runtime.preview_problem_library(&draft.contest).await.unwrap().problems.iter().all(|p| !p.already_added));
+        assert_eq!(runtime.library_completion_dates().await.unwrap().len(), 1, "the failed batch leaves neither membership nor dates");
+        sqlx::query("DROP TRIGGER reject_completion").execute(pool).await.unwrap();
+        assert!(runtime.add_problem_library_items_on_date(&draft.contest, &ids, Some(LocalDate::parse_iso("9998-12-31").unwrap())).await.is_err());
+        runtime.add_problem_library_items_on_date(&draft.contest, &ids, Some(date)).await.unwrap();
+        runtime.add_problem_library_items_on_date(&draft.contest, &[ids[0], ids[0], ids[1]], Some(other)).await.unwrap();
+        let rows = runtime.library_completion_dates().await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.date.as_deref() == Some("2026-09-30")));
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(restarted.library_completion_dates().await.unwrap(), rows);
     }
 
     #[tokio::test]
@@ -16938,6 +17009,149 @@ mod tests {
         let detail = restarted.canonical_problem_detail(&id.to_string()).await.unwrap();
         assert_eq!(detail.identity_type, acm_os_application::ProblemIdentityType::Personal);
         assert_eq!(detail.lifecycle.learning_status, acm_os_domain::LearningStatus::WaitingColdStart);
+    }
+
+    #[tokio::test]
+    async fn contest_participation_history_is_independent_idempotent_and_survives_deletion() {
+        use acm_os_application::contest_participation::{ContestParticipationPort, ParticipationError, save_participation};
+        use acm_os_application::ContestManagementPort;
+        use acm_os_domain::contest_participation::ParticipationFacts;
+        let (directory, runtime, _vault, _problems, problem) = personal_note_fixture().await;
+        let (start, end) = acm_os_application::learning_calendar::calendar_month_range(2026, 10).unwrap();
+        assert!(runtime.calendar_contest_participations(start, end).await.unwrap().is_empty());
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut facts = ParticipationFacts { kind: "live".into(), local_date: "2026-10-14".into(), local_time: "23:30".into(), accepted_count: Some(0), total_count: Some(7) };
+        save_participation(&runtime, problem.contest(), &id, &facts).await.unwrap();
+        save_participation(&runtime, problem.contest(), &id, &facts).await.unwrap();
+        let duplicate = uuid::Uuid::now_v7().to_string();
+        assert_eq!(save_participation(&runtime, problem.contest(), &duplicate, &facts).await, Err(ParticipationError::Duplicate));
+        facts.kind = "virtual".into(); facts.local_date = "2026-10-15".into(); facts.accepted_count = None;
+        let vp_id = uuid::Uuid::now_v7().to_string();
+        save_participation(&runtime, problem.contest(), &vp_id, &facts).await.unwrap();
+        facts.local_time = "18:00".into();
+        let repeat_id = uuid::Uuid::now_v7().to_string();
+        save_participation(&runtime, problem.contest(), &repeat_id, &facts).await.unwrap();
+        sqlx::query("INSERT INTO contest_external_identities (contest_id, platform, external_contest_key) SELECT contest_id, 'codeforces', 'alias-round' FROM contest_external_identities WHERE platform = 'codeforces' AND external_contest_key = '1979'")
+            .execute(runtime._pool.as_ref().unwrap()).await.unwrap();
+        let records = runtime.calendar_contest_participations(start, end).await.unwrap();
+        assert_eq!(records.len(), 3, "external aliases must not multiply participation counts");
+        assert_eq!(records[0].facts.local_date, "2026-10-14", "cross-midnight participation belongs to its local start date");
+        assert_eq!(records[0].facts.accepted_count, Some(0));
+        assert_eq!(records.iter().filter(|r| r.facts.kind == "virtual").count(), 2);
+        let other = acm_os_domain::CodeforcesContestIdentity::new(2000).unwrap();
+        assert!(save_participation(&runtime, &other, &id, &facts).await.is_err());
+        facts.local_date = "2026-11-01".into();
+        save_participation(&runtime, problem.contest(), &repeat_id, &facts).await.unwrap();
+        assert_eq!(runtime.calendar_contest_participations(start, end).await.unwrap().len(), 2);
+        runtime.delete_contest_participation(problem.contest(), &vp_id).await.unwrap();
+        assert_eq!(runtime.list_contest_participations(problem.contest()).await.unwrap().len(), 2);
+        let before = runtime.contest_detail(problem.contest()).await.unwrap();
+        assert_eq!(before.facts_status, acm_os_application::ContestFactsStatus::Pending);
+        let plans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM today_plans").fetch_one(runtime._pool.as_ref().unwrap()).await.unwrap();
+        assert_eq!(plans, 0, "recording participation never generates a plan");
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(restarted.calendar_contest_participations(start, end).await.unwrap().len(), 1);
+        restarted.delete_contest(problem.contest()).await.unwrap();
+        let orphan = restarted.calendar_contest_participations(start, end).await.unwrap();
+        assert_eq!(orphan.len(), 1);
+        assert_eq!(orphan[0].contest_key, None);
+        assert_eq!(orphan[0].contest_title, before.title);
+        let (start, end) = acm_os_application::learning_calendar::calendar_month_range(2026, 11).unwrap();
+        assert_eq!(restarted.calendar_contest_participations(start, end).await.unwrap().len(), 1);
+        let independent_dir = TempDir::new().unwrap();
+        let independent = start_database(independent_dir.path()).await;
+        assert!(independent.calendar_contest_participations(start, end).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn contest_participation_migrates_schema_36_without_inventing_history() {
+        use acm_os_application::contest_participation::ContestParticipationPort;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        runtime.persist_manifest(&contest_draft()).await.unwrap();
+        let pool = runtime._pool.as_ref().unwrap();
+        sqlx::raw_sql("DROP TABLE library_completion_dates; DROP TABLE contest_participations; DELETE FROM _sqlx_migrations WHERE version >= 37; UPDATE app_metadata SET schema_generation = 36;").execute(pool).await.unwrap();
+        validate_schema_contract(pool, 36).await.unwrap();
+        pool.close().await; drop(runtime);
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(upgraded.status(), &StartupGateStatus::Ready { schema_version: 38 });
+        let (start, end) = acm_os_application::learning_calendar::calendar_month_range(2026, 10).unwrap();
+        assert!(upgraded.calendar_contest_participations(start, end).await.unwrap().is_empty());
+        let pool = upgraded._pool.as_ref().unwrap();
+        validate_schema_contract(pool, 38).await.unwrap();
+        sqlx::query("ALTER TABLE contest_participations RENAME COLUMN kind TO broken_kind").execute(pool).await.unwrap();
+        assert!(validate_schema_contract(pool, 38).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn learning_calendar_completion_dates_move_initial_work_and_preserve_other_facts() {
+        use acm_os_domain::LocalDate;
+        use acm_os_application::learning_calendar::{calendar_month_range, save_completion_date, CompletionDateError, LearningCalendarPort};
+        use acm_os_application::single_problem::{SingleProblemDraft, SingleProblemPort};
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        let draft = SingleProblemDraft::manual("Late entry", "", "018f0d8e-4a5b-7c6d-8e9f-0123456789ac", None, "Statement").unwrap();
+        let id = runtime.import_single_problem(&draft).await.unwrap();
+        let pool = runtime._pool.as_ref().unwrap();
+        sqlx::query("UPDATE problem_library_items SET added_at_utc = '2026-10-20T12:00:00Z'").execute(pool).await.unwrap();
+        let before: (String, String) = sqlx::query_as("SELECT p.created_at_utc, li.added_at_utc FROM problems p JOIN problem_library_items li ON li.problem_id = p.id WHERE p.id = ?1").bind(id).fetch_one(pool).await.unwrap();
+        let today = LocalDate::parse_iso("2026-10-22").unwrap();
+        for date in ["2026-02-30", "2026-10-23", "2026-1-01", "1899-12-31", ""] {
+            assert_eq!(save_completion_date(&runtime, id, date, today).await, Err(CompletionDateError::InvalidDate));
+        }
+        assert_eq!(save_completion_date(&runtime, i64::MAX, "2026-09-30", today).await, Err(CompletionDateError::NotFound));
+        for _ in 0..2 { save_completion_date(&runtime, id, "2026-09-30", today).await.unwrap(); }
+        assert_eq!(runtime.library_completion_dates().await.unwrap()[0].date.as_deref(), Some("2026-09-30"));
+        let (oct_start, oct_end) = calendar_month_range(2026, 10).unwrap();
+        assert!(runtime.load_learning_calendar(oct_start, oct_end, today).await.unwrap().is_empty());
+        let (sep_start, sep_end) = calendar_month_range(2026, 9).unwrap();
+        let rows = runtime.load_learning_calendar(sep_start, sep_end, today).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, "2026-09-30");
+        runtime.import_single_problem(&draft).await.unwrap();
+        let after: (String, String) = sqlx::query_as("SELECT p.created_at_utc, li.added_at_utc FROM problems p JOIN problem_library_items li ON li.problem_id = p.id WHERE p.id = ?1").bind(id).fetch_one(pool).await.unwrap();
+        assert_eq!(before, after, "changing completion must not rewrite import or library timestamps");
+        let plans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM today_plans").fetch_one(pool).await.unwrap();
+        assert_eq!(plans, 0);
+        // A legacy library member can explicitly supply a date without changing its origin.
+        sqlx::query("UPDATE problem_library_items SET origin = 'legacy'").execute(pool).await.unwrap();
+        assert_eq!(runtime.load_learning_calendar(sep_start, sep_end, today).await.unwrap().len(), 1);
+        save_completion_date(&runtime, id, "2026-10-01", today).await.unwrap();
+        assert!(runtime.load_learning_calendar(sep_start, sep_end, today).await.unwrap().is_empty());
+        drop(runtime);
+        let restarted = start_database(directory.path()).await;
+        assert_eq!(restarted.load_learning_calendar(oct_start, oct_end, today).await.unwrap()[0].date, "2026-10-01");
+        let other_dir = TempDir::new().unwrap();
+        let other = start_database(other_dir.path()).await;
+        assert!(other.library_completion_dates().await.unwrap().is_empty());
+        assert_eq!(save_completion_date(&other, id, "2026-10-01", today).await, Err(CompletionDateError::NotFound));
+        let pool = restarted._pool.as_ref().unwrap();
+        sqlx::query("UPDATE problems SET deleted_at_utc = '2026-10-22T00:00:00Z' WHERE id = ?1").bind(id).execute(pool).await.unwrap();
+        assert!(restarted.library_completion_dates().await.unwrap().is_empty());
+        assert_eq!(save_completion_date(&restarted, id, "2026-10-02", today).await, Err(CompletionDateError::NotFound));
+        assert_eq!(restarted.load_learning_calendar(oct_start, oct_end, today).await.unwrap().len(), 1, "soft deletion preserves history");
+    }
+
+    #[tokio::test]
+    async fn learning_calendar_completion_dates_migrate_37_without_guessing_history() {
+        use acm_os_application::learning_calendar::LearningCalendarPort;
+        let directory = TempDir::new().unwrap();
+        let runtime = start_database(directory.path()).await;
+        let pool = runtime._pool.as_ref().unwrap();
+        sqlx::raw_sql("DROP TABLE library_completion_dates; DELETE FROM _sqlx_migrations WHERE version = 38; UPDATE app_metadata SET schema_generation = 37;").execute(pool).await.unwrap();
+        validate_schema_contract(pool, 37).await.unwrap();
+        pool.close().await;
+        drop(runtime);
+        let upgraded = start_database(directory.path()).await;
+        assert_eq!(upgraded.status(), &StartupGateStatus::Ready { schema_version: 38 });
+        assert!(upgraded.library_completion_dates().await.unwrap().is_empty());
+        let pool = upgraded._pool.as_ref().unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM library_completion_dates").fetch_one(pool).await.unwrap();
+        assert_eq!(count, 0);
+        validate_schema_contract(pool, 38).await.unwrap();
+        sqlx::query("ALTER TABLE library_completion_dates RENAME COLUMN local_date TO broken_date").execute(pool).await.unwrap();
+        assert!(validate_schema_contract(pool, 38).await.is_err());
     }
 
     #[tokio::test]
@@ -17031,6 +17245,15 @@ mod tests {
         assert_eq!(count, 1, "calendar reads never generate plans");
         let status: String = sqlx::query_scalar("SELECT entry_status FROM today_plan_entries WHERE today_plan_id = ?1").bind(plan_id).fetch_one(pool).await.unwrap();
         assert_eq!(status, "completed");
+        // A late initial-completion record must not move actual study/review facts.
+        sqlx::query("INSERT INTO problem_library_items (problem_id, origin) VALUES (?1, 'explicit') ON CONFLICT DO NOTHING").bind(problem_id).execute(pool).await.unwrap();
+        acm_os_application::learning_calendar::save_completion_date(&runtime, problem_id, "2026-09-30", today).await.unwrap();
+        let (start, end) = calendar_month_range(2026, 10).unwrap();
+        let history = runtime.load_learning_calendar(start, end, today).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|e| e.date == "2026-10-08"));
+        assert!(history.iter().any(|e| e.kind == "study"));
+        assert!(history.iter().any(|e| e.kind == "early_check"));
     }
 
     #[tokio::test]
@@ -17512,8 +17735,8 @@ mod tests {
              ALTER TABLE _contests_schema_25 RENAME TO contests;\
              DROP TABLE problems;\
              ALTER TABLE _problems_schema_25 RENAME TO problems;\
-             DROP TABLE problem_library_items;\
-             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 36;\
+             DROP TABLE library_completion_dates; DROP TABLE contest_participations; DROP TABLE problem_library_items;\
+             DELETE FROM _sqlx_migrations WHERE version BETWEEN 26 AND 38;\
              UPDATE app_metadata SET schema_generation = 25 WHERE singleton = 1;",
         )
         .execute(&mut *transaction)
@@ -17714,23 +17937,23 @@ mod tests {
 
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = runtime._pool.as_ref().expect("ready database pool");
         let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
             .expect("migration ledger");
-        assert_eq!(ledger_count, 36);
+        assert_eq!(ledger_count, 38);
         let schema_generation: i64 =
             sqlx::query_scalar("SELECT schema_generation FROM app_metadata WHERE singleton = 1")
                 .fetch_one(pool)
                 .await
                 .expect("schema generation");
-        assert_eq!(schema_generation, 36);
-        validate_schema_contract(pool, 36)
+        assert_eq!(schema_generation, 38);
+        validate_schema_contract(pool, 38)
             .await
-            .expect("generation 36 schema contract");
+            .expect("generation 38 schema contract");
         verify_integrity(pool).await.expect("database integrity");
     }
 
@@ -17761,7 +17984,7 @@ mod tests {
                  COALESCE(year, 0), COALESCE(ordinal, 0) \
              ); \
              ALTER TABLE problems DROP COLUMN deleted_at_utc; \
-             DROP TABLE problem_library_items; \
+             DROP TABLE library_completion_dates; DROP TABLE contest_participations; DROP TABLE problem_library_items; \
              DELETE FROM _sqlx_migrations WHERE version >= 34; \
              UPDATE app_metadata SET schema_generation = 33 WHERE singleton = 1;",
         )
@@ -17814,12 +18037,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 36)
+        validate_schema_contract(pool, 38)
             .await
-            .expect("schema 36 contract");
+            .expect("schema 38 contract");
         let years: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
             "SELECT identities.external_contest_key, p.year_id, y.value \
              FROM contest_placements p \
@@ -17982,7 +18205,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
         let ids_after: (i64, i64, String, String) = sqlx::query_as(
@@ -18044,7 +18267,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("highest successful migration"),
-            36
+            38
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -18076,13 +18299,13 @@ mod tests {
                 .expect("integrity check"),
             "ok"
         );
-        validate_schema_contract(pool, 36)
+        validate_schema_contract(pool, 38)
             .await
-            .expect("schema 36 contract after migration");
+            .expect("schema 38 contract after migration");
         drop(upgraded);
         assert_eq!(
             start_database(directory.path()).await.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
     }
 
@@ -18379,7 +18602,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded database pool");
         let preserved: (String, String, String, String, String, String, String) = sqlx::query_as(
@@ -18511,12 +18734,12 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = upgraded._pool.as_ref().expect("upgraded pool");
-        validate_schema_contract(pool, 36)
+        validate_schema_contract(pool, 38)
             .await
-            .expect("schema 36 contract");
+            .expect("schema 38 contract");
         verify_integrity(pool).await.expect("schema 25 integrity");
         let facts_after: (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT COUNT(*) FROM contests), \
@@ -18963,7 +19186,7 @@ mod tests {
         let upgraded = start_database(directory.path()).await;
         assert_eq!(
             upgraded.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let restored = upgraded
             .load_today_snapshot(day)
@@ -18998,7 +19221,7 @@ mod tests {
             .file_name()
             .expect("backup filename")
             .to_string_lossy()
-            .starts_with("schema-10-to-36-"));
+            .starts_with("schema-10-to-38-"));
     }
 
     #[tokio::test]
@@ -24319,7 +24542,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
     }
 
@@ -24389,7 +24612,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -24422,7 +24645,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = restarted._pool.as_ref().expect("ready database pool");
         let (status, resolved_at, current_digest): (String, Option<String>, String) =
@@ -24467,7 +24690,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let (status, stored_digest): (String, String) = sqlx::query_as(
             "SELECT co.operation_status, fb.content_digest \
@@ -24632,7 +24855,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
     }
 
@@ -24844,7 +25067,7 @@ mod tests {
             .await
             .expect("older restore candidate preview");
         assert_eq!(preview.schema_version, 22);
-        assert_eq!(preview.supported_schema_version, 36);
+        assert_eq!(preview.supported_schema_version, 38);
         assert!(preview.migration_required);
         assert!(!preview.overwrites_markdown);
     }
@@ -25326,7 +25549,7 @@ mod tests {
         let restarted = start_database(directory.path()).await;
         assert_eq!(
             restarted.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let restored_budget: Option<i64> =
             sqlx::query_scalar("SELECT budget_minutes FROM weekly_acm_budgets WHERE weekday = 1")
@@ -25418,7 +25641,7 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(
-                |name| name.starts_with(&format!("daily-{}-schema-36-", today.to_iso_string()))
+                |name| name.starts_with(&format!("daily-{}-schema-38-", today.to_iso_string()))
             ));
         let backup_pool = connect_read_only(&published[0])
             .await
@@ -25678,7 +25901,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
 
         let backup_directory = directory.path().join("backups").join("pre-migration");
@@ -25712,7 +25935,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let runtime_pool = runtime._pool.as_ref().expect("migrated database pool");
         let workspace_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_settings")
@@ -26529,7 +26752,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
 
         let blocked = acquire_startup_lock(directory.path(), Duration::from_millis(75)).await;
@@ -26960,7 +27183,7 @@ mod tests {
         let runtime = start_database(directory.path()).await;
         assert_eq!(
             runtime.status(),
-            &StartupGateStatus::Ready { schema_version: 36 }
+            &StartupGateStatus::Ready { schema_version: 38 }
         );
         let pool = runtime._pool.as_ref().expect("ready pool");
         sqlx::raw_sql(

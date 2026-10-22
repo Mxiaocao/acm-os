@@ -2230,6 +2230,7 @@ pub async fn save_contest_ai_analysis(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SingleProblemInput {
+    completion_date: Option<String>,
     mode: String,
     request_id: String,
     title: String,
@@ -2277,6 +2278,10 @@ pub async fn import_single_problem(
     use acm_os_application::{ContestImportSource, single_problem::{SingleProblemDraft, SingleProblemPort}};
     let manager = manager.inner().as_ref().map_err(|e| e.code())?;
     let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    let completion_date = input.completion_date.as_deref().map(|date|
+        acm_os_application::learning_calendar::parse_completion_date(date, command_local_date().map_err(|_| "local_calendar_unavailable")?)
+            .map_err(completion_date_error)
+    ).transpose()?;
     let source = input.source_url.trim();
     let url = if source.is_empty() { None } else {
         if source.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err("single_problem_invalid_url"); }
@@ -2285,7 +2290,7 @@ pub async fn import_single_problem(
         url.set_fragment(None);
         Some(url)
     };
-    let draft = match input.mode.as_str() {
+    let mut draft = match input.mode.as_str() {
         "codeforces" => {
             let identity = codeforces_single_identity(url.as_ref().ok_or("single_problem_invalid_codeforces_url")?)?;
             let adapter = acm_os_infrastructure::codeforces::CodeforcesHttpAdapter::new().map_err(|_| "single_problem_remote_unavailable")?;
@@ -2304,6 +2309,7 @@ pub async fn import_single_problem(
         }
         _ => return Err("single_problem_invalid_input"),
     };
+    draft.completion_date = completion_date;
     let id = database.inner().import_single_problem(&draft).await.map_err(|e| e.code())?;
     Ok(SingleProblemResultDto { problem_id: id.to_string() })
 }
@@ -2348,6 +2354,7 @@ pub async fn lightweight_problems(
 pub struct ProblemLibraryInput {
     contest_id: u64,
     problem_ids: Vec<i64>,
+    completion_date: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2413,8 +2420,12 @@ pub async fn add_problem_library_items(
         .map_err(|e| e.code())?;
     let contest = acm_os_domain::CodeforcesContestIdentity::new(input.contest_id)
         .map_err(|_| "invalid_contest_identity")?;
+    let completion_date = input.completion_date.as_deref().map(|date|
+        acm_os_application::learning_calendar::parse_completion_date(date, command_local_date().map_err(|_| "local_calendar_unavailable")?)
+            .map_err(completion_date_error)
+    ).transpose()?;
     database
-        .add_problem_library_items(&contest, &input.problem_ids)
+        .add_problem_library_items_on_date(&contest, &input.problem_ids, completion_date)
         .await
         .map_err(|error| match error {
             acm_os_application::ContestReadError::NotFound => "library_selection_invalid",
@@ -2655,6 +2666,54 @@ pub struct LearningCalendarInput {
     pub month: u32,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCompletionDateDto {
+    problem_id: String,
+    problem_title: String,
+    date: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveCompletionDateInput { problem_id: String, date: String }
+
+fn completion_date_error(error: acm_os_application::learning_calendar::CompletionDateError) -> &'static str {
+    use acm_os_application::learning_calendar::CompletionDateError;
+    match error {
+        CompletionDateError::InvalidDate => "invalid_completion_date",
+        CompletionDateError::NotFound => "completion_problem_not_found",
+        CompletionDateError::Unavailable => "completion_date_unavailable",
+    }
+}
+
+#[tauri::command]
+pub async fn library_completion_dates(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+) -> Result<Vec<LibraryCompletionDateDto>, &'static str> {
+    use acm_os_application::learning_calendar::LearningCalendarPort;
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    database.inner().library_completion_dates().await.map(|rows| rows.into_iter().map(|r| LibraryCompletionDateDto {
+        problem_id: r.problem_id.to_string(), problem_title: r.problem_title, date: r.date,
+    }).collect()).map_err(completion_date_error)
+}
+
+#[tauri::command]
+pub async fn save_library_completion_date(
+    manager: tauri::State<'_, crate::vault_ipc::DesktopVaultManager>,
+    vault_context: acm_os_infrastructure::vault_manager::VaultContext,
+    input: SaveCompletionDateInput,
+) -> Result<(), &'static str> {
+    let manager = manager.inner().as_ref().map_err(|e| e.code())?;
+    let database = manager.database(&vault_context).await.map_err(|e| e.code())?;
+    let id: i64 = input.problem_id.parse().map_err(|_| "invalid_problem_id")?;
+    if id <= 0 { return Err("invalid_problem_id"); }
+    let today = command_local_date().map_err(|_| "local_calendar_unavailable")?;
+    acm_os_application::learning_calendar::save_completion_date(database.inner(), id, &input.date, today).await.map_err(completion_date_error)
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LearningCalendarEntryDto {
@@ -2672,6 +2731,7 @@ pub struct LearningCalendarEntryDto {
 pub struct LearningCalendarDto {
     pub today: String,
     pub entries: Vec<LearningCalendarEntryDto>,
+    pub participations: Vec<crate::participation_ipc::ParticipationDto>,
 }
 
 #[tauri::command]
@@ -2681,6 +2741,7 @@ pub async fn learning_calendar(
     input: LearningCalendarInput,
 ) -> Result<LearningCalendarDto, &'static str> {
     use acm_os_application::learning_calendar::{calendar_month_range, LearningCalendarPort};
+    use acm_os_application::contest_participation::ContestParticipationPort;
     let (start, end) =
         calendar_month_range(input.year, input.month).map_err(|_| "invalid_calendar_month")?;
     let manager = manager.inner().as_ref().map_err(|e| e.code())?;
@@ -2695,6 +2756,8 @@ pub async fn learning_calendar(
         .await
         .map_err(today_error_code)?;
     Ok(LearningCalendarDto {
+        participations: database.inner().calendar_contest_participations(start, end).await
+            .map_err(crate::participation_ipc::error_code)?.into_iter().map(crate::participation_ipc::dto).collect(),
         today: today.to_iso_string(),
         entries: entries
             .into_iter()

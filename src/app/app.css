@@ -468,6 +468,8 @@ ul.detail-list li > div { min-width: 0; overflow-wrap: anywhere; }
 .manual-import-form > fieldset,
 .manual-import-form > .action-row { grid-column: 1 / -1; }
 
+.manual-import-form.library-completion-date { grid-template-columns: minmax(0, 320px); padding: 16px 0; }
+
 .manual-import-form > p {
   margin-bottom: 2px;
   color: var(--ink-muted);

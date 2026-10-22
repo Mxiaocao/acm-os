@@ -127,8 +127,8 @@ export function previewProblemLibrary(contestId: number): Promise<ProblemLibrary
   return invoke("preview_problem_library", { input: { contestId, problemIds: [] } });
 }
 
-export function addProblemLibraryItems(contestId: number, problemIds: number[]): Promise<void> {
-  return invoke("add_problem_library_items", { input: { contestId, problemIds } });
+export function addProblemLibraryItems(contestId: number, problemIds: number[], completionDate: string): Promise<void> {
+  return invoke("add_problem_library_items", { input: { contestId, problemIds, completionDate } });
 }
 
 export type StatementReadStateDto =

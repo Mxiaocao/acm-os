@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "acm-os"
-version = "0.1.1"
+version = "0.1.2"
 description = "ACM-OS desktop application"
 authors = ["ACM-OS contributors"]
 edition = "2021"

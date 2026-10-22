@@ -6,6 +6,7 @@ export interface IndependentProblemDto {
   problemId: string; title: string; sourceUrl: string; rating: number | null; hasStatementSnapshot: boolean;
 }
 export interface SingleProblemInput {
+  completionDate: string;
   mode: "manual" | "codeforces"; requestId: string; title: string; sourceUrl: string;
   rating: number | null; statementText: string;
 }

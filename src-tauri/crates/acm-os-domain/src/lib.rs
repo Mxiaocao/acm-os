@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod identity;
+pub mod contest_participation;
 
 pub use identity::{
     ContestIdentity, ExternalContestKey, GenericIdentityError, PlatformKey, ProblemIdentity,

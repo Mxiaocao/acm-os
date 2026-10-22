@@ -1,4 +1,5 @@
 mod ipc;
+mod participation_ipc;
 mod vault_ipc;
 mod vault_watcher;
 
@@ -114,6 +115,11 @@ pub fn run() {
             ipc::update_problem_mastery_evidence_by_id,
             ipc::today_snapshot,
             ipc::learning_calendar,
+            ipc::library_completion_dates,
+            ipc::save_library_completion_date,
+            participation_ipc::contest_participations,
+            participation_ipc::save_contest_participation,
+            participation_ipc::delete_contest_participation,
             ipc::weekly_acm_budget,
             ipc::save_weekly_acm_budget,
             ipc::reorder_today,

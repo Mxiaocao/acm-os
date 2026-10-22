@@ -2,6 +2,7 @@
 
 pub mod codeforces;
 pub mod learning_calendar;
+pub mod contest_participation;
 pub mod single_problem;
 
 use std::path::{Component, Path};
@@ -3407,6 +3408,16 @@ pub trait ProblemLibraryPort {
         &self,
         contest: &acm_os_domain::CodeforcesContestIdentity,
         problem_ids: &[i64],
+    ) -> Result<(), ContestReadError> {
+        self.add_problem_library_items_on_date(contest, problem_ids, None).await
+    }
+
+    /// The chosen date applies only to new members; retries preserve existing dates.
+    async fn add_problem_library_items_on_date(
+        &self,
+        contest: &acm_os_domain::CodeforcesContestIdentity,
+        problem_ids: &[i64],
+        completion_date: Option<acm_os_domain::LocalDate>,
     ) -> Result<(), ContestReadError>;
 }
 

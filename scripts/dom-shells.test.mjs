@@ -362,7 +362,7 @@ async function settle() {
   });
 }
 
-async function renderApp(ipc, pathname = "/", strict = false, shelfWidth = 699, calendarIpc = null, independentIpc = null) {
+async function renderApp(ipc, pathname = "/", strict = false, shelfWidth = 699, calendarIpc = null, independentIpc = null, participationIpc = null) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     url: `https://acm-os.test${pathname}`,
   });
@@ -402,6 +402,7 @@ async function renderApp(ipc, pathname = "/", strict = false, shelfWidth = 699, 
   const { clearMocks, mockIPC } = await import("@tauri-apps/api/mocks");
   mockIPC((command, args) => {
     if (command === "learning_calendar") return calendarIpc ? calendarIpc(args) : { today: "2026-08-11", entries: [] };
+    if (command === "contest_participations") return participationIpc ? participationIpc(args) : [];
     if (command === "independent_problems") return independentIpc ? independentIpc(args) : [];
     if (command === "vault_manager_status") return managerFixture;
     if (command === "plugin:event|listen") return 1;
@@ -3540,8 +3541,15 @@ test("Problem library selection marks membership, batches only checked items, an
     assert.equal(inputs[1].checked, false);
     assert.equal(inputs[2].checked, false);
     await act(async () => inputs[1].click());
+    const completionInput = panel.querySelector('input[type="date"]');
+    assert.match(completionInput.value, /^\d{4}-\d{2}-\d{2}$/);
+    await act(async () => { completionInput.value = "9998-12-31"; completionInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "加入我的题库（1）").click());
+    assert.equal(added.length, 0);
+    assert.match(panel.textContent, /不晚于今天/);
+    await act(async () => { completionInput.value = "2026-09-30"; completionInput.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
     await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "加入我的题库（1）").click()); await settle();
-    assert.deepEqual(added, [{ contestId: 1979, problemIds: [2] }]);
+    assert.deepEqual(added, [{ contestId: 1979, problemIds: [2], completionDate: "2026-09-30" }]);
     assert.equal(panel.querySelectorAll('input[type="checkbox"]')[1].disabled, true);
     await act(async () => [...panel.querySelectorAll("button")].find((b) => b.textContent === "完成").click());
     await act(async () => open().click()); await settle();
@@ -3553,6 +3561,172 @@ test("Problem library selection marks membership, batches only checked items, an
   } finally { await view.cleanup(); }
 });
 
+
+test("Contest participation supports manual VP, edits, retry-safe saves and confirmed removal", { concurrency: false }, async () => {
+  let records = [];
+  const saves = [];
+  let failSave = true;
+  let resolveSave;
+  const detail = { contestId: 1979, title: "Participation round", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2020-01-01", importStatus: "complete", factsStatus: "pending", problems: [], corrections: [], aiAnalysis: null, archived: false };
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+    if (command === "contest_detail") return detail;
+    if (command === "contest_library_list_placements") return [];
+    if (command === "save_contest_participation") {
+      saves.push(args.input);
+      if (failSave) return Promise.reject("participation_unavailable");
+      return new Promise(resolve => { resolveSave = () => { records = [{ ...args.input, contestId: "1979", contestTitle: detail.title }]; resolve(null); }; });
+    }
+    if (command === "delete_contest_participation") { records = []; return null; }
+    throw Error(`unexpected command ${command}`);
+  }, "/contests/1979", false, 699, null, null, () => records);
+  try {
+    await settle();
+    const panel = () => view.document.querySelector(".contest-participations");
+    const button = label => [...panel().querySelectorAll("button")].find(node => node.textContent === label);
+    assert.match(panel().textContent, /尚未记录参赛/);
+    await act(async () => button("记录参赛").click());
+    const form = () => panel().querySelector("form");
+    const select = form().querySelector("select");
+    assert.equal(view.document.activeElement, select);
+    await act(async () => { select.value = "virtual"; select.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    const fill = async (selector, value) => {
+      const input = form().querySelector(selector);
+      await act(async () => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    };
+    await fill('[type="date"]', "2026-10-15");
+    await fill('[type="time"]', "23:30");
+    await fill('[type="number"]', "3");
+    await fill('fieldset label:last-child input', "7");
+    const submit = async () => act(async () => form().dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    await submit(); await settle();
+    assert.match(panel().textContent, /操作未确认成功/);
+    assert.equal(saves[0].kind, "virtual");
+    assert.equal(saves[0].localDate, "2026-10-15", "original contest date is not used for VP");
+    assert.equal(saves[0].localTime, "23:30");
+    failSave = false;
+    await submit();
+    assert.equal(button("保存中…").disabled, true);
+    await submit();
+    assert.equal(saves.length, 2, "busy save cannot be submitted twice");
+    assert.equal(saves[0].id, saves[1].id, "failed save retry keeps its record identity");
+    await act(async () => resolveSave()); await settle();
+    assert.match(panel().textContent, /VP.*2026-10-15 23:30.*赛内AC 3/);
+    await act(async () => button("修改记录").click());
+    const editSelect = form().querySelector("select");
+    await act(async () => { editSelect.value = "live"; editSelect.dispatchEvent(new view.window.Event("change", { bubbles: true })); });
+    await submit(); await act(async () => resolveSave()); await settle();
+    assert.equal(saves[2].id, saves[1].id);
+    assert.equal(saves[2].kind, "live");
+    await act(async () => button("删除记录").click());
+    assert.equal(records.length, 1, "opening delete confirmation does not remove history");
+    await act(async () => button("取消").click());
+    assert.equal(records.length, 1);
+    await act(async () => button("删除记录").click());
+    await act(async () => button("确认删除参赛记录").click()); await settle();
+    assert.equal(records.length, 0);
+    assert.match(panel().textContent, /尚未记录参赛/);
+  } finally { await view.cleanup(); }
+});
+
+test("Learning calendar adjusts a late entry across months, retries failures and prevents duplicate saves", { concurrency: false }, async () => {
+  let date = "2026-10-20";
+  let writes = 0;
+  let failSave = true;
+  let release;
+  const view = await renderApp((command, args) => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+    if (command === "library_completion_dates") return [{ problemId: "51", problemTitle: "Late problem", date }, { problemId: "52", problemTitle: "Other problem", date: null }];
+    if (command === "save_library_completion_date") {
+      writes++;
+      assert.equal(args.input.problemId, "51");
+      assert.equal(args.input.date, "2026-09-30");
+      assert.ok(args.vaultContext, "writes must carry the vault context");
+      if (failSave) throw "completion_date_unavailable";
+      return new Promise(resolve => { release = () => { date = args.input.date; resolve(null); }; });
+    }
+    throw Error(`unexpected command ${command}`);
+  }, "/calendar", false, 699, ({ input }) => ({ today: "2026-10-22", entries: [
+    { date, problemId: "51", problemTitle: "Late problem", kind: "library_added", status: "completed", dueDate: null, judgement: null },
+    { date: "2026-09-30", problemId: "51", problemTitle: "Late problem", kind: "study", status: "completed", dueDate: null, judgement: null },
+  ].filter(entry => Number(entry.date.slice(5, 7)) === input.month) }));
+  try {
+    await settle();
+    const root = view.document.querySelector(".learning-calendar");
+    await act(async () => root.querySelector('[data-calendar-date="2026-10-20"]').click());
+    await act(async () => root.querySelector(".calendar-edit-date").click()); await settle();
+    const form = () => root.querySelector(".calendar-completion-form");
+    assert.equal(form().querySelector("select").value, "51");
+    assert.equal(form().querySelector('[type="date"]').max, "2026-10-22");
+    const input = async (selector, value) => act(async () => {
+      const node = form().querySelector(selector);
+      Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(node, value);
+      node.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
+    await input('[type="search"]', "Late");
+    assert.equal(form().querySelectorAll("option").length, 2);
+    await input('[type="date"]', "2026-10-23");
+    await act(async () => form().dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true })));
+    assert.equal(writes, 0);
+    assert.match(form().textContent, /不晚于今天/);
+    await input('[type="date"]', "2026-09-30");
+    await act(async () => form().dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.equal(writes, 1);
+    assert.match(form().textContent, /输入已保留/);
+    assert.equal(form().querySelector('[type="date"]').value, "2026-09-30");
+    failSave = false;
+    await act(async () => {
+      form().dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+      form().dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    assert.equal(writes, 2);
+    assert.equal(form().querySelector('[type="submit"]').disabled, true);
+    assert.equal([...form().querySelectorAll("button")].find(b => b.textContent === "取消").disabled, true);
+    await act(async () => release()); await settle();
+    assert.equal(form(), null);
+    assert.match(root.querySelector("h2").textContent, /2026 年 9 月/);
+    assert.equal(root.querySelector('[data-calendar-date="2026-09-30"]').getAttribute("aria-pressed"), "true");
+    assert.match(root.querySelector(".calendar-overview").textContent, /本月做题 1 道/);
+    assert.equal(root.querySelectorAll(".calendar-problem-link").length, 1, "same-day activities still deduplicate");
+    assert.match(root.textContent, /做题日期已保存/);
+    const next = [...root.querySelectorAll("button")].find(b => b.getAttribute("aria-label") === "下个月");
+    await act(async () => next.click()); await settle();
+    assert.match(root.querySelector(".calendar-overview").textContent, /本月做题 0 道/);
+    await act(async () => root.querySelector('[data-calendar-date="2026-10-23"]').click());
+    assert.equal([...root.querySelectorAll("button")].find(b => b.textContent === "补录 / 调整做题日期").disabled, true);
+  } finally { await view.cleanup(); }
+});
+
+test("Learning calendar counts repeated VP separately, preserves daily problem totals and links contests", { concurrency: false }, async () => {
+  const base = { contestId: "1979", contestTitle: "Training round", localDate: "2026-10-15", localTime: "23:30", acceptedCount: 0, totalCount: 7 };
+  const participations = [{ ...base, id: "live", kind: "live" }, { ...base, id: "vp1", kind: "virtual", localTime: "08:30" }, { ...base, id: "vp2", kind: "virtual", localTime: "16:30" }, { ...base, id: "orphan", contestId: null, contestTitle: "Old round", kind: "virtual", localDate: "2026-10-14", acceptedCount: null }];
+  const view = await renderApp(command => {
+    if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+    if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+    if (command === "contest_detail") return { contestId: 1979, title: "Training round", sourceUrl: "https://codeforces.com/contest/1979", contestDate: "2020-01-01", importStatus: "complete", factsStatus: "pending", problems: [], corrections: [], aiAnalysis: null, archived: false };
+    if (command === "contest_library_list_placements") return [];
+    throw Error(`unexpected command ${command}`);
+  }, "/calendar", false, 699, ({ input }) => ({ today: "2026-10-15", entries: [], participations: input.month === 10 ? participations : [] }));
+  try {
+    await settle();
+    const root = view.document.querySelector(".learning-calendar");
+    assert.match(root.querySelector(".calendar-overview").textContent, /本月做题 0 道.*现场 1 场 · VP 3 场 · 共 4 次参赛/);
+    const day = root.querySelector('[data-calendar-date="2026-10-15"]');
+    assert.match(day.textContent, /现场 1 场.*VP 2 场/);
+    assert.match(day.getAttribute("aria-label"), /做题 0 道.*现场 1 场，VP 2 场/);
+    const selected = () => root.querySelector(".calendar-detail");
+    assert.equal(selected().querySelectorAll(".calendar-contest-link").length, 3);
+    assert.match(selected().textContent, /23:30.*赛内AC 0\/7/);
+    await act(async () => root.querySelector('[data-calendar-date="2026-10-14"]').click());
+    assert.match(selected().textContent, /Old round · 比赛已删除.*赛内AC未记录/);
+    assert.equal(selected().querySelectorAll("a").length, 0);
+    await act(async () => day.click());
+    await act(async () => selected().querySelector(".calendar-contest-link").click()); await settle();
+    assert.equal(view.window.location.pathname, "/contests/1979");
+  } finally { await view.cleanup(); }
+});
 
 test("Learning calendar shows history, overdue and future reviews and ignores stale month replies", { concurrency: false }, async () => {
   const snapshot = { planId: "calendar-plan", localDate: "2026-10-09", budgetMinutes: 60, plannedMinutes: 0, overBudgetMinutes: 0, reviewOnlyStreak: 0, entries: [] };
@@ -3604,7 +3778,7 @@ test("Learning calendar shows history, overdue and future reviews and ignores st
     assert.match(root.querySelector(".calendar-overview").textContent, /本月做题 3 道 · 待复习 2 道/);
     const doneLinks = detail().querySelectorAll("a.calendar-problem-link");
     assert.equal(doneLinks.length, 2, "same-day activities share one problem row");
-    assert.match(doneLinks[0].textContent, /学习完成.*加入题库.*提前检验.*部分掌握/);
+    assert.match(doneLinks[0].textContent, /学习完成.*首次做题记录.*提前检验.*部分掌握/);
     assert.equal(doneLinks[1].getAttribute("href"), "/problems/id/54");
     assert.match(doneLinks[1].textContent, /Just added.*查看题解/);
     assert.doesNotMatch(detail().textContent, /Next cold start/);
@@ -3756,10 +3930,18 @@ test("Single problem import accepts a book exercise without a contest and blocks
     assert.equal(view.document.querySelector('.empty-state'),null);
     const form=view.document.querySelector('form[aria-label="单题导入"]');
     const field=(text)=>[...form.querySelectorAll('label')].find(label=>label.textContent.startsWith(text)).querySelector('input,textarea');
+    assert.match(field('实际做题日期').value, /^\d{4}-\d{2}-\d{2}$/);
     await act(async()=>{field('题目标题').value='My book exercise';field('题目标题').dispatchEvent(new view.window.Event('input',{bubbles:true}));field('题面正文').value='Find x';field('题面正文').dispatchEvent(new view.window.Event('input',{bubbles:true}));});
+    await act(async()=>{field('实际做题日期').value='9998-12-31';field('实际做题日期').dispatchEvent(new view.window.Event('input',{bubbles:true}));});
+    await act(async()=>form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true})));
+    assert.equal(calls.length, 0);
+    assert.match(form.textContent, /不晚于今天/);
+    await act(async()=>{field('实际做题日期').value='2026-09-30';field('实际做题日期').dispatchEvent(new view.window.Event('input',{bubbles:true}));});
     await act(async()=>{form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true}));form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true}));});
     assert.equal(calls.length,1);
     assert.equal(calls[0].mode,'manual');assert.equal(calls[0].title,'My book exercise');assert.equal(calls[0].sourceUrl,'');assert.equal(calls[0].statementText,'Find x');
+    assert.equal(calls[0].completionDate,'2026-09-30');
+    assert.equal(field('实际做题日期').disabled, true);
     assert.equal('contestId' in calls[0],false);
     assert.match(calls[0].requestId,/^[0-9a-f-]{36}$/);
     await act(async()=>finish({problemId:'88'}));await settle();
@@ -3782,11 +3964,15 @@ test("Single problem link import validates its URL and preserves the input after
     const root=view.document.querySelector('.single-problem-import');
     await act(async()=>[...root.querySelectorAll('button')].find(button=>button.textContent==='Codeforces 题目链接').click());
     const form=root.querySelector('form');const input=form.querySelector('input[type="url"]');
+    const dateInput=form.querySelector('input[type="date"]');
+    await act(async()=>{dateInput.value='2026-09-30';dateInput.dispatchEvent(new view.window.Event('input',{bubbles:true}));});
     const setUrl=async(value)=>act(async()=>{input.value=value;input.dispatchEvent(new view.window.Event('input',{bubbles:true}));});
     const submit=async()=>{await act(async()=>form.dispatchEvent(new view.window.Event('submit',{bubbles:true,cancelable:true})));await settle();};
     await setUrl('https://example.com/problem/1');await submit();assert.equal(calls.length,0);
     await setUrl('https://codeforces.com/problemset/problem/1900/A');await submit();assert.equal(calls.length,1);
     assert.equal(calls[0].mode,'codeforces');assert.match(root.textContent,/自动获取题面失败/);
+    assert.equal(calls[0].completionDate,'2026-09-30');
+    assert.equal(dateInput.value,'2026-09-30');
     assert.equal(input.value,'https://codeforces.com/problemset/problem/1900/A');
     await submit();assert.equal(calls.length,2);assert.equal(calls[1].requestId,calls[0].requestId);
   }finally{await view.cleanup();}

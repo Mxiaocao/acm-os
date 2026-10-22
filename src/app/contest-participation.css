@@ -1,0 +1,10 @@
+.participation-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.participation-heading h2 { margin: 0; }
+.participation-list { padding: 0; margin: 16px 0; list-style: none; }
+.participation-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.participation-list li > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.participation-list time, .participation-list span { color: var(--ink-muted); font-size: .85rem; }
+.participation-form { margin-top: 20px; }
+.participation-form fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.participation-form label { display: grid; gap: 8px; min-width: 0; }
+.participation-form input, .participation-form select { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }

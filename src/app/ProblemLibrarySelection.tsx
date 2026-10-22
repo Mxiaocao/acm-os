@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { addProblemLibraryItems, previewProblemLibrary, type ProblemLibraryPreviewDto } from "../ipc/contest";
+import { calendarDateKey } from "./calendar-dates";
 
 export function ProblemLibrarySelection({ contestId, onClose }: { contestId: number; onClose: () => void }) {
   const [preview, setPreview] = useState<ProblemLibraryPreviewDto | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
+  const [completionDate, setCompletionDate] = useState(() => calendarDateKey(new Date()));
+  const today = calendarDateKey(new Date());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -13,7 +16,7 @@ export function ProblemLibrarySelection({ contestId, onClose }: { contestId: num
   useEffect(() => {
     let active = true;
     heading.current?.focus();
-    setPreview(null); setSelected([]); setError(null); setMessage(null);
+    setPreview(null); setSelected([]); setError(null); setMessage(null); setCompletionDate(calendarDateKey(new Date()));
     previewProblemLibrary(contestId).then((value) => { if (active) setPreview(value); })
       .catch(() => { if (active) setError("比赛已保存，题库状态读取失败，请重试。"); });
     return () => { active = false; };
@@ -21,16 +24,18 @@ export function ProblemLibrarySelection({ contestId, onClose }: { contestId: num
 
   const add = async () => {
     if (pending.current || selected.length === 0) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(completionDate) || completionDate < "1900-01-01" || completionDate > today) { setError("请选择不晚于今天的实际做题日期。"); return; }
     pending.current = true; setBusy(true); setError(null); setMessage(null);
     try {
-      await addProblemLibraryItems(contestId, selected);
+      await addProblemLibraryItems(contestId, selected, completionDate);
       setSelected([]);
       setMessage("所选题目已加入我的题库。重复题目不会再次创建。");
       // Re-read membership: another view may have added a selected problem.
       try { setPreview(await previewProblemLibrary(contestId)); }
       catch { setPreview(null); setError("加入已完成，状态刷新失败，请重试。"); }
-    } catch {
-      setError("加入未确认，请重试；重复提交不会创建重复记录。");
+    } catch (cause) {
+      const code = typeof cause === "string" ? cause : cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
+      setError(code === "invalid_completion_date" ? "请选择不晚于今天的有效做题日期。" : "加入未确认，请重试；重复提交不会创建重复记录。");
     } finally { pending.current = false; setBusy(false); }
   };
 
@@ -39,6 +44,10 @@ export function ProblemLibrarySelection({ contestId, onClose }: { contestId: num
     <p>比赛题目已保存在比赛库。勾选你想学习、记录和管理的题目，再加入个人题库。</p>
     {preview ? <>
       <h3>{preview.title}</h3><p>共 {preview.problems.length} 道比赛题</p>
+      <div className="manual-import-form library-completion-date">
+        <label>实际做题日期<input type="date" required min="1900-01-01" max={today} disabled={busy} value={completionDate} onInput={event => setCompletionDate(event.currentTarget.value)} /></label>
+        <p>默认今天，本次新加入的题目使用同一日期。不同日期做的题可分批加入，已入库题目的日期保持原样。</p>
+      </div>
       <ul className="detail-list">{preview.problems.map((item) => <li key={item.problemId}>
         <label><input type="checkbox" disabled={busy || item.alreadyAdded}
           checked={item.alreadyAdded || selected.includes(item.problemId)}

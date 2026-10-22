@@ -2,6 +2,7 @@ use crate::{ContestProblemSlotDraft, StatementAssetDraft, StatementSnapshotDraft
 
 #[derive(Debug, Clone)]
 pub struct SingleProblemDraft {
+    pub completion_date: Option<acm_os_domain::LocalDate>,
     pub platform: String,
     pub scope: String,
     pub key: String,
@@ -43,6 +44,7 @@ impl SingleProblemDraft {
         let key = source_url.clone();
         let escaped = statement.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;").replace("\r\n", "\n").replace('\n', "<br>");
         Ok(Self {
+            completion_date: None,
             platform: "independent".into(), scope: "source".into(), key,
             title: title.trim().into(), source_url, rating, source_html: statement.trim().into(),
             sanitized_html: format!("<div class=\"problem-statement manual-statement\"><p>{escaped}</p></div>"), assets: Vec::new(),
@@ -52,6 +54,7 @@ impl SingleProblemDraft {
     pub fn from_codeforces(slot: &ContestProblemSlotDraft, snapshot: StatementSnapshotDraft) -> Result<Self, SingleProblemError> {
         if slot.problem != snapshot.problem { return Err(SingleProblemError::InvalidInput); }
         Ok(Self {
+            completion_date: None,
             platform: "codeforces".into(), scope: slot.problem.contest().contest_id().to_string(), key: slot.problem.index().into(),
             title: slot.title.clone(), source_url: slot.source_url.clone(), rating: slot.rating,
             source_html: snapshot.source_html, sanitized_html: snapshot.sanitized_html, assets: snapshot.assets,

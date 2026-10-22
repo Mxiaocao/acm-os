@@ -1,6 +1,7 @@
 import { useRef, useState, type FormEvent } from "react";
 import { v7 as uuid } from "uuid";
 import { importSingleProblem } from "../ipc/single-problem";
+import { calendarDateKey } from "./calendar-dates";
 
 export function SingleProblemImport({ onImported }: { onImported: (problemId: string) => Promise<void> }) {
   const [mode, setMode] = useState<"manual" | "codeforces">("manual");
@@ -8,6 +9,8 @@ export function SingleProblemImport({ onImported }: { onImported: (problemId: st
   const [sourceUrl, setSourceUrl] = useState("");
   const [rating, setRating] = useState("");
   const [statement, setStatement] = useState("");
+  const [completionDate, setCompletionDate] = useState(() => calendarDateKey(new Date()));
+  const today = calendarDateKey(new Date());
   const [busy, setBusy] = useState(false);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +22,7 @@ export function SingleProblemImport({ onImported }: { onImported: (problemId: st
     const source = sourceUrl.trim();
     let numericRating: number | null = null;
     if (!savedId) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(completionDate) || completionDate < "1900-01-01" || completionDate > today) { setError("请选择不晚于今天的实际做题日期。"); return; }
       if (mode === "manual" && (!title.trim() || !statement.trim())) { setError("请填写题目标题和题面正文。"); return; }
       if (source || mode === "codeforces") {
         try {
@@ -41,14 +45,15 @@ export function SingleProblemImport({ onImported }: { onImported: (problemId: st
     let persistedId = savedId;
     try {
       if (!persistedId) {
-        const result = await importSingleProblem({ mode, requestId: requestId.current, title: title.trim(), sourceUrl: source, rating: numericRating, statementText: statement.trim() });
+        const result = await importSingleProblem({ mode, requestId: requestId.current, title: title.trim(), sourceUrl: source, rating: numericRating, statementText: statement.trim(), completionDate });
         persistedId = result.problemId; setSavedId(persistedId);
       }
       await onImported(persistedId);
-      setSavedId(null); setTitle(""); setStatement(""); setSourceUrl(""); setRating(""); requestId.current = uuid();
+      setSavedId(null); setTitle(""); setStatement(""); setSourceUrl(""); setRating(""); setCompletionDate(calendarDateKey(new Date())); requestId.current = uuid();
     } catch (cause) {
       const code = typeof cause === "string" ? cause : cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "unknown";
       const messages: Record<string, string> = {
+        invalid_completion_date: "请选择不晚于今天的有效做题日期。",
         single_problem_invalid_input: "请检查标题、题面和难度后重试。",
         single_problem_invalid_url: "题目链接格式不正确，请使用 HTTP 或 HTTPS 链接。",
         single_problem_invalid_codeforces_url: "请填写 Codeforces 单道题目的链接。",
@@ -71,6 +76,8 @@ export function SingleProblemImport({ onImported }: { onImported: (problemId: st
       {mode === "manual" ? <><p>适用于其他平台、书本或自拟题。来源链接可留空。</p>
         <label>题目标题<input disabled={locked} maxLength={200} onInput={(event) => setTitle(event.currentTarget.value)} required value={title} /></label></> : <p>仅获取这一道题的题面。支持题库链接和比赛中的单题链接。</p>}
       <label>{mode === "manual" ? "来源链接（可选）" : "Codeforces 题目链接"}<input disabled={locked} onInput={(event) => setSourceUrl(event.currentTarget.value)} placeholder={mode === "manual" ? "可留空" : "https://codeforces.com/problemset/problem/1900/A"} required={mode === "codeforces"} type="url" value={sourceUrl} /></label>
+      <label>实际做题日期<input type="date" required min="1900-01-01" max={today} disabled={locked} value={completionDate} onInput={event => setCompletionDate(event.currentTarget.value)} /></label>
+      <p>默认今天，补录时可改为实际做题日期。重复导入保留已有记录；需要纠正时可在学习月历中修改。</p>
       {mode === "manual" ? <><label>难度（可选）<input disabled={locked} inputMode="numeric" onInput={(event) => setRating(event.currentTarget.value)} value={rating} /></label>
         <label className="single-problem-statement">题面正文<textarea disabled={locked} maxLength={2 * 1024 * 1024} onInput={(event) => setStatement(event.currentTarget.value)} required rows={7} value={statement} /></label></> : null}
       {error ? <p role="alert">{error}</p> : null}

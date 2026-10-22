@@ -5,6 +5,10 @@ impl SingleProblemPort for DatabaseRuntime {
     async fn import_single_problem(&self, draft: &SingleProblemDraft) -> Result<i64, SingleProblemError> {
         let pool = self._pool.as_ref().ok_or(SingleProblemError::Unavailable)?;
         let today = crate::current_local_date().map_err(|_| SingleProblemError::Unavailable)?;
+        if let Some(date) = draft.completion_date {
+            acm_os_application::learning_calendar::parse_completion_date(&date.to_iso_string(), today)
+                .map_err(|_| SingleProblemError::InvalidInput)?;
+        }
         self.ensure_daily_backup(today).await.map_err(|_| SingleProblemError::Unavailable)?;
         let mut tx = pool.begin().await.map_err(|_| SingleProblemError::Unavailable)?;
         let existing: Option<i64> = sqlx::query_scalar("SELECT problem_id FROM problem_external_identities WHERE platform = ?1 AND external_contest_key = ?2 AND external_problem_key = ?3")
@@ -19,7 +23,13 @@ impl SingleProblemPort for DatabaseRuntime {
             id
         };
         sqlx::query("UPDATE problems SET deleted_at_utc = NULL WHERE id = ?1").bind(id).execute(&mut *tx).await.map_err(|_| SingleProblemError::Unavailable)?;
-        sqlx::query("INSERT OR IGNORE INTO problem_library_items (problem_id, origin) VALUES (?1, 'explicit')").bind(id).execute(&mut *tx).await.map_err(|_| SingleProblemError::Unavailable)?;
+        let member = sqlx::query("INSERT OR IGNORE INTO problem_library_items (problem_id, origin) VALUES (?1, 'explicit')").bind(id).execute(&mut *tx).await.map_err(|_| SingleProblemError::Unavailable)?;
+        if member.rows_affected() > 0 {
+            if let Some(date) = draft.completion_date {
+                sqlx::query("INSERT INTO library_completion_dates (problem_id, local_date) VALUES (?1, ?2)")
+                    .bind(id).bind(date.to_iso_string()).execute(&mut *tx).await.map_err(|_| SingleProblemError::Unavailable)?;
+            }
+        }
         let captured = sqlx::query("INSERT OR IGNORE INTO problem_statement_snapshots (problem_id, source_html, sanitized_html) VALUES (?1, ?2, ?3)")
             .bind(id).bind(&draft.source_html).bind(&draft.sanitized_html).execute(&mut *tx).await.map_err(|_| SingleProblemError::Unavailable)?;
         if captured.rows_affected() > 0 {
