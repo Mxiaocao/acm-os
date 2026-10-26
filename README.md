@@ -1,6 +1,6 @@
 # ACM-OS
 
-[下载 v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2) · [发布说明](docs/RELEASE_NOTES_v0.1.2.md)
+[下载 v0.1.3](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.3) · [发布说明](docs/RELEASE_NOTES_v0.1.3.md)
 
 开发接续入口：[项目记忆](MEMORY.md) · [开发记录](docs/DEVELOPMENT_LOG.md)。
 

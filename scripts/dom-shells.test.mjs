@@ -116,15 +116,62 @@ test("Contest AI analysis previews before explicit save and preserves failed raw
   } finally { await view.cleanup(); }
 });
 
-test("Manual Contest submits explicit identities and statement text through one command", { concurrency: false }, async () => {
+for (const route of ["/problems/1979/A", "/problems/id/42", "/contests/1979"]) {
+  test(`Original source opens through desktop IPC with failure feedback and retry (${route})`, { concurrency: false }, async () => {
+    const url = "https://codeforces.com/gym/702542/problem/A";
+    const calls = [];
+    let finish;
+    let fail = true;
+    const view = await renderApp((command, args) => {
+      if (command === "foundation_status") return { status: "ready", core: "acm-os" };
+      if (command === "app_shell_status") return { state: "normal", workspace: configuredWorkspace };
+      if (command === "lightweight_problem_detail" || command === "lightweight_problem_detail_by_id") return {
+        problemId: "42", contestId: 1979, index: "A", title: "Problem A", rating: null,
+        sourceUrl: url, statement: { state: "pending" }, identityType: "lightweight", personalNote: null,
+        lifecycle: lightweightLifecycle,
+      };
+      if (command === "contest_detail") return { contestId: 1979, title: "Round", sourceUrl: url, contestDate: null, importStatus: "complete", factsStatus: "pending", problems: [], corrections: [], aiAnalysis: null, archived: false };
+      if (command === "contest_library_list_contest_placements") return [];
+      if (command === "open_original_oj") {
+        calls.push(args.input);
+        if (fail) throw "external_open_failed";
+        return new Promise((resolve) => { finish = resolve; });
+      }
+      throw new Error(`unexpected command ${command}`);
+    }, route);
+    try {
+      await settle();
+      const link = [...view.document.querySelectorAll("a")].find((item) => item.textContent === (route.startsWith("/contests") ? "打开原比赛" : "打开原题"));
+      assert.ok(link);
+      assert.equal(link.href, url);
+      const click = () => {
+        const event = new view.window.MouseEvent("click", { bubbles: true, cancelable: true });
+        link.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
+      };
+      await act(async () => click()); await settle();
+      assert.deepEqual(calls, [{ url }]);
+      assert.match(view.document.querySelector('[role="alert"]').textContent, /系统浏览器/);
+      assert.ok(view.document.querySelector('[role="alert"]').textContent.includes(url));
+      fail = false;
+      await act(async () => { click(); click(); }); await settle();
+      assert.equal(calls.length, 2);
+      assert.equal(view.document.querySelector('[role="alert"]')?.textContent ?? null, null);
+      await act(async () => finish()); await settle();
+    } finally { await view.cleanup(); }
+  });
+}
+
+test("Manual Contest preserves failed drafts and clears all fields after a successful retry", { concurrency: false }, async () => {
   const calls = [];
+  let failImport = true;
   const view = await renderApp((command, args) => {
     if (command === "foundation_status") return { status: "ready", core: "acm-os" };
     if (command === "app_shell_status") return { state: "normal", recoveryReason: null, supportedSchemaVersion: null, foundSchemaVersion: null, workspace: configuredWorkspace };
     if (command === "contest_library_list_families") return [];
     if (command === "contest_library_list_contests") return [];
     if (command === "preview_problem_library") return { title: "Manual Round", problems: [{ problemId: 1, index: "A", title: "Manual A", alreadyAdded: false }] };
-    if (command === "import_manual_codeforces_contest") { calls.push(args.input); return { contestId: 1979, importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
+    if (command === "import_manual_codeforces_contest") { calls.push(args.input); if (failImport) throw new Error("save_failed"); return { contestId: 1979, importStatus: "complete", missingSnapshotProblems: [], failedSnapshotProblems: [] }; }
     throw new Error(`unexpected command ${command}`);
   }, "/contests");
   try {
@@ -143,11 +190,33 @@ test("Manual Contest submits explicit identities and statement text through one 
     const inputs = [...details.querySelectorAll("input")];
     const values = ["1979", "Manual Round", "2026-08-13", "A", "Manual A", "https://codeforces.com/contest/1979/problem/A"];
     await act(async () => { inputs.forEach((input, index) => { Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, values[index]); input.dispatchEvent(new view.window.Event("input", { bubbles: true })); }); const textarea = details.querySelector("textarea"); Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "x < y"); textarea.dispatchEvent(new view.window.Event("input", { bubbles: true })); });
+    await act(async () => [...details.querySelectorAll("button")].find((button) => button.textContent === "添加题目").click());
+    const secondValues = ["B", "Manual B", "https://codeforces.com/contest/1979/problem/B"];
+    await act(async () => {
+      [...details.querySelectorAll("fieldset")][1].querySelectorAll("input").forEach((input, index) => {
+        Object.getOwnPropertyDescriptor(view.window.HTMLInputElement.prototype, "value").set.call(input, secondValues[index]);
+        input.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+      });
+      const textarea = details.querySelectorAll("textarea")[1];
+      Object.getOwnPropertyDescriptor(view.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "second statement");
+      textarea.dispatchEvent(new view.window.Event("input", { bubbles: true }));
+    });
     await act(async () => details.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
     assert.equal(calls.length, 1);
+    assert.deepEqual([...details.querySelectorAll("input")].map((input) => input.value), [...values, ...secondValues]);
+    assert.deepEqual([...details.querySelectorAll("textarea")].map((input) => input.value), ["x < y", "second statement"]);
+    assert.equal(view.document.querySelector('[aria-label="加入我的题库"]'), null);
+    failImport = false;
+    await act(async () => details.querySelector("form").dispatchEvent(new view.window.Event("submit", { bubbles: true, cancelable: true }))); await settle();
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[1], calls[0]);
     assert.equal(calls[0].contestId, 1979);
     assert.equal(calls[0].problems[0].index, "A");
     assert.equal(calls[0].problems[0].statementText, "x < y");
+    assert.equal(calls[0].problems.length, 2);
+    assert.equal(details.querySelectorAll("fieldset").length, 1);
+    assert.deepEqual([...details.querySelectorAll("input")].map((input) => input.value), ["", "", "", "A", "", ""]);
+    assert.equal(details.querySelector("textarea").value, "");
     assert.equal(view.document.querySelector('[aria-label="加入我的题库"] input[type="checkbox"]').checked, false);
     assert.match(view.document.body.textContent, /已通过标准导入和题面快照契约保存/);
   } finally { await view.cleanup(); }

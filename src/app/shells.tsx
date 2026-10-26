@@ -10,6 +10,7 @@ import sakuraStudy from "../assets/sakura-study.png";
 import { LearningCalendar } from "./LearningCalendar";
 import { ProblemLibrarySelection } from "./ProblemLibrarySelection";
 import { ProblemActions } from "./ProblemActions";
+import { ExternalSourceLink } from "./ExternalSourceLink";
 import { displayPath } from "./display-path";
 import { VaultManagerPanel } from "./VaultManagerPanel";
 import {
@@ -2465,6 +2466,10 @@ function ContestLibraryPage({ navigate }: { navigate: Navigate }) {
     try {
       const contestId = Number(manualContestId);
       await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setManualContestId("");
+      setManualTitle("");
+      setManualDate("");
+      setManualProblems([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
       setLibraryContestId(contestId);
       setImportMessage(t("contest.manualSaved"));
       setRetryNonce((value) => value + 1);
@@ -2626,6 +2631,10 @@ function ContestShelf({ navigate }: { navigate: Navigate }) {
     try {
       const contestId = Number(manualContestId);
       await importManualCodeforcesContest({ contestId, title: manualTitle, sourceUrl: `https://codeforces.com/contest/${contestId}`, startsAtUtc: manualDate ? `${manualDate}T00:00:00Z` : null, problems: manualProblems });
+      setManualContestId("");
+      setManualTitle("");
+      setManualDate("");
+      setManualProblems([{ index: "A", title: "", sourceUrl: "", statementText: "" }]);
       setLibraryContestId(contestId);
       setImportMessage(t("contest.manualSaved"));
       setItems(await getContestShelf());
@@ -2880,7 +2889,7 @@ function ContestDetail({ contestId, navigate }: { contestId: number; navigate: N
     <PageHeader eyebrow="M7 · 比赛事实" headingRef={headingRef} title={detail.title} />
     <button className="secondary-action" type="button" onClick={() => setShowLibrarySelection(true)}>选择比赛题加入我的题库</button>
     {showLibrarySelection ? <ProblemLibrarySelection key={contestId} contestId={contestId} onClose={() => setShowLibrarySelection(false)} /> : null}
-    <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("contest.openOriginal")}</a></section>
+    <section className="content-panel"><p>Codeforces {detail.contestId} · {detail.contestDate ?? "日期缺失"} · {detail.importStatus === "complete" ? "导入完整" : "导入不完整"} · {detail.factsStatus === "completed" ? "赛后整理已完成" : "待赛后整理"}</p><ExternalSourceLink url={detail.sourceUrl}>{t("contest.openOriginal")}</ExternalSourceLink></section>
     <ContestPlacementPanel contestId={contestId} placements={placements} error={placementError} editor={placementEditor} busy={placementBusy} onRetry={loadPlacements} onEdit={setPlacementEditor} onSaved={() => { setPlacementEditor(null); loadPlacements(); }} onBusy={setPlacementBusy} />
     <ContestParticipationPanel key={"participation-" + contestId} contestId={contestId} />
     <section className="content-panel contest-management" aria-label={t("contest.management")}><h2>{t("contest.management")}</h2><div className="action-row"><button className="secondary-action" disabled={managing} onClick={() => void toggleArchive()} type="button">{detail.archived ? t("contest.restoreAction") : t("contest.archiveAction")}</button>{deletePreview ? null : <button className="danger-action" disabled={managing} onClick={() => void loadDeletePreview()} type="button">{t("contest.previewDelete")}</button>}</div>{deletePreview ? <div role="alert"><p>{t("contest.deletePreview", { title: deletePreview.contestTitle, relationships: deletePreview.relationshipCount })}</p><p>{t("contest.deletePreserve", { preserved: deletePreview.preservedProblemCount, cleanup: deletePreview.cleanupProblemCount })}</p><div className="action-row"><button className="secondary-action" onClick={() => setDeletePreview(null)} type="button">{t("common.cancel")}</button><button className="danger-action" disabled={managing} onClick={() => void confirmDelete()} type="button">{t("contest.deleteAction")}</button></div></div> : null}</section>
@@ -3239,7 +3248,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
       <PageHeader eyebrow={t("problem.canonicalEyebrow")} headingRef={headingRef} title={displayProblemTitle("", canonicalDetail.title)} />
       <section className="content-panel problem-overview">
         <p>{canonicalDetail.rating ? t("problem.rating", { rating: canonicalDetail.rating }) : ""} · {canonicalDetail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}</p>
-        {/^https?:\/\//.test(canonicalDetail.sourceUrl) ? <a href={canonicalDetail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a> : <p className="system-caption">本地录入题目</p>}
+        {/^https?:\/\//.test(canonicalDetail.sourceUrl) ? <ExternalSourceLink url={canonicalDetail.sourceUrl}>{t("problem.openOriginal")}</ExternalSourceLink> : <p className="system-caption">本地录入题目</p>}
         <ProblemActions key={problemId} value={canonicalDetail} target={{ problemId: problemId! }} onSaved={async () => setCanonicalDetail(await getCanonicalProblemDetail(problemId!))} onDeleted={() => navigate("/problems", { replace: true })} />
         {canonicalDetail.personalNote ? <p className="safe-note">{t("problem.personalMarkdown")}：<code>{canonicalDetail.personalNote.vaultRelativePath}</code></p> : null}
         {canonicalDetail.identityType === "personal" ? <p><strong>{t("problem.currentStatus")}</strong> {learningStatusLabel(canonicalDetail.lifecycle.learningStatus)}</p> : null}
@@ -3287,7 +3296,7 @@ function ProblemDetail({ contestId = 0, index = "", problemId, navigate }: { con
         Codeforces {detail.contestId}{detail.rating ? ` · ${t("problem.rating", { rating: detail.rating })}` : ""}
         {" · "}{detail.identityType === "personal" ? t("problem.personal") : t("problem.lightweight")}
       </p>
-      <a href={detail.sourceUrl} rel="noreferrer" target="_blank">{t("problem.openOriginal")}</a>
+      {/^https?:\/\//.test(detail.sourceUrl) ? <ExternalSourceLink url={detail.sourceUrl}>{t("problem.openOriginal")}</ExternalSourceLink> : <p className="system-caption">本地录入题目</p>}
       <ProblemActions key={`${contestId}/${index}`} value={detail} target={{ contestId, index }} onSaved={async () => setDetail(await getLightweightProblemDetail(contestId, index))} onDeleted={() => navigate("/problems", { replace: true })} />
     </section>
     <section className="content-panel" aria-labelledby="external-personal-note-heading">

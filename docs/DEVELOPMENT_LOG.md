@@ -2,6 +2,31 @@
 
 本文记录已完成的变化和已确认的取舍。功能当前状态以 [项目记忆](../MEMORY.md) 和源码为准。
 
+## 2026-10-26：v0.1.3 发布准备
+
+- 用户授权将两项小修复发布到 GitHub。版本统一升为 0.1.3，更新应用/Tauri/Rust workspace 与 npm/Cargo 锁文件中的项目版本；依赖声明未变，pnpm 锁文件无根项目版本字段，无需修改。README 指向新版本下载与发布说明，不覆盖旧标签或附件。
+- 本轮实际验证：`cargo test --workspace --locked --manifest-path src-tauri/Cargo.toml -j 1` 共 405 项通过、2 项真实网络用例忽略；完整 DOM 92 项、样式/可访问性/路由/日期 27 项、边界 5 项和静态检查通过。前端构建与 `npm run tauri -- build --bundles nsis --ci --config output/release/local-tools.json` release/NSIS 构建成功。先完成 native 测试再运行 DOM，结束 DOM 后正式构建，避免资源与 watcher 冲突。本轮没有依赖升级或重新宣称历史审计结果。
+- 本轮不再次替换本机正在使用的 0.1.2 修复构建；先前浏览器唤起结果保留独立记录，不称为本次 v0.1.3 的原站访问验收。未进行真实 Codeforces 网络、Obsidian 人工联动或完整桌面 E2E。构建、测试及后续附件记录位于忽略目录 `output/release-v0.1.3/`；公开发布结果另记。
+
+## 2026-10-26：两项修复正式应用到本机
+
+- 用户继续反馈原题打不开；检查确认当前进程仍是安装目录的原 v0.1.2 二进制（SHA-256 `3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`），此前两轮只修改源码，尚未实际应用。
+- 本轮重新执行 `npm run tauri -- build --no-bundle --ci`，前端与 release 构建成功。备份旧程序到 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-26-before-source-link-fix/acm-os.exe` 并核对哈希一致；旧进程响应正常关闭请求后退出，无强制结束。替换并启动原安装路径程序，安装文件与 release 构建 SHA-256 一致：`6048a9de0913d37ba3280aec181e92e6323cdcc0c570964e1a4d354d1c6f84c7`。版本保持 0.1.2，不修改 GitHub 附件或标签。
+- 实际桌面检查：UI Automation 从“比赛”进入 ZJU Summer 2026 Warmup，再进入 A. Explosion，原题链接值为 `https://codeforces.com/gym/702542/problem/A`，调用后 Chrome 被唤起，应用未显示启动浏览器失败。当前 Chrome 有 Codeforces 首页窗口（地址栏 `codeforces.com`，显示 Enter/Register），另有 Gym E 题窗口；未确认 A 题网页成功加载，登录状态或比赛权限仍需用户在浏览器内核实，未声称原站访问验证通过。
+- 本轮范围为正式构建、备份/安装文件哈希、正常关闭/重启和实际链接调用检查，未重跑前一轮 DOM/Rust 套件，未进行完整桌面 E2E、真实工作区写入验证或公开发布。未手工更改用户数据库或 Markdown。构建日志为 `output/external-source-release-build.log`。
+
+## 2026-10-26：原题链接交给系统浏览器打开
+
+- 用户反馈题目详情“打开原题”经常无响应。源码中两种题目详情路由及比赛详情使用普通 `target="_blank"` 链接，未接入已有桌面 opener；复习页已有显式 IPC。新增共用 `ExternalSourceLink`，点击时阻止 WebView 默认新窗口导航，通过原有 `open_original_oj` 命令调用系统默认浏览器，保留存储的原始 URL（包括 Gym 地址）。调用未结束时阻止重复打开，失败显示提示及可手动复制的网址，允许重试；本地无来源题隐藏原题入口。
+- 原有命令从仅允许 Codeforces HTTPS 调整为接受有效 HTTP/HTTPS 来源，兼容用户手动录入的其他 OJ。继续拒绝其他协议、凭据和地址中的空白/控制字符；同步复习页的链接错误文案。未新增通用文件或数据库权限，未改变工作区数据、题目身份或参赛事实。
+- 本轮实际验证（2026-10-26）：最终前端构建通过；DOM 按 `Original source|Manual Contest` 筛选 4 项通过，包含两个题目路由及比赛详情的 IPC 打开、默认导航阻止、失败网址提示、防重复打开及重试，并回归前一项手动比赛清空；Rust `cargo test --locked --manifest-path src-tauri/Cargo.toml -p acm-os --lib -j 1 original_url_validation` 1 项通过；边界 5 项及静态检查、`git diff --check` 通过。首次并行运行因本机内存/分页文件不足失败；串行排查发现新增比赛用例的分类查询 mock 命令错误，且直接比较 DOM 对象的断言耗尽内存，修正模拟与文本断言后以 Node 堆上限 4096MB 重跑 4 项全部通过。未重跑完整 DOM/Rust，未验证安装版实际启动系统浏览器或原站网络可达性，未执行桌面 E2E、release 构建、安装替换或公开发布。
+
+## 2026-10-26：手动比赛保存后清空录入内容
+
+- 用户截图指出添加比赛后原填写内容仍保留。当前比赛收藏页及旧比赛书架入口均在手动导入命令成功后清空比赛 ID、标题、日期及题目列表，恢复默认题号 A 的一张空白卡；保存失败保留全部输入，允许原内容重试。清空只在导入成功后执行，继续显示保存提示并提供已保存比赛的入库选题。
+- 改动仅涉及前端表单状态，不增加数据库迁移或修改月历统计、参赛记录和工作区隔离规则。
+- 本轮实际验证（2026-10-26）：前端构建通过；按 `Manual Contest` 筛选的 DOM 回归 1 项通过，覆盖两道题失败保留、原参数重试、成功后全部清空及恢复单卡、入库选题仍可用；架构边界 5 项测试与静态检查通过，`git diff --check` 通过。未重跑完整 DOM 或 Rust 套件，未执行桌面 E2E、release 构建、安装替换或公开发布。
+
 ## 2026-10-22：v0.1.2 已公开发布
 
 - 2026-10-22 已公开发布 [v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2) 并独立查询确认为 latest。应用和 Rust workspace 版本为 0.1.2；标签对应构建来源 `f7704201f3983fd215dfbb67d96def38952f42cf`，安装包、免安装 ZIP 和 SHA256SUMS 三个附件均已按服务器大小、uploaded 状态和 SHA-256 与本地核对。旧 v0.1.0/v0.1.1 标签和附件保持原样。Windows x64 安装包 SHA-256：`402ec767aa6fd9b67c4aca015caacabe1666d2241df84cd35d3fc1c8486fe883`；免安装 ZIP：`16625ee073a85fcde8b86bf9e2e02d724776acecc84bdbf84d328a1caa7d8672`。本机已安装并启动同一构建，当前工作区结构 38。后续仅补发布记忆与日志，不改变标签或二进制来源。

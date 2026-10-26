@@ -3437,14 +3437,24 @@ pub fn open_original_oj(
 ) -> Result<(), &'static str> {
     use tauri_plugin_opener::OpenerExt;
 
-    let url = url::Url::parse(input.url.trim()).map_err(|_| "unsafe_external_url")?;
-    let host = url.host_str().ok_or("unsafe_external_url")?;
-    if url.scheme() != "https" || !matches!(host, "codeforces.com" | "www.codeforces.com") {
-        return Err("unsafe_external_url");
-    }
+    let url = validated_original_url(&input.url)?;
     app.opener()
         .open_url(url.as_str(), None::<&str>)
         .map_err(|_| "external_open_failed")
+}
+
+fn validated_original_url(raw: &str) -> Result<url::Url, &'static str> {
+    let raw = raw.trim();
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("unsafe_external_url");
+    }
+    let url = url::Url::parse(raw).map_err(|_| "unsafe_external_url")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some()
+    {
+        return Err("unsafe_external_url");
+    }
+    Ok(url)
 }
 
 #[tauri::command]
@@ -6467,6 +6477,25 @@ fn workspace_error_dto(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_url_validation_accepts_web_sources_and_rejects_non_web_targets() {
+        for raw in [
+            "https://codeforces.com/gym/702542/problem/A",
+            "https://codeforces.com/contest/1979/problem/A",
+            "https://www.luogu.com.cn/problem/P1001",
+            "http://poj.org/problem?id=1000",
+        ] {
+            assert!(super::validated_original_url(raw).is_ok(), "{raw}");
+        }
+        for raw in [
+            "javascript:alert(1)", "file:///C:/Windows/test.txt", "obsidian://open",
+            "acmos://local-problem/1", "https://user:password@example.com/a",
+            "https://codeforces.com/a\nb", "https://codeforces.com/a b", "invalid", "",
+        ] {
+            assert_eq!(super::validated_original_url(raw), Err("unsafe_external_url"), "{raw}");
+        }
+    }
+
     use acm_os_application::{
         ActiveReviewCycle, KnownMarkdownSection, LocalStatementAsset, MarkdownParseWarning,
         PersonalNoteBinding, PersonalNoteReadState, ProblemIdentityType, ProblemLifecycleState,
