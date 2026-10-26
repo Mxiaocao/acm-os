@@ -4,6 +4,8 @@
 
 ## 1. 当前状态
 
+- 2026-10-26 已公开发布 [v0.1.3](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.3)，重新查询确认为 latest、非草稿及非预发布。源码与标签对应 `c7382405353733ecd2f6becba1714610c9b53a08`，包含手动比赛成功后清空和原题/原比赛调用系统浏览器两项修复。应用与 Rust workspace 版本 0.1.3，结构仍为 38。Windows x64 安装包、免安装 ZIP 和 SHA256SUMS 三个附件均核对服务器大小、uploaded 状态及 SHA-256；旧 v0.1.0/v0.1.1/v0.1.2 附件保持不变。安装包 SHA-256：`df410c87797610df68134391a0e0ea72055e9089594e6a51a8e310684172f67f`；ZIP：`bb4ed827385066b722ad8f158f6b8a6a70be4997b02954bb74d6d566928232ad`。正式 EXE 版本资源 0.1.3，哈希 `61940412e60e20736b2b9b6c363ac86a6f19b4f3d4de7a2760af8642e0dc0324`，与 ZIP 内程序一致。本机仍运行此前同日的 0.1.2 修复构建，本轮未再次替换安装目录；发布后文档提交不移动标签或改变二进制来源。
+
 - 2026-10-26 v0.1.3 发布准备：应用、Tauri 配置、Rust workspace 和 npm/Cargo 锁文件版本统一为 0.1.3，依赖声明未变，pnpm 锁文件无根版本字段。包含手动比赛表单清空和原题系统浏览器打开两项修复，不改变数据库结构 38。前端及 release/NSIS 构建通过；本轮完整 Rust 405 项通过（2 项真实网络忽略）、DOM 92 项、样式/可访问性/路由/日期 27 项、边界 5 项及静态检查通过。GitHub 附件上传与公开结果另记；本机保留上方记录的 0.1.2 修复构建，本轮未再次替换安装文件。
 
 - 2026-10-26 已将手动比赛成功后清空表单及原题链接系统浏览器打开的 release 构建应用到本机 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe`，SHA-256 与构建一致：`6048a9de0913d37ba3280aec181e92e6323cdcc0c570964e1a4d354d1c6f84c7`。版本仍为 0.1.2，是包含本次修复的本机构建，与 GitHub v0.1.2 附件不同；未发布新版本。旧程序正常退出，备份为 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-26-before-source-link-fix/acm-os.exe`，哈希 `3ba08eba8d673517a409cf2265630dd4ea02cebc53ad24798aa554611341827c`。已通过 UI Automation 从比赛进入 A. Explosion 并点击“打开原题”（URL 为 `https://codeforces.com/gym/702542/problem/A`），Chrome 被唤起且应用未显示浏览器启动失败；当前 Chrome 有 Codeforces 首页窗口（显示 Enter/Register），另有 Gym E 题窗口，未确认 A 题成功加载，不能将浏览器启动称为原站访问通过。未手动修改工作区数据或 Markdown。
@@ -28,7 +30,7 @@
 - 项目：面向算法竞赛和日常刷题的 Windows 桌面学习工作台。
 - 核心流程：比赛 → 赛后补题 → 个人题解 → 冷启动复习 → 长期复习；通过 Obsidian 管理 Markdown 题解与知识笔记。
 - 仓库：[Mxiaocao/acm-os](https://github.com/Mxiaocao/acm-os)，默认分支 `main`。
-- 最新发布：[v0.1.2](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.2)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件；构建源码与标签对应 `f7704201f3983fd215dfbb67d96def38952f42cf`。本机安装版本 0.1.2、当前工作区结构 38，与发布构建一致。发布后的文档提交不改变二进制或标签，旧 v0.1.1 附件保留原样。
+- 最新发布：[v0.1.3](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.3)，Windows x64 安装包、免安装 ZIP、SHA-256 校验文件；构建源码与标签对应 `c7382405353733ecd2f6becba1714610c9b53a08`。本机安装版本仍为同日已应用两项修复的 0.1.2 本机构建，当前工作区结构 38，不与 v0.1.3 二进制混同。发布后的文档提交不改变二进制或标签，旧版本附件保留原样。
 - 历史 [v0.1.0](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.0) 二进制对应 `27725d16506d9ea6d51262eae3fb214997e6879d`；发布后的完整项目介绍提交为 `712a9c6`，原标签与附件未改动。
 - 安装包尚未进行 Windows 代码签名；当前没有产品自动更新插件。
 - 2026-10-14 已将笔记改动的本地 release 构建应用到 `D:/Software/app/ACMOS/ACM-OS/acm-os.exe` 并启动；本机程序 SHA-256 为 `b8c07f5ea1b33cb34c5aa462413aeeb1aa0fdc436465fd3de5a16a4201bbcd07`。版本号仍为 0.1.0，本次没有更新 GitHub Release 附件或标签。原程序备份在 `D:/Software/app/ACMOS/ACM-OS/backups/2026-10-14-before-note-update/acm-os.exe`。
@@ -103,6 +105,8 @@
 - 后续重构、标签、统计、签名、自动更新等只是可能的改进方向，尚无新的任务授权。
 
 ## 6. 验证记录与常用命令
+
+2026-10-26 v0.1.3 发布本轮实际验证：完整锁定依赖 Rust workspace 405 项通过、2 项真实网络用例忽略；完整 DOM 92 项、样式/可访问性/路由/日期 27 项、边界 5 项及静态检查通过；前端、release/NSIS 构建通过。资源版本 0.1.3，ZIP 内容仅程序/README/VERSION，ZIP 内 EXE 哈希与构建一致；三个上传附件的大小、uploaded 状态、服务器 SHA-256 与本地一致。发布后独立查询确认为 public latest，旧三版附件保持不变。源码及 v0.1.3 标签已推送；本轮未替换本机程序，未进行真实 OJ/Obsidian 人工联动或完整桌面 E2E。记录在 `output/release-v0.1.3/`，没有将此前验证当成本轮结果。
 
 2026-10-26 本机更新本轮实际验证：重新执行 `npm run tauri -- build --no-bundle --ci`，前端及 release 构建通过；旧程序备份哈希一致、正常退出，安装文件与新构建哈希一致且启动响应正常。UI Automation 在安装版进入截图对应题目并调用原题链接，Chrome 已启动且应用未报打开失败；未确认 A 题原站内容加载成功。未重新执行上轮 DOM/Rust 套件、完整桌面 E2E、真实工作区写入验证或 GitHub 发布。日志在 `output/external-source-release-build.log`。
 
@@ -195,7 +199,7 @@ npm run tauri -- build --bundles nsis
 
 - [README](README.md)：面向用户的完整项目介绍与使用方式。
 - [开发记录](docs/DEVELOPMENT_LOG.md)：已确认的变化、关键取舍与发布经过。
-- [v0.1.1 发布说明](docs/RELEASE_NOTES_v0.1.1.md)：当前公开 Release；[v0.1.0 发布说明](docs/RELEASE_NOTES_v0.1.0.md) 保留历史产品说明。
+- [v0.1.3 发布说明](docs/RELEASE_NOTES_v0.1.3.md)：当前公开 Release；[v0.1.2](docs/RELEASE_NOTES_v0.1.2.md)、[v0.1.1](docs/RELEASE_NOTES_v0.1.1.md) 与 [v0.1.0](docs/RELEASE_NOTES_v0.1.0.md) 发布说明保留历史产品记录。
 - [架构边界](docs/architecture-boundaries.md)：分层原则；执行检查以当前脚本为准。
 - [旧实现审计](docs/ACM_OS_CURRENT_IMPLEMENTATION.md)：2026-09-22 历史快照，保留供追溯；其中单题导入、搜索、月历和未发布等结论已经过时。
 - [Vault 契约](docs/R6_VAULT_MANAGER_CONTRACT.md)、[个人题库实现报告](docs/CONTEST_PROBLEM_LIBRARY_IMPLEMENTATION_REPORT.md)：对应模块的历史契约和实现背景，需要结合当前源码阅读。

@@ -2,6 +2,13 @@
 
 本文记录已完成的变化和已确认的取舍。功能当前状态以 [项目记忆](../MEMORY.md) 和源码为准。
 
+## 2026-10-26：v0.1.3 已公开发布
+
+- [GitHub Release v0.1.3](https://github.com/Mxiaocao/acm-os/releases/tag/v0.1.3) 已公开，发布后独立查询确认为 latest、非草稿、非预发布。源码与标签对应 `c7382405353733ecd2f6becba1714610c9b53a08`，源码和注释标签已一起推送至 GitHub，未移动旧标签。
+- 发布 Windows x64 NSIS 安装包、免安装 ZIP 与 SHA256SUMS.txt。正式 EXE 资源版本为 0.1.3，SHA-256 `61940412e60e20736b2b9b6c363ac86a6f19b4f3d4de7a2760af8642e0dc0324`；ZIP 内仅含 `acm-os.exe`、README 和 VERSION，程序与构建哈希一致，没有用户工作区、Markdown 或日志。
+- 三个附件先上传到草稿，按本地大小与 SHA-256 核对服务器 uploaded 状态及摘要后公开，再独立重新查询确认。安装包 SHA-256 `df410c87797610df68134391a0e0ea72055e9089594e6a51a8e310684172f67f`；ZIP `bb4ed827385066b722ad8f158f6b8a6a70be4997b02954bb74d6d566928232ad`；校验文件 `099e55dc9127e88c46938be7b141606cac07d67e6a97a0fa26202b1d2f395fe9`。重新核对 v0.1.0/v0.1.1/v0.1.2，原附件大小与摘要均未改变。发布记录保存在 `output/release-v0.1.3/published-release.json`。
+- 本轮验证范围见下方发布准备记录。未再次替换本机正在运行的 0.1.2 修复构建，未修改真实工作区或个人 Markdown；发布后的本条文档补充不改变 v0.1.3 标签与构建来源。
+
 ## 2026-10-26：v0.1.3 发布准备
 
 - 用户授权将两项小修复发布到 GitHub。版本统一升为 0.1.3，更新应用/Tauri/Rust workspace 与 npm/Cargo 锁文件中的项目版本；依赖声明未变，pnpm 锁文件无根项目版本字段，无需修改。README 指向新版本下载与发布说明，不覆盖旧标签或附件。
